@@ -83,3 +83,67 @@ Please check documentation or samples for a complete example.
 
 * <a href="https://pypi.org/project/twisted/">Twisted</a>
 * <a href="https://pypi.org/project/protobuf/">Protobuf</a>
+
+
+---
+
+## MT5 to cTrader Copy Trading System
+
+This repository now includes a complete copy trading solution that automatically copies trades from MetaTrader 5 to cTrader.
+
+### Quick Start
+
+See [MT5_CTRADER_SETUP.md](MT5_CTRADER_SETUP.md) for complete setup instructions.
+
+### System Components
+
+1. **MT5_CopyTrader.mq5** - MQL5 Expert Advisor for MT5
+2. **mt5_bridge_server.py** - Python bridge server (Flask + OpenAPI)
+3. **ctrader_client.py** - Simplified cTrader API wrapper
+4. **test_client.py** - Authentication and connection testing
+
+### Architecture
+
+```
+MT5 Terminal → HTTP/JSON → Python Bridge → cTrader OpenAPI → cTrader Account
+```
+
+### Installation
+
+```bash
+# Clone and setup
+git clone https://github.com/navtemmt/OpenApiPy.git
+cd OpenApiPy
+
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Configure credentials
+cp .env.example .env
+# Edit .env with your cTrader API credentials
+
+# Run bridge server
+python mt5_bridge_server.py
+
+# Attach MT5_CopyTrader.mq5 to any MT5 chart
+```
+
+### Features
+
+- Real-time trade copying from MT5 to cTrader
+- Automatic synchronization of:
+  - New positions (BUY/SELL)
+  - Position modifications (SL/TP changes)
+  - Position closures
+- Magic number filtering for selective copying
+- Configurable position size multiplier
+- Symbol name mapping support
+- Comprehensive error handling and logging
+
+### Security
+
+- Credentials stored in `.env` file (not committed to repo)
+- OAuth2 authentication with cTrader
+- Secure token management
+
+For detailed setup instructions, troubleshooting, and advanced configuration, see [MT5_CTRADER_SETUP.md](MT5_CTRADER_SETUP.md).
