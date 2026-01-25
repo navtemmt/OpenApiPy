@@ -1,12 +1,15 @@
 from ctrader_open_api import Client, Protobuf, TcpProtocol, Auth, EndPoints
 from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAApplicationAuthReq
 from twisted.internet import reactor
+import sys
+
+print("Starting test_client.py...", file=sys.stderr, flush=True)
 
 HOST = EndPoints.PROTOBUF_DEMO_HOST      # or LIVE host
 PORT = EndPoints.PROTOBUF_PORT
 
-CLIENT_ID = "YOUR_CLIENT_ID"
-CLIENT_SECRET = "YOUR_CLIENT_SECRET"
+CLIENT_ID = "8224_vqoFtBR1KoifAsUWHJeN7y3h3FiY1u3VLgFKcAUY8VZyhyC2gQ
+CLIENT_SECRET = "kikw1y9OP0ZDmQ1s4suRhhtD43YmAKUDyduF81DHNrBR4QjTzh"
 
 client = Client(HOST, PORT, TcpProtocol)
 
@@ -31,5 +34,7 @@ client.setConnectedCallback(on_connected)
 client.setDisconnectedCallback(on_disconnected)
 client.setMessageReceivedCallback(on_message)
 
+print("About to start service...", file=sys.stderr, flush=True)
 client.startService()
+print("Service started, running reactor...", file=sys.stderr, flush=True)
 reactor.run()
