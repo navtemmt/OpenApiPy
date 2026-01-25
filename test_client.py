@@ -3,8 +3,12 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAApplicationAuth
 from twisted.internet import reactor
 import sys
 import os
+from dotenv import load_dotenv
 
 print("Starting test_client.py...", file=sys.stderr, flush=True)
+
+# Load environment variables from .env file
+load_dotenv()
 
 HOST = EndPoints.PROTOBUF_DEMO_HOST      # or LIVE host
 PORT = EndPoints.PROTOBUF_PORT
