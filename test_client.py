@@ -8,7 +8,7 @@ print("Starting test_client.py...", file=sys.stderr, flush=True)
 HOST = EndPoints.PROTOBUF_DEMO_HOST      # or LIVE host
 PORT = EndPoints.PROTOBUF_PORT
 
-CLIENT_ID = "8224_vqoFtBR1KoifAsUWHJeN7y3h3FiY1u3VLgFKcAUY8VZyhyC2gQ
+CLIENT_ID = "8224_vqoFtBR1KoifAsUWHJeN7y3h3FiY1u3VLgFKcAUY8VZyhyC2gQ"
 CLIENT_SECRET = "kikw1y9OP0ZDmQ1s4suRhhtD43YmAKUDyduF81DHNrBR4QjTzh"
 
 client = Client(HOST, PORT, TcpProtocol)
