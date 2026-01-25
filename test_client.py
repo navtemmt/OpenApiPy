@@ -28,7 +28,7 @@ def on_disconnected(c, reason):
     print("Disconnected:", reason)
 
 def on_message(c, message):
-        global timeout_call
+    global timeout_call
     print("Message:", Protobuf.extract(message))
         # Cancel timeout on first message
     if timeout_call and timeout_call.active():
