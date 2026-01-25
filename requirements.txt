@@ -1,0 +1,19 @@
+# MT5 to cTrader Copy Trading System Dependencies
+# Python 3.11 recommended for full compatibility
+
+# Core dependencies for cTrader Open API
+twisted>=22.10.0
+protobuf>=4.21.0
+
+# Web server for receiving MT5 signals
+Flask>=2.3.0
+Werkzeug>=2.3.0
+
+# Environment variable management
+python-dotenv>=1.0.0
+
+# Optional: For enhanced logging
+colorama>=0.4.6
+
+# Optional: For async operations
+aiohttp>=3.8.0
