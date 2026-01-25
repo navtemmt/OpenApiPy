@@ -28,7 +28,12 @@ def on_disconnected(c, reason):
     print("Disconnected:", reason)
 
 def on_message(c, message):
+        global timeout_call
     print("Message:", Protobuf.extract(message))
+        # Cancel timeout on first message
+    if timeout_call and timeout_call.active():
+        timeout_call.cancel()
+        print("Timeout cancelled, connection successful", file=sys.stderr, flush=True)
 
 client.setConnectedCallback(on_connected)
 client.setDisconnectedCallback(on_disconnected)
@@ -42,7 +47,8 @@ def timeout_check():
     print("WARNING: Connection timeout after 10s, stopping reactor", file=sys.stderr, flush=True)
     reactor.stop()
 
-reactor.callLater(10, timeout_check)
+timeout_call = None
+timeout_call = reactor.callLater(30, timeout_check)
 client.startService()
 print("Service started, running reactor...", file=sys.stderr, flush=True)
 reactor.run()
