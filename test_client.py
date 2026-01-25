@@ -34,7 +34,15 @@ client.setConnectedCallback(on_connected)
 client.setDisconnectedCallback(on_disconnected)
 client.setMessageReceivedCallback(on_message)
 
+print(f"Connecting to {HOST}:{PORT}...", file=sys.stderr, flush=True)
 print("About to start service...", file=sys.stderr, flush=True)
+
+# Add timeout to stop reactor if no connection after 10 seconds
+def timeout_check():
+    print("WARNING: Connection timeout after 10s, stopping reactor", file=sys.stderr, flush=True)
+    reactor.stop()
+
+reactor.callLater(10, timeout_check)
 client.startService()
 print("Service started, running reactor...", file=sys.stderr, flush=True)
 reactor.run()
