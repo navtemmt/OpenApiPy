@@ -52,7 +52,7 @@ def on_message(c, message):
             print("\nConnection test successful!\n")
             reactor.stop()
             return
-                req.accessToken = ACCESS_TOKEN
+            req.accessToken = ACCESS_TOKEN
         d = c.send(req)
         d.addErrback(on_error)
     
