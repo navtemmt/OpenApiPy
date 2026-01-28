@@ -16,6 +16,7 @@ PORT = EndPoints.PROTOBUF_PORT
 CLIENT_ID = os.getenv("CTRADER_CLIENT_ID")
 CLIENT_SECRET = os.getenv("CTRADER_CLIENT_SECRET")
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")  # Required to get account list
+print(f"DEBUG: ACCESS_TOKEN loaded = {ACCESS_TOKEN}", file=sys.stderr, flush=True)
 client = Client(HOST, PORT, TcpProtocol)
 
 def on_error(failure):
