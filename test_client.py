@@ -53,11 +53,12 @@ def on_message(c, message):
             print("\nConnection test successful!\n")
             reactor.stop()
             return
-            req.accessToken = ACCESS_TOKEN
+            req.accessToken =ACCESS_TOKEN.strip()
         d = c.send(req)
         d.addErrback(on_error)
     
     # Display account list
+        print(f"DEBUG: About to send request with accessToken = {req.accessToken}", file=sys.stderr, flush=True)
     elif msg_type == 2142:  # ProtoOAGetAccountListByAccessTokenRes
         print("\n========== AVAILABLE ACCOUNTS ==========")
         msg_data = Protobuf.extract(message)
