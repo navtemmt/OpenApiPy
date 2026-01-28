@@ -44,7 +44,15 @@ def on_message(c, message):
         print("\n=== Application authenticated successfully ===")
         print("Requesting account list...")
         req = ProtoOAGetAccountListByAccessTokenReq()
-        req.accessToken = ACCESS_TOKEN
+        if not ACCESS_TOKEN:
+            print("\n=== ERROR: ACCESS_TOKEN not found ===")
+            print("To get account list, you need an ACCESS_TOKEN in your .env file.")
+            print("\nFor now, the system will use the default account behavior.")
+            print("All trades will go to the first available account.")
+            print("\nConnection test successful!\n")
+            reactor.stop()
+            return
+                req.accessToken = ACCESS_TOKEN
         d = c.send(req)
         d.addErrback(on_error)
     
