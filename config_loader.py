@@ -1,114 +1,161 @@
-"""Configuration Loader for Trading Settings
+"""Configuration Loader for Multi-Account Trading
 
-Loads trading configuration from trading_config.ini file.
+Loads configuration for multiple cTrader accounts from accounts_config.ini.
 """
 import configparser
+import json
 import logging
 import os
 from typing import Dict, List, Optional, Set
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
 
-class TradingConfig:
-    """Trading configuration manager."""
+@dataclass
+class AccountConfig:
+    """Configuration for a single cTrader account."""
+    name: str
+    enabled: bool
+    account_id: int
+    client_id: str
+    client_secret: str
+    access_token: str
+    environment: str  # "demo" or "live"
     
-    def __init__(self, config_file: str = "trading_config.ini"):
+    # Symbol mapping
+    symbol_prefix: str
+    symbol_suffix: str
+    custom_symbols: Dict[str, str]
+    
+    # Trading settings
+    lot_multiplier: float
+    min_lot_size: float
+    max_lot_size: float
+    copy_sl: bool
+    copy_tp: bool
+    
+    # Risk management
+    max_daily_trades: int
+    max_concurrent_positions: int
+    
+    # Filtering
+    magic_numbers: Optional[Set[int]]
+    allowed_symbols: Optional[Set[str]]
+    blocked_symbols: Set[str]
+    
+    # Runtime tracking
+    daily_trade_count: int = 0
+    current_positions: int = 0
+
+
+class MultiAccountConfig:
+    """Multi-account configuration manager."""
+    
+    def __init__(self, config_file: str = "accounts_config.ini"):
         """Load configuration from INI file.
         
         Args:
             config_file: Path to configuration file
         """
+        self.accounts: Dict[str, AccountConfig] = {}
         self.config = configparser.ConfigParser()
         
         if not os.path.exists(config_file):
-            logger.warning(f"Config file not found: {config_file}. Using defaults.")
-            self._set_defaults()
-        else:
-            self.config.read(config_file)
-            logger.info(f"Loaded configuration from {config_file}")
+            logger.error(f"Config file not found: {config_file}")
+            raise FileNotFoundError(f"Please create {config_file}")
         
-        # Parse configuration sections
-        self._load_symbol_mapping()
-        self._load_trading_settings()
-        self._load_filtering()
-    
-    def _set_defaults(self):
-        """Set default configuration values."""
-        self.config['SymbolMapping'] = {
-            'prefix': '',
-            'suffix': ''
-        }
-        self.config['CustomSymbols'] = {}
-        self.config['Trading'] = {
-            'lot_multiplier': '1.0',
-            'min_lot_size': '0.01',
-            'max_lot_size': '100.0',
-            'copy_sl': 'true',
-            'copy_tp': 'true'
-        }
-        self.config['Filtering'] = {
-            'magic_numbers': '',
-            'allowed_symbols': '',
-            'blocked_symbols': ''
-        }
-    
-    def _load_symbol_mapping(self):
-        """Load symbol mapping settings."""
-        self.symbol_prefix = self.config.get('SymbolMapping', 'prefix', fallback='')
-        self.symbol_suffix = self.config.get('SymbolMapping', 'suffix', fallback='')
+        self.config.read(config_file)
+        logger.info(f"Loaded configuration from {config_file}")
         
-        # Load custom symbol mappings
-        self.custom_symbols: Dict[str, str] = {}
-        if 'CustomSymbols' in self.config:
-            for mt5_symbol, ctrader_symbol in self.config['CustomSymbols'].items():
-                self.custom_symbols[mt5_symbol.upper()] = ctrader_symbol.strip()
+        # Load all account sections
+        self._load_accounts()
         
-        logger.info(f"Symbol mapping: prefix='{self.symbol_prefix}', suffix='{self.symbol_suffix}'")
-        if self.custom_symbols:
-            logger.info(f"Custom symbol mappings: {self.custom_symbols}")
+        enabled_count = sum(1 for acc in self.accounts.values() if acc.enabled)
+        logger.info(f"Loaded {len(self.accounts)} accounts, {enabled_count} enabled")
     
-    def _load_trading_settings(self):
-        """Load trading behavior settings."""
-        self.lot_multiplier = self.config.getfloat('Trading', 'lot_multiplier', fallback=1.0)
-        self.min_lot_size = self.config.getfloat('Trading', 'min_lot_size', fallback=0.01)
-        self.max_lot_size = self.config.getfloat('Trading', 'max_lot_size', fallback=100.0)
-        self.copy_sl = self.config.getboolean('Trading', 'copy_sl', fallback=True)
-        self.copy_tp = self.config.getboolean('Trading', 'copy_tp', fallback=True)
+    def _load_accounts(self):
+        """Load all account configurations."""
+        for section in self.config.sections():
+            if not section.startswith('Account_'):
+                logger.warning(f"Skipping non-account section: {section}")
+                continue
+            
+            try:
+                account = self._load_account(section)
+                self.accounts[account.name] = account
+                
+                if account.enabled:
+                    logger.info(f"✓ Loaded account: {account.name} (ID: {account.account_id}, {account.environment})")
+                else:
+                    logger.info(f"○ Loaded account: {account.name} (DISABLED)")
+            
+            except Exception as e:
+                logger.error(f"Failed to load account {section}: {e}", exc_info=True)
+    
+    def _load_account(self, section: str) -> AccountConfig:
+        """Load a single account configuration."""
+        # Parse custom symbols JSON
+        custom_symbols_str = self.config.get(section, 'custom_symbols', fallback='{}')
+        try:
+            custom_symbols = json.loads(custom_symbols_str)
+        except json.JSONDecodeError:
+            logger.warning(f"{section}: Invalid custom_symbols JSON, using empty")
+            custom_symbols = {}
         
-        logger.info(f"Trading settings: multiplier={self.lot_multiplier}, min={self.min_lot_size}, max={self.max_lot_size}")
-        logger.info(f"Copy SL={self.copy_sl}, Copy TP={self.copy_tp}")
-    
-    def _load_filtering(self):
-        """Load trade filtering settings."""
         # Parse magic numbers
-        magic_str = self.config.get('Filtering', 'magic_numbers', fallback='')
-        self.magic_numbers: Optional[Set[int]] = None
+        magic_str = self.config.get(section, 'magic_numbers', fallback='')
+        magic_numbers = None
         if magic_str.strip():
             try:
-                self.magic_numbers = {int(m.strip()) for m in magic_str.split(',') if m.strip()}
-                logger.info(f"Magic number filter: {self.magic_numbers}")
+                magic_numbers = {int(m.strip()) for m in magic_str.split(',') if m.strip()}
             except ValueError:
-                logger.error(f"Invalid magic_numbers format: {magic_str}")
+                logger.warning(f"{section}: Invalid magic_numbers format")
         
         # Parse allowed symbols
-        allowed_str = self.config.get('Filtering', 'allowed_symbols', fallback='')
-        self.allowed_symbols: Optional[Set[str]] = None
+        allowed_str = self.config.get(section, 'allowed_symbols', fallback='')
+        allowed_symbols = None
         if allowed_str.strip():
-            self.allowed_symbols = {s.strip().upper() for s in allowed_str.split(',') if s.strip()}
-            logger.info(f"Allowed symbols: {self.allowed_symbols}")
+            allowed_symbols = {s.strip().upper() for s in allowed_str.split(',') if s.strip()}
         
         # Parse blocked symbols
-        blocked_str = self.config.get('Filtering', 'blocked_symbols', fallback='')
-        self.blocked_symbols: Set[str] = set()
+        blocked_str = self.config.get(section, 'blocked_symbols', fallback='')
+        blocked_symbols = set()
         if blocked_str.strip():
-            self.blocked_symbols = {s.strip().upper() for s in blocked_str.split(',') if s.strip()}
-            logger.info(f"Blocked symbols: {self.blocked_symbols}")
+            blocked_symbols = {s.strip().upper() for s in blocked_str.split(',') if s.strip()}
+        
+        return AccountConfig(
+            name=section.replace('Account_', ''),
+            enabled=self.config.getboolean(section, 'enabled', fallback=True),
+            account_id=self.config.getint(section, 'account_id'),
+            client_id=self.config.get(section, 'client_id'),
+            client_secret=self.config.get(section, 'client_secret'),
+            access_token=self.config.get(section, 'access_token', fallback=''),
+            environment=self.config.get(section, 'environment', fallback='demo'),
+            symbol_prefix=self.config.get(section, 'symbol_prefix', fallback=''),
+            symbol_suffix=self.config.get(section, 'symbol_suffix', fallback=''),
+            custom_symbols=custom_symbols,
+            lot_multiplier=self.config.getfloat(section, 'lot_multiplier', fallback=1.0),
+            min_lot_size=self.config.getfloat(section, 'min_lot_size', fallback=0.01),
+            max_lot_size=self.config.getfloat(section, 'max_lot_size', fallback=100.0),
+            copy_sl=self.config.getboolean(section, 'copy_sl', fallback=True),
+            copy_tp=self.config.getboolean(section, 'copy_tp', fallback=True),
+            max_daily_trades=self.config.getint(section, 'max_daily_trades', fallback=1000),
+            max_concurrent_positions=self.config.getint(section, 'max_concurrent_positions', fallback=100),
+            magic_numbers=magic_numbers,
+            allowed_symbols=allowed_symbols,
+            blocked_symbols=blocked_symbols
+        )
     
-    def should_copy_trade(self, symbol: str, magic: int, lots: float) -> tuple[bool, str]:
-        """Check if a trade should be copied based on filters.
+    def get_enabled_accounts(self) -> List[AccountConfig]:
+        """Get list of enabled accounts."""
+        return [acc for acc in self.accounts.values() if acc.enabled]
+    
+    def should_copy_trade(self, account: AccountConfig, symbol: str, magic: int, lots: float) -> tuple[bool, str]:
+        """Check if a trade should be copied to this account.
         
         Args:
+            account: Account configuration
             symbol: MT5 symbol name
             magic: Magic number
             lots: Lot size
@@ -118,56 +165,40 @@ class TradingConfig:
         """
         symbol_upper = symbol.upper()
         
+        # Check daily trade limit
+        if account.daily_trade_count >= account.max_daily_trades:
+            return False, f"Daily trade limit reached ({account.max_daily_trades})"
+        
+        # Check position limit
+        if account.current_positions >= account.max_concurrent_positions:
+            return False, f"Max concurrent positions reached ({account.max_concurrent_positions})"
+        
         # Check magic number filter
-        if self.magic_numbers is not None and magic not in self.magic_numbers:
+        if account.magic_numbers is not None and magic not in account.magic_numbers:
             return False, f"Magic number {magic} not in allowed list"
         
         # Check blocked symbols
-        if symbol_upper in self.blocked_symbols:
+        if symbol_upper in account.blocked_symbols:
             return False, f"Symbol {symbol} is blocked"
         
         # Check allowed symbols
-        if self.allowed_symbols is not None and symbol_upper not in self.allowed_symbols:
+        if account.allowed_symbols is not None and symbol_upper not in account.allowed_symbols:
             return False, f"Symbol {symbol} not in allowed list"
         
         # Check lot size limits
-        if lots < self.min_lot_size:
-            return False, f"Lot size {lots} below minimum {self.min_lot_size}"
+        if lots < account.min_lot_size:
+            return False, f"Lot size {lots} below minimum {account.min_lot_size}"
         
         return True, "OK"
-    
-    def adjust_lot_size(self, lots: float) -> float:
-        """Apply lot size multiplier and limits.
-        
-        Args:
-            lots: Original lot size
-        
-        Returns:
-            Adjusted lot size
-        """
-        adjusted = lots * self.lot_multiplier
-        adjusted = max(self.min_lot_size, min(adjusted, self.max_lot_size))
-        return adjusted
-    
-    def get_custom_symbol(self, mt5_symbol: str) -> Optional[str]:
-        """Get custom symbol mapping if exists.
-        
-        Args:
-            mt5_symbol: MT5 symbol name
-        
-        Returns:
-            Custom cTrader symbol name, or None if not mapped
-        """
-        return self.custom_symbols.get(mt5_symbol.upper())
 
 
 # Global instance
-_config_instance: Optional[TradingConfig] = None
+_config_instance: Optional[MultiAccountConfig] = None
 
 
-def get_trading_config() -> TradingConfig:
-    """Get or create global trading config instance."""
+def get_multi_account_config() -> MultiAccountConfig:
+    """Get or create global multi-account config instance."""
     global _config_instance
     if _config_instance is None:
-        _config_instance = TradingConfig()
+        _config_instance = MultiAccountConfig()
     return _config_instance
