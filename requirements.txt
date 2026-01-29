@@ -4,6 +4,7 @@
 # Core dependencies for cTrader Open API
 twisted>=22.10.0
 protobuf>=4.21.0
+service_identity>=21.1.0
 
 # Web server for receiving MT5 signals
 Flask>=2.3.0
