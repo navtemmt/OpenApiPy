@@ -1,12 +1,10 @@
 """CTrader Open API Client Wrapper for MT5→cTrader Copy Trading
-
 Provides high-level trading methods wrapping the low-level OpenApiPy SDK.
 """
 import os
 import logging
 from typing import Optional, Callable, Dict
 from dotenv import load_dotenv
-
 from ctrader_open_api import Client, Protobuf, TcpProtocol, EndPoints
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAApplicationAuthReq,
@@ -60,8 +58,7 @@ class CTraderClient:
 
         # Dynamic symbol map for this account: NAME -> symbolId
         self.symbol_name_to_id: Dict[str, int] = {}
-
-        # New: full symbol details for this account: symbolId -> ProtoOASymbol
+        # Full symbol details for this account: symbolId -> ProtoOASymbol
         self.symbol_details: Dict[int, object] = {}
         
         # Callbacks
@@ -140,7 +137,6 @@ class CTraderClient:
         """Internal: Handle successful account authorization."""
         logger.info(f"Account {self.account_id} authorized successfully")
         self.is_account_authed = True
-
         # After account is authorized, load symbol map for this account
         self._load_symbol_map()
     
@@ -152,37 +148,36 @@ class CTraderClient:
         req.ctidTraderAccountId = self.account_id
         d = self.client.send(req)
 
-    def _on_symbols_list(result):
-        try:
-            extracted = Protobuf.extract(result)
-            # Try common container field names
-            if hasattr(extracted, "symbol"):
-                symbols = extracted.symbol
-            elif hasattr(extracted, "symbolList"):
-                symbols = extracted.symbolList
-            else:
-                logger.error(f"Unexpected symbols list response: {extracted}")
-                return
+        def _on_symbols_list(result):
+            try:
+                extracted = Protobuf.extract(result)
+                # Try common container field names
+                if hasattr(extracted, "symbol"):
+                    symbols = extracted.symbol
+                elif hasattr(extracted, "symbolList"):
+                    symbols = extracted.symbolList
+                else:
+                    logger.error(f"Unexpected symbols list response: {extracted}")
+                    return
 
-            count = 0
-            self.symbol_name_to_id.clear()
-            self.symbol_details.clear()
+                count = 0
+                self.symbol_name_to_id.clear()
+                self.symbol_details.clear()
 
-            for s in symbols:
-                name = s.symbolName.upper()
-                self.symbol_name_to_id[name] = s.symbolId
-                self.symbol_details[s.symbolId] = s
-                count += 1
+                for s in symbols:
+                    name = s.symbolName.upper()
+                    self.symbol_name_to_id[name] = s.symbolId
+                    self.symbol_details[s.symbolId] = s
+                    count += 1
 
-            logger.info(
-                f"Loaded {count} symbols for account {self.account_id}"
-            )
-        except Exception as e:
-            logger.error(f"Failed to build symbol map: {e}", exc_info=True)
+                logger.info(
+                    f"Loaded {count} symbols for account {self.account_id}"
+                )
+            except Exception as e:
+                logger.error(f"Failed to build symbol map: {e}", exc_info=True)
 
-    d.addCallback(_on_symbols_list)
-    d.addErrback(self._on_error)
-
+        d.addCallback(_on_symbols_list)
+        d.addErrback(self._on_error)
 
     def get_symbol_id_by_name(self, name: str) -> Optional[int]:
         """Get broker symbolId by symbol name (uppercased)."""
