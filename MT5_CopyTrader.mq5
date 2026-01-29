@@ -7,10 +7,10 @@
 #property strict
 
 // Input parameters
-input string BridgeServerURL = "http://localhost:5000";  // Python bridge server URL
+input string BridgeServerURL = "http://127.0.0.1:3140";  // Python bridge server URL (CORRECTED)
 input int    RequestTimeout = 5000;                       // HTTP request timeout in ms
 input string MagicNumberFilter = "";                     // Filter by magic number (empty = all trades)
-input bool   CopyPendingOrders = true;                   // Copy pending orders
+input bool   CopyPendingOrders = true;                   // Copy pending orders (NOT IMPLEMENTED)
 
 // Global variables
 struct TradeInfo {
