@@ -151,6 +151,10 @@ class CTraderClient:
         def _on_symbols_list(result):
             try:
                 extracted = Protobuf.extract(result)
+
+                # DEBUG: dump raw response once to inspect available fields
+                logger.info("Raw symbols list response: %r", extracted)
+
                 # Try common container field names
                 if hasattr(extracted, "symbol"):
                     symbols = extracted.symbol
