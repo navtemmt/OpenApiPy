@@ -54,6 +54,7 @@ class CTraderClient:
         
         self.is_connected = False
         self.is_app_authed = False
+        self.is_account_authed = False
         self.account_id = None
         self.access_token = None
         
@@ -81,6 +82,7 @@ class CTraderClient:
         logger.warning(f"Disconnected from cTrader: {reason}")
         self.is_connected = False
         self.is_app_authed = False
+        self.is_account_authed = False
     
     def _handle_message(self, client, message):
         """Internal: Handle incoming messages."""
@@ -108,12 +110,46 @@ class CTraderClient:
         logger.info("Application authenticated successfully")
         self.is_app_authed = True
         
+        # Authorize the trading account to keep connection alive
+        if self.account_id and self.access_token:
+            self._authorize_account()
+        else:
+            logger.warning("No account credentials set - connection may close")
+        
         if self._on_connect_callback:
             self._on_connect_callback()
+    
+    def _authorize_account(self):
+        """Internal: Authorize the trading account after app auth."""
+        logger.info(f"Authorizing account {self.account_id}...")
+        req = ProtoOAAccountAuthReq()
+        req.ctidTraderAccountId = self.account_id
+        req.accessToken = self.access_token
+        d = self.client.send(req)
+        d.addCallback(self._on_account_auth_success)
+        d.addErrback(self._on_error)
+    
+    def _on_account_auth_success(self, result):
+        """Internal: Handle successful account authorization."""
+        logger.info(f"Account {self.account_id} authorized successfully")
+        self.is_account_authed = True
     
     def _on_error(self, failure):
         """Internal: Handle errors."""
         logger.error(f"Error: {failure}")
+    
+    def set_account_credentials(self, account_id: int, access_token: str):
+        """Set account credentials for authorization.
+        
+        Must be called BEFORE connect() to authorize account automatically.
+        
+        Args:
+            account_id: cTrader account ID
+            access_token: OAuth access token
+        """
+        self.account_id = account_id
+        self.access_token = access_token
+        logger.info(f"Account credentials set: ID={account_id}")
     
     def connect(self, on_connect: Optional[Callable] = None):
         """Connect to cTrader and authenticate.
@@ -134,7 +170,9 @@ class CTraderClient:
         self._on_message_callback = callback
     
     def authenticate_account(self, access_token: str):
-        """Authenticate a trading account.
+        """Authenticate a trading account (legacy method).
+        
+        Prefer using set_account_credentials() before connect() instead.
         
         Args:
             access_token: OAuth access token for the account
