@@ -71,7 +71,7 @@ class SymbolMapper:
             k.upper(): v for k, v in (broker_symbol_map or {}).items()
         }
 
-        logger.debug(
+        logger.info(
             "Symbol mapper initialized: prefix='%s', suffix='%s', custom_map=%s, "
             "broker_symbol_map_size=%d",
             self.prefix,
