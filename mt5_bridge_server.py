@@ -4,7 +4,6 @@ Receives trade events from MT5 EA via JSON and forwards to multiple cTrader acco
 """
 import json
 import logging
-import os
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
 from twisted.internet import reactor
@@ -144,7 +143,8 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 logger.error(f"Failed to copy trade to {account_name}: {e}", exc_info=True)
     
-    def _copy_open_to_account(self, account_name, client, config, ticket, mt5_symbol, side, volume, sl, tp, magic):
+    def _copy_open_to_account(self, account_name, client, config,
+                              ticket, mt5_symbol, side, volume, sl, tp, magic):
         """Copy open order to a specific account."""
         # Check if client is ready
         if not client or not client.is_app_authed:
@@ -173,18 +173,32 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             logger.error(f"[{account_name}] Unknown symbol {mt5_symbol}, skipping")
             return
         
-        # Apply account-specific lot multiplier and limits
-        adjusted_volume = config.lot_multiplier * volume
-        adjusted_volume = max(config.min_lot_size, min(adjusted_volume, config.max_lot_size))
+        # Apply account-specific lot multiplier and limits (in lots)
+        adjusted_volume_lots = config.lot_multiplier * volume
+        adjusted_volume_lots = max(config.min_lot_size,
+                                   min(adjusted_volume_lots, config.max_lot_size))
         
-        # Convert to units
-        volume_units = mapper.lots_to_units(adjusted_volume, mt5_symbol)
+        # Convert to units using mapper
+        volume_units = mapper.lots_to_units(adjusted_volume_lots, mt5_symbol)
+        
+        # Ensure we meet cTrader minimum volume (from error: 1000 units)
+        # If volume is below 1000, bump to 1000 to avoid TRADING_BAD_VOLUME.
+        MIN_UNITS = 1000
+        if volume_units < MIN_UNITS:
+            logger.warning(
+                f"[{account_name}] Volume {volume_units} below minimum {MIN_UNITS}, "
+                f"adjusting to {MIN_UNITS} units"
+            )
+            volume_units = MIN_UNITS
         
         # Check if SL/TP should be copied
         final_sl = sl if (sl > 0 and config.copy_sl) else None
         final_tp = tp if (tp > 0 and config.copy_tp) else None
         
-        logger.info(f"[{account_name}] Sending: symbol_id={symbol_id}, side={side}, volume={volume_units} units (from {volume} lots * {config.lot_multiplier})")
+        logger.info(
+            f"[{account_name}] Sending: symbol_id={symbol_id}, side={side}, "
+            f"volume={volume_units} units (from {volume} lots * {config.lot_multiplier})"
+        )
         
         # Send order to cTrader
         client.send_market_order(
@@ -201,7 +215,10 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
         config.daily_trade_count += 1
         config.current_positions += 1
         
-        logger.info(f"✓ [{account_name}] Order sent successfully (daily: {config.daily_trade_count}/{config.max_daily_trades})")
+        logger.info(
+            f"✓ [{account_name}] Order sent successfully "
+            f"(daily: {config.daily_trade_count}/{config.max_daily_trades})"
+        )
     
     def _handle_modify(self, event):
         """Handle position modification event."""
@@ -227,11 +244,11 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
         logger.warning("Position close not yet implemented for multi-account")
 
 
-def run_http_server(host='127.0.0.1', port=3140):
+def run_http_server(host: str = '127.0.0.1', port: int = 3140):
     """Run HTTP server in a separate thread."""
     server = HTTPServer((host, port), MT5BridgeHandler)
     logger.info(f"MT5 Bridge Server listening on {host}:{port}")
-    logger.info(f"Waiting for trade events from MT5 EA...")
+    logger.info("Waiting for trade events from MT5 EA...")
     server.serve_forever()
 
 
