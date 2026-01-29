@@ -150,18 +150,25 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             logger.error(f"[{account_name}] Unknown symbol {mt5_symbol}, skipping")
             return
 
-        # Apply account-specific lot multiplier and limits (still in MT5 lots)
+                # Apply account-specific lot multiplier and limits (still in MT5 lots)
         adjusted_lots = config.lot_multiplier * volume
         adjusted_lots = max(config.min_lot_size, min(adjusted_lots, config.max_lot_size))
 
-        # IMPORTANT FIX:
-        # cTrader Open API expects volume in "units". For FX, the common convention is:
-        # 1.0 lot = 100,000 units, so 0.01 lot = 1,000 units.
-        volume_units = int(round(adjusted_lots * 100000))
+        # 1 lot -> 100000 units (standard FX)
+        base_units = int(round(adjusted_lots * 100000))
 
-        # Enforce minimum volume from cTrader error message (1000 units)
-        # (This avoids TRADING_BAD_VOLUME for small trades.)
+        # Compensate for library scaling (100x smaller in server error),
+        # so 0.01 lot ends up as 1000 on the cTrader side.
+        volume_units = base_units * 100
+
         MIN_UNITS = 1000
+        if volume_units < MIN_UNITS:
+            logger.warning(
+                f"[{account_name}] Volume {volume_units} below minimum {MIN_UNITS}, "
+                f"adjusting to {MIN_UNITS} units"
+            )
+            volume_units = MIN_UNITS
+
         if volume_units < MIN_UNITS:
             logger.warning(
                 f"[{account_name}] Volume {volume_units} below minimum {MIN_UNITS}, "
