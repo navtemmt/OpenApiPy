@@ -32,23 +32,21 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         """Handle POST request with trade event JSON."""
         try:
-            # Read request body
-            content_length = int(self.headers['Content-Length'])
+            content_length = int(self.headers["Content-Length"])
             post_data = self.rfile.read(content_length)
 
-            # Parse JSON
-            trade_event = json.loads(post_data.decode('utf-8'))
+            trade_event = json.loads(post_data.decode("utf-8"))
             logger.info(f"Received trade event: {trade_event}")
 
-            # Process the trade event
             self._process_trade_event(trade_event)
 
-            # Send success response
             self.send_response(200)
-            self.send_header('Content-type', 'application/json')
+            self.send_header("Content-type", "application/json")
             self.end_headers()
-            response = json.dumps({"status": "success", "message": "Trade event received"})
-            self.wfile.write(response.encode('utf-8'))
+            response = json.dumps(
+                {"status": "success", "message": "Trade event received"}
+            )
+            self.wfile.write(response.encode("utf-8"))
 
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON: {e}")
@@ -66,21 +64,24 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                 "enabled": config.enabled,
                 "connected": client.is_app_authed if client else False,
                 "daily_trades": config.daily_trade_count,
-                "current_positions": config.current_positions
+                "current_positions": config.current_positions,
             }
             for name, (client, config) in accounts.items()
         }
 
         self.send_response(200)
-        self.send_header('Content-type', 'application/json')
+        self.send_header("Content-type", "application/json")
         self.end_headers()
-        response = json.dumps({
-            "status": "online",
-            "service": "MT5 to cTrader Bridge (Multi-Account)",
-            "version": "2.0.0",
-            "accounts": account_status
-        }, indent=2)
-        self.wfile.write(response.encode('utf-8'))
+        response = json.dumps(
+            {
+                "status": "online",
+                "service": "MT5 to cTrader Bridge (Multi-Account)",
+                "version": "2.0.0",
+                "accounts": account_status,
+            },
+            indent=2,
+        )
+        self.wfile.write(response.encode("utf-8"))
 
     def _process_trade_event(self, event):
         """Process trade event and forward to all enabled cTrader accounts."""
@@ -88,44 +89,68 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             logger.error("Account manager not initialized")
             return
 
-        # Get action from either 'action' or 'event' field, normalize to lowercase
-        event_type = event.get('action', event.get('event'))
+        event_type = event.get("action", event.get("event"))
         if event_type:
             event_type = event_type.lower()
 
-        if event_type == 'open':
+        if event_type == "open":
             self._handle_open(event)
-        elif event_type == 'modify':
+        elif event_type == "modify":
             self._handle_modify(event)
-        elif event_type == 'close':
+        elif event_type == "close":
             self._handle_close(event)
         else:
             logger.error(f"Unknown event type: {event_type}")
 
     def _handle_open(self, event):
         """Handle new order event - copy to all enabled accounts."""
-        ticket = event.get('ticket')
-        mt5_symbol = event.get('symbol')
-        side = event.get('type', event.get('side', 'BUY')).lower()
-        volume = event.get('volume', event.get('lots', 0.01))
-        sl = event.get('sl', 0.0)
-        tp = event.get('tp', 0.0)
-        magic = event.get('magic', 0)
+        ticket = event.get("ticket")
+        mt5_symbol = event.get("symbol")
+        side = event.get("type", event.get("side", "BUY")).lower()
+        volume = event.get("volume", event.get("lots", 0.01))
+        sl = event.get("sl", 0.0)
+        tp = event.get("tp", 0.0)
+        magic = event.get("magic", 0)
 
-        logger.info(f"Opening {side} order: {volume} lots of {mt5_symbol} (ticket #{ticket}, magic {magic})")
+        logger.info(
+            f"Opening {side} order: {volume} lots of {mt5_symbol} "
+            f"(ticket #{ticket}, magic {magic})"
+        )
 
         accounts = self.account_manager.get_all_accounts()
 
         for account_name, (client, config) in accounts.items():
             try:
                 self._copy_open_to_account(
-                    account_name, client, config,
-                    ticket, mt5_symbol, side, volume, sl, tp, magic
+                    account_name,
+                    client,
+                    config,
+                    ticket,
+                    mt5_symbol,
+                    side,
+                    volume,
+                    sl,
+                    tp,
+                    magic,
                 )
             except Exception as e:
-                logger.error(f"Failed to copy trade to {account_name}: {e}", exc_info=True)
+                logger.error(
+                    f"Failed to copy trade to {account_name}: {e}", exc_info=True
+                )
 
-    def _copy_open_to_account(self, account_name, client, config, ticket, mt5_symbol, side, volume, sl, tp, magic):
+    def _copy_open_to_account(
+        self,
+        account_name,
+        client,
+        config,
+        ticket,
+        mt5_symbol,
+        side,
+        volume,
+        sl,
+        tp,
+        magic,
+    ):
         """Copy open order to a specific account."""
         if not client or not client.is_app_authed:
             logger.warning(f"[{account_name}] Client not ready, skipping")
@@ -133,7 +158,9 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
 
         multi_config = get_multi_account_config()
 
-        should_copy, reason = multi_config.should_copy_trade(config, mt5_symbol, magic, volume)
+        should_copy, reason = multi_config.should_copy_trade(
+            config, mt5_symbol, magic, volume
+        )
         if not should_copy:
             logger.info(f"[{account_name}] Skipping: {reason}")
             return
@@ -141,18 +168,20 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
         mapper = SymbolMapper(
             prefix=config.symbol_prefix,
             suffix=config.symbol_suffix,
-            custom_map=config.custom_symbols
+            custom_map=config.custom_symbols,
+            broker_symbol_map=client.symbol_name_to_id,
         )
 
-        # Get cTrader symbol ID
         symbol_id = mapper.get_symbol_id(mt5_symbol)
         if symbol_id is None:
             logger.error(f"[{account_name}] Unknown symbol {mt5_symbol}, skipping")
             return
 
-                # Apply account-specific lot multiplier and limits (still in MT5 lots)
+        # Apply account-specific lot multiplier and limits (still in MT5 lots)
         adjusted_lots = config.lot_multiplier * volume
-        adjusted_lots = max(config.min_lot_size, min(adjusted_lots, config.max_lot_size))
+        adjusted_lots = max(
+            config.min_lot_size, min(adjusted_lots, config.max_lot_size)
+        )
 
         # 1 lot -> 100000 units (standard FX)
         base_units = int(round(adjusted_lots * 100000))
@@ -169,14 +198,6 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             )
             volume_units = MIN_UNITS
 
-        if volume_units < MIN_UNITS:
-            logger.warning(
-                f"[{account_name}] Volume {volume_units} below minimum {MIN_UNITS}, "
-                f"adjusting to {MIN_UNITS} units"
-            )
-            volume_units = MIN_UNITS
-
-        # Check if SL/TP should be copied
         final_sl = sl if (sl > 0 and config.copy_sl) else None
         final_tp = tp if (tp > 0 and config.copy_tp) else None
 
@@ -192,7 +213,7 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             volume=volume_units,
             sl=final_sl,
             tp=final_tp,
-            label=f"MT5_{ticket}"
+            label=f"MT5_{ticket}",
         )
 
         config.daily_trade_count += 1
@@ -205,24 +226,25 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
 
     def _handle_modify(self, event):
         """Handle position modification event."""
-        ticket = event.get('ticket')
-        sl = event.get('sl', 0.0)
-        tp = event.get('tp', 0.0)
+        ticket = event.get("ticket")
+        sl = event.get("sl", 0.0)
+        tp = event.get("tp", 0.0)
 
         logger.info(f"Modifying position {ticket}: SL={sl}, TP={tp}")
         logger.warning("Position modification not yet implemented for multi-account")
 
     def _handle_close(self, event):
         """Handle position close event."""
-        ticket = event.get('ticket')
-        volume = event.get('volume', event.get('lots', 0))
+        ticket = event.get("ticket")
+        volume = event.get("volume", event.get("lots", 0))
 
         logger.info(f"Closing position {ticket}: {volume} lots")
         logger.warning("Position close not yet implemented for multi-account")
 
 
-def run_http_server(host='127.0.0.1', port=3140):
+def run_http_server(host: str = "127.0.0.1", port: int = 3140):
     """Run HTTP server in a separate thread."""
+        # noqa: E117
     server = HTTPServer((host, port), MT5BridgeHandler)
     logger.info(f"MT5 Bridge Server listening on {host}:{port}")
     logger.info("Waiting for trade events from MT5 EA...")
