@@ -1,6 +1,8 @@
 """Configuration Loader for Multi-Account Trading
 
-Loads configuration for multiple cTrader accounts from accounts_config.ini.
+Loads configuration for multiple cTrader accounts.
+- Credentials loaded from .env file (private, never commit)
+- Trading settings loaded from accounts_config.ini (public, safe to commit)
 """
 import configparser
 import json
@@ -8,6 +10,7 @@ import logging
 import os
 from typing import Dict, List, Optional, Set
 from dataclasses import dataclass
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +61,9 @@ class MultiAccountConfig:
         Args:
             config_file: Path to configuration file
         """
+        # Load environment variables from .env file
+        load_dotenv()
+        
         self.accounts: Dict[str, AccountConfig] = {}
         self.config = configparser.ConfigParser()
         
@@ -94,7 +100,32 @@ class MultiAccountConfig:
                 logger.error(f"Failed to load account {section}: {e}", exc_info=True)
     
     def _load_account(self, section: str) -> AccountConfig:
-        """Load a single account configuration."""
+        """Load a single account configuration.
+        
+        Credentials are loaded from environment variables (.env file).
+        Trading settings are loaded from accounts_config.ini.
+        """
+        # Extract account name from section (e.g., "Account_Demo" -> "DEMO")
+        account_name = section.replace('Account_', '').upper()
+        
+        # Load credentials from environment variables
+        account_id_key = f"ACCOUNT_{account_name}_ACCOUNT_ID"
+        client_id_key = f"ACCOUNT_{account_name}_CLIENT_ID"
+        client_secret_key = f"ACCOUNT_{account_name}_CLIENT_SECRET"
+        access_token_key = f"ACCOUNT_{account_name}_ACCESS_TOKEN"
+        
+        account_id = int(os.getenv(account_id_key, "0"))
+        client_id = os.getenv(client_id_key, "")
+        client_secret = os.getenv(client_secret_key, "")
+        access_token = os.getenv(access_token_key, "")
+        
+        # Warn if credentials are missing
+        if account_id == 0 or not client_id or not client_secret:
+            logger.warning(
+                f"{section}: Missing credentials in .env file "
+                f"(keys: {account_id_key}, {client_id_key}, {client_secret_key})"
+            )
+        
         # Parse custom symbols JSON
         custom_symbols_str = self.config.get(section, 'custom_symbols', fallback='{}')
         try:
@@ -127,10 +158,10 @@ class MultiAccountConfig:
         return AccountConfig(
             name=section.replace('Account_', ''),
             enabled=self.config.getboolean(section, 'enabled', fallback=True),
-            account_id=self.config.getint(section, 'account_id'),
-            client_id=self.config.get(section, 'client_id'),
-            client_secret=self.config.get(section, 'client_secret'),
-            access_token=self.config.get(section, 'access_token', fallback=''),
+            account_id=account_id,
+            client_id=client_id,
+            client_secret=client_secret,
+            access_token=access_token,
             environment=self.config.get(section, 'environment', fallback='demo'),
             symbol_prefix=self.config.get(section, 'symbol_prefix', fallback=''),
             symbol_suffix=self.config.get(section, 'symbol_suffix', fallback=''),
