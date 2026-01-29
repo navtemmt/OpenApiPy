@@ -178,17 +178,24 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             return
 
         # Apply account-specific lot multiplier and limits (still in MT5 lots)
+                # Apply account-specific lot multiplier and limits (still in MT5 lots)
         adjusted_lots = config.lot_multiplier * volume
         adjusted_lots = max(
             config.min_lot_size, min(adjusted_lots, config.max_lot_size)
         )
 
-        # 1 lot -> 100000 units (standard FX)
-        base_units = int(round(adjusted_lots * 100000))
+        # Use SymbolMapper helper instead of hard-coded scaling
+        mapper = SymbolMapper(
+            prefix=config.symbol_prefix,
+            suffix=config.symbol_suffix,
+            custom_map=config.custom_symbols,
+            broker_symbol_map=client.symbol_name_to_id,
+        )
 
-        # Compensate for library scaling (100x smaller in server error),
-        # so 0.01 lot ends up as 1000 on the cTrader side.
-        volume_units = base_units * 100
+        base_units = mapper.lots_to_units(adjusted_lots, mt5_symbol)
+
+        # REMOVE the extra * 100 scaling – it is what turns 0.01 into 100,000
+        volume_units = base_units
 
         MIN_UNITS = 1000
         if volume_units < MIN_UNITS:
@@ -197,6 +204,7 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                 f"adjusting to {MIN_UNITS} units"
             )
             volume_units = MIN_UNITS
+
 
         final_sl = sl if (sl > 0 and config.copy_sl) else None
         final_tp = tp if (tp > 0 and config.copy_tp) else None
