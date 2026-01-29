@@ -145,12 +145,12 @@ class CTraderClient:
         self._load_symbol_map()
     
     def _load_symbol_map(self):
-    if not self.account_id:
-        return
-    logger.info(f"Loading symbol map for account {self.account_id}...")
-    req = ProtoOASymbolsListReq()
-    req.ctidTraderAccountId = self.account_id
-    d = self.client.send(req)
+        if not self.account_id:
+            return
+        logger.info(f"Loading symbol map for account {self.account_id}...")
+        req = ProtoOASymbolsListReq()
+        req.ctidTraderAccountId = self.account_id
+        d = self.client.send(req)
 
     def _on_symbols_list(result):
         try:
