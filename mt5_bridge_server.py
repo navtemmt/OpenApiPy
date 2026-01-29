@@ -14,7 +14,7 @@ from symbol_mapper import SymbolMapper
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -132,6 +132,7 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                     sl,
                     tp,
                     magic,
+                    event,
                 )
             except Exception as e:
                 logger.error(
@@ -150,6 +151,7 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
         sl,
         tp,
         magic,
+        raw_event,
     ):
         """Copy open order to a specific account."""
         if not client or not client.is_app_authed:
@@ -177,34 +179,40 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             logger.error(f"[{account_name}] Unknown symbol {mt5_symbol}, skipping")
             return
 
-        # Apply account-specific lot multiplier and limits (still in MT5 lots)
-                # Apply account-specific lot multiplier and limits (still in MT5 lots)
+        # Account-specific lot multiplier and limits (still in MT5 lots)
         adjusted_lots = config.lot_multiplier * volume
         adjusted_lots = max(
             config.min_lot_size, min(adjusted_lots, config.max_lot_size)
         )
 
-        # Use SymbolMapper helper instead of hard-coded scaling
-        mapper = SymbolMapper(
-            prefix=config.symbol_prefix,
-            suffix=config.symbol_suffix,
-            custom_map=config.custom_symbols,
-            broker_symbol_map=client.symbol_name_to_id,
-        )
+        # Use SymbolMapper helper; use MT5 contract info if present
+        mt5_contract_size = raw_event.get("mt5_contract_size")
+        mt5_vol_min = raw_event.get("mt5_volume_min")
+        mt5_vol_step = raw_event.get("mt5_volume_step")
 
         base_units = mapper.lots_to_units(adjusted_lots, mt5_symbol)
 
-        # REMOVE the extra * 100 scaling – it is what turns 0.01 into 100,000
-        volume_units = base_units
+        # Symbol-specific minimums (fallback if MT5 info not usable)
+        sym_upper = (mt5_symbol or "").upper()
+        if any(metal in sym_upper for metal in ["XAU", "XAG", "GOLD", "SILVER"]):
+            default_min_units = 100
+        else:
+            default_min_units = 1000
 
-        MIN_UNITS = 1000
+        # If MT5 sent a meaningful min volume in lots, convert to units
+        if mt5_vol_min is not None and mt5_vol_min > 0:
+            mt5_min_units = mapper.lots_to_units(mt5_vol_min, mt5_symbol)
+            MIN_UNITS = int(mt5_min_units)
+        else:
+            MIN_UNITS = default_min_units
+
+        volume_units = int(base_units)
         if volume_units < MIN_UNITS:
             logger.warning(
                 f"[{account_name}] Volume {volume_units} below minimum {MIN_UNITS}, "
                 f"adjusting to {MIN_UNITS} units"
             )
             volume_units = MIN_UNITS
-
 
         final_sl = sl if (sl > 0 and config.copy_sl) else None
         final_tp = tp if (tp > 0 and config.copy_tp) else None
@@ -252,7 +260,6 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
 
 def run_http_server(host: str = "127.0.0.1", port: int = 3140):
     """Run HTTP server in a separate thread."""
-        # noqa: E117
     server = HTTPServer((host, port), MT5BridgeHandler)
     logger.info(f"MT5 Bridge Server listening on {host}:{port}")
     logger.info("Waiting for trade events from MT5 EA...")
