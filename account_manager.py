@@ -30,16 +30,24 @@ class AccountManager:
         
         logger.info(f"Initializing account: {account.name}")
         
-        # Create cTrader client with account-specific credentials
+        # Create cTrader client for this environment
         client = CTraderClient(env=account.environment)
+        
+        # Override client credentials with account-specific values
         client.client_id = account.client_id
         client.client_secret = account.client_secret
+        
+        # Set account credentials BEFORE connecting (prevents reconnection loop)
+        client.set_account_credentials(
+            account_id=account.account_id,
+            access_token=account.access_token or ""
+        )
         
         # Store references
         self.clients[account.name] = client
         self.configs[account.name] = account
         
-        # Connect the client
+        # Connect the client (will auto-authorize account)
         def on_connected():
             logger.info(f"✓ Account {account.name} connected and authenticated")
         
