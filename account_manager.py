@@ -33,11 +33,12 @@ class AccountManager:
         # Create cTrader client for this environment
         client = CTraderClient(env=account.environment)
         
-        # Override client credentials with account-specific values
+        # Override client credentials with account-specific values FIRST
+        # (before setting account credentials to avoid clearing them)
         client.client_id = account.client_id
         client.client_secret = account.client_secret
         
-        # Set account credentials BEFORE connecting (prevents reconnection loop)
+        # Now set account credentials (account_id and access_token)
         client.set_account_credentials(
             account_id=account.account_id,
             access_token=account.access_token or ""
