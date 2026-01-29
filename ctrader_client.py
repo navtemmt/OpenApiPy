@@ -4,7 +4,7 @@ Provides high-level trading methods wrapping the low-level OpenApiPy SDK.
 """
 import os
 import logging
-from typing import Optional, Callable
+from typing import Optional, Callable, Dict
 from dotenv import load_dotenv
 
 from ctrader_open_api import Client, Protobuf, TcpProtocol, EndPoints
@@ -15,6 +15,7 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAAmendPositionSLTPReq,
     ProtoOAClosePositionReq,
     ProtoOAGetAccountListByAccessTokenReq,
+    ProtoOASymbolsListReq,
 )
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
     ProtoOAOrderType,
@@ -56,6 +57,9 @@ class CTraderClient:
         self.is_account_authed = False
         self.account_id: Optional[int] = None
         self.access_token: Optional[str] = None
+
+        # Dynamic symbol map for this account: NAME -> symbolId
+        self.symbol_name_to_id: Dict[str, int] = {}
         
         # Callbacks
         self._on_connect_callback: Optional[Callable] = None
@@ -82,15 +86,13 @@ class CTraderClient:
         self.is_connected = False
         self.is_app_authed = False
         self.is_account_authed = False
+        self.symbol_name_to_id.clear()
     
     def _handle_message(self, client, message):
         """Internal: Handle incoming messages."""
         msg_type = Protobuf.extract(message).payloadType
-        
-        # Log all messages for debugging
         logger.debug(f"Received message type: {msg_type}")
         
-        # Call user callback if registered
         if self._on_message_callback:
             self._on_message_callback(message)
     
@@ -109,7 +111,6 @@ class CTraderClient:
         logger.info("Application authenticated successfully")
         self.is_app_authed = True
         
-        # Authorize the trading account to keep connection alive
         if self.account_id and self.account_id > 0:
             self._authorize_account()
         else:
@@ -135,6 +136,39 @@ class CTraderClient:
         """Internal: Handle successful account authorization."""
         logger.info(f"Account {self.account_id} authorized successfully")
         self.is_account_authed = True
+
+        # After account is authorized, load symbol map for this account
+        self._load_symbol_map()
+    
+    def _load_symbol_map(self):
+        """Fetch all symbols for this account and build NAME -> symbolId map."""
+        if not self.account_id:
+            return
+        logger.info(f"Loading symbol map for account {self.account_id}...")
+        req = ProtoOASymbolsListReq()
+        req.ctidTraderAccountId = self.account_id
+        d = self.client.send(req)
+
+        def _on_symbols_list(result):
+            try:
+                extracted = Protobuf.extract(result)
+                count = 0
+                self.symbol_name_to_id.clear()
+                # extracted.symbol is a repeated ProtoOASymbol
+                for s in extracted.symbol:
+                    name = s.symbolName.upper()
+                    self.symbol_name_to_id[name] = s.symbolId
+                    count += 1
+                logger.info(f"Loaded {count} symbols for account {self.account_id}")
+            except Exception as e:
+                logger.error(f"Failed to build symbol map: {e}", exc_info=True)
+
+        d.addCallback(_on_symbols_list)
+        d.addErrback(self._on_error)
+
+    def get_symbol_id_by_name(self, name: str) -> Optional[int]:
+        """Get broker symbolId by symbol name (uppercased)."""
+        return self.symbol_name_to_id.get(name.upper())
     
     def _on_error(self, failure):
         """Internal: Handle errors."""
@@ -144,41 +178,23 @@ class CTraderClient:
         """Set account credentials for authorization.
         
         Must be called BEFORE connect() to authorize account automatically.
-        
-        Args:
-            account_id: cTrader account ID
-            access_token: OAuth access token
         """
         self.account_id = account_id
         self.access_token = access_token
         logger.info(f"Account credentials set: ID={account_id}")
     
     def connect(self, on_connect: Optional[Callable] = None):
-        """Connect to cTrader and authenticate.
-        
-        Args:
-            on_connect: Callback to execute after successful connection and auth
-        """
+        """Connect to cTrader and authenticate."""
         self._on_connect_callback = on_connect
         logger.info(f"Connecting to {self.host}:{self.port}...")
         self.client.startService()
     
     def set_message_callback(self, callback: Callable):
-        """Register callback for all incoming messages.
-        
-        Args:
-            callback: Function to call with each message
-        """
+        """Register callback for all incoming messages."""
         self._on_message_callback = callback
     
     def authenticate_account(self, access_token: str):
-        """Authenticate a trading account (legacy method).
-        
-        Prefer using set_account_credentials() before connect() instead.
-        
-        Args:
-            access_token: OAuth access token for the account
-        """
+        """Authenticate a trading account (legacy method)."""
         self.access_token = access_token
         logger.info("Authenticating account...")
         req = ProtoOAAccountAuthReq()
@@ -197,20 +213,7 @@ class CTraderClient:
         tp: Optional[float] = None,
         label: str = "MT5_Copy",
     ):
-        """Send a market order.
-        
-        Args:
-            account_id: cTrader account ID
-            symbol_id: Symbol ID from cTrader
-            side: "buy" or "sell"
-            volume: Volume in units (not lots)
-            sl: Stop loss price (optional)
-            tp: Take profit price (optional)
-            label: Order label/comment
-        
-        Returns:
-            Deferred that fires when order response received
-        """
+        """Send a market order."""
         if not self.is_app_authed:
             raise RuntimeError("Not authenticated. Call connect() first.")
         
@@ -231,7 +234,6 @@ class CTraderClient:
         logger.info(f"Sending market order: {side} {volume} units of symbol {symbol_id}")
         d = self.client.send(req)
 
-        # Log server response for debugging why trades might not appear
         def _on_order_response(result):
             try:
                 extracted = Protobuf.extract(result)
@@ -250,17 +252,7 @@ class CTraderClient:
         sl: Optional[float] = None,
         tp: Optional[float] = None,
     ):
-        """Modify position SL/TP.
-        
-        Args:
-            account_id: cTrader account ID
-            position_id: Position ID to modify
-            sl: New stop loss price (optional)
-            tp: New take profit price (optional)
-        
-        Returns:
-            Deferred that fires when response received
-        """
+        """Modify position SL/TP."""
         if not self.is_app_authed:
             raise RuntimeError("Not authenticated. Call connect() first.")
         
@@ -279,16 +271,7 @@ class CTraderClient:
         return d
     
     def close_position(self, account_id: int, position_id: int, volume: int):
-        """Close a position.
-        
-        Args:
-            account_id: cTrader account ID
-            position_id: Position ID to close
-            volume: Volume to close (units)
-        
-        Returns:
-            Deferred that fires when response received
-        """
+        """Close a position."""
         if not self.is_app_authed:
             raise RuntimeError("Not authenticated. Call connect() first.")
         
