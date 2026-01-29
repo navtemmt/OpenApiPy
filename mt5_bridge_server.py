@@ -19,6 +19,61 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def convert_mt5_lots_to_ctrader_cents(
+    mt5_lots: float,
+    mt5_contract_size: float,
+    mt5_volume_min: float,
+    mt5_volume_step: float,
+    lot_size_cents: int,
+    min_volume_cents: int,
+    max_volume_cents: int,
+    step_volume_cents: int,
+) -> int:
+    """
+    Convert MT5 lots to cTrader volume in *cents of units*, using
+    both MT5 contract info and cTrader symbol specs.
+    """
+
+    # 1) Underlying units represented on MT5 side
+    #    e.g. forex: 1 lot = 100000; metals: 1 lot = 100; indices: broker-specific
+    mt5_units = mt5_lots * mt5_contract_size
+
+    if lot_size_cents <= 0:
+        # Fallback: treat 1 lot as 1 unit if lotSize is missing
+        units_per_lot_ctrader = mt5_contract_size or 1.0
+    else:
+        # lotSize is stored as cents of units
+        units_per_lot_ctrader = lot_size_cents / 100.0
+
+    # 2) Map MT5 units into cTrader "lots" for this symbol
+    #    target_lots_ctrader = how many cTrader lots correspond to mt5_units
+    if units_per_lot_ctrader <= 0:
+        target_lots_ctrader = mt5_lots
+    else:
+        target_lots_ctrader = mt5_units / units_per_lot_ctrader
+
+    # 3) Convert cTrader lots back to units, then to cents-of-units
+    target_units = target_lots_ctrader * units_per_lot_ctrader
+    target_cents = int(round(target_units * 100))
+
+    # 4) Clamp to broker [min, max] in cents
+    if min_volume_cents and min_volume_cents > 0:
+        target_cents = max(target_cents, min_volume_cents)
+    if max_volume_cents and max_volume_cents > 0:
+        target_cents = min(target_cents, max_volume_cents)
+
+    # 5) Snap to stepVolume in cents
+    if step_volume_cents and step_volume_cents > 0:
+        # If min is defined, snap relative to it; otherwise snap from zero
+        base = min_volume_cents if (min_volume_cents and min_volume_cents > 0) else 0
+        steps = (target_cents - base) / step_volume_cents
+        steps = round(steps)
+        target_cents = base + int(steps) * step_volume_cents
+
+    # Ensure non-negative
+    return max(target_cents, min_volume_cents or 0)
+
+
 class MT5BridgeHandler(BaseHTTPRequestHandler):
     """HTTP request handler for MT5 trade events."""
 
@@ -185,39 +240,71 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             config.min_lot_size, min(adjusted_lots, config.max_lot_size)
         )
 
-        # Use SymbolMapper helper; MT5 contract info present in raw_event but
-        # currently not needed here (we infer behavior per symbol type).
-        base_units = mapper.lots_to_units(adjusted_lots, mt5_symbol)
+        # --- New: use MT5 metadata + cTrader symbol specs to compute volume in cents-of-units ---
 
-        sym_upper = (mt5_symbol or "").upper()
+        # MT5 side metadata sent by EA (with safe defaults)
+        mt5_contract_size = float(raw_event.get("mt5_contract_size", 1.0))
+        mt5_volume_min = float(raw_event.get("mt5_volume_min", 0.01))
+        mt5_volume_step = float(raw_event.get("mt5_volume_step", 0.01))
 
-        # Metals: send plain units (100 = 0.01 lot on this broker)
-        if any(metal in sym_upper for metal in ["XAU", "XAG", "GOLD", "SILVER"]):
-            min_units = 100  # 0.01 lot metals
-            units = int(base_units)
-            if units < min_units:
-                logger.warning(
-                    f"[{account_name}] Volume {units} below minimum {min_units}, "
-                    f"adjusting to {min_units} units"
-                )
-                units = min_units
-            volume_to_send = units
+        # cTrader side symbol specs (in cents-of-units)
+        symbol = client.symbol_details.get(symbol_id) if hasattr(client, "symbol_details") else None
 
-        # Forex: send cents of units (volume/100 = units in cTrader)
+        if symbol is None:
+            # Fallback to old behavior if we don't have symbol details
+            logger.warning(
+                f"[{account_name}] No symbol details for {mt5_symbol} "
+                f"(id={symbol_id}), falling back to lots_to_units"
+            )
+            base_units = mapper.lots_to_units(adjusted_lots, mt5_symbol)
+            sym_upper = (mt5_symbol or "").upper()
+
+            if any(metal in sym_upper for metal in ["XAU", "XAG", "GOLD", "SILVER"]):
+                min_units = 100  # 0.01 lot metals
+                units = int(base_units)
+                if units < min_units:
+                    logger.warning(
+                        f"[{account_name}] Volume {units} below minimum {min_units}, "
+                        f"adjusting to {min_units} units"
+                    )
+                    units = min_units
+                volume_to_send = units
+            else:
+                units = int(base_units)
+                cents = units * 100
+                min_units = 1000  # 0.01 lot forex
+                min_cents = min_units * 100
+                if cents < min_cents:
+                    logger.warning(
+                        f"[{account_name}] Volume {cents} below minimum {min_cents}, "
+                        f"adjusting to {min_cents}"
+                    )
+                    cents = min_cents
+                volume_to_send = cents
         else:
-            units = int(base_units)  # e.g. 0.01 lot EURUSD -> 1000 units
-            cents = units * 100
+            lot_size_cents = getattr(symbol, "lotSize", 0)
+            min_volume_cents = getattr(symbol, "minVolume", 0)
+            max_volume_cents = getattr(symbol, "maxVolume", 0)
+            step_volume_cents = getattr(symbol, "stepVolume", 0)
 
-            min_units = 1000         # 0.01 lot forex
-            min_cents = min_units * 100
-            if cents < min_cents:
-                logger.warning(
-                    f"[{account_name}] Volume {cents} below minimum {min_cents}, "
-                    f"adjusting to {min_cents}"
-                )
-                cents = min_cents
+            volume_to_send = convert_mt5_lots_to_ctrader_cents(
+                mt5_lots=adjusted_lots,
+                mt5_contract_size=mt5_contract_size,
+                mt5_volume_min=mt5_volume_min,
+                mt5_volume_step=mt5_volume_step,
+                lot_size_cents=lot_size_cents,
+                min_volume_cents=min_volume_cents,
+                max_volume_cents=max_volume_cents,
+                step_volume_cents=step_volume_cents,
+            )
 
-            volume_to_send = cents
+            logger.info(
+                f"[{account_name}] Volume conversion: symbol_id={symbol_id}, "
+                f"mt5_lots={adjusted_lots:.4f}, mt5_contract_size={mt5_contract_size}, "
+                f"lotSize={lot_size_cents}, min={min_volume_cents}, "
+                f"max={max_volume_cents}, step={step_volume_cents} -> "
+                f"volume_cents={volume_to_send}"
+            )
 
         final_sl = sl if (sl > 0 and config.copy_sl) else None
         final_tp = tp if (tp > 0 and config.copy_tp) else None
