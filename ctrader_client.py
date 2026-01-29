@@ -60,6 +60,9 @@ class CTraderClient:
 
         # Dynamic symbol map for this account: NAME -> symbolId
         self.symbol_name_to_id: Dict[str, int] = {}
+
+        # New: full symbol details for this account: symbolId -> ProtoOASymbol
+        self.symbol_details: Dict[int, object] = {}
         
         # Callbacks
         self._on_connect_callback: Optional[Callable] = None
@@ -87,6 +90,7 @@ class CTraderClient:
         self.is_app_authed = False
         self.is_account_authed = False
         self.symbol_name_to_id.clear()
+        self.symbol_details.clear()
     
     def _handle_message(self, client, message):
         """Internal: Handle incoming messages."""
@@ -154,10 +158,12 @@ class CTraderClient:
                 extracted = Protobuf.extract(result)
                 count = 0
                 self.symbol_name_to_id.clear()
+                self.symbol_details.clear()
                 # extracted.symbol is a repeated ProtoOASymbol
                 for s in extracted.symbol:
                     name = s.symbolName.upper()
                     self.symbol_name_to_id[name] = s.symbolId
+                    self.symbol_details[s.symbolId] = s
                     count += 1
                 logger.info(f"Loaded {count} symbols for account {self.account_id}")
             except Exception as e:
