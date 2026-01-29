@@ -185,48 +185,53 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             config.min_lot_size, min(adjusted_lots, config.max_lot_size)
         )
 
-        # Use SymbolMapper helper; use MT5 contract info if present
-        mt5_contract_size = raw_event.get("mt5_contract_size")
-        mt5_vol_min = raw_event.get("mt5_volume_min")
-        mt5_vol_step = raw_event.get("mt5_volume_step")
-
+        # Use SymbolMapper helper; MT5 contract info present in raw_event but
+        # currently not needed here (we infer behavior per symbol type).
         base_units = mapper.lots_to_units(adjusted_lots, mt5_symbol)
 
-        # Symbol-specific minimums (fallback if MT5 info not usable)
         sym_upper = (mt5_symbol or "").upper()
+
+        # Metals: send plain units (100 = 0.01 lot on this broker)
         if any(metal in sym_upper for metal in ["XAU", "XAG", "GOLD", "SILVER"]):
-            default_min_units = 100
-        else:
-            default_min_units = 1000
+            min_units = 100  # 0.01 lot metals
+            units = int(base_units)
+            if units < min_units:
+                logger.warning(
+                    f"[{account_name}] Volume {units} below minimum {min_units}, "
+                    f"adjusting to {min_units} units"
+                )
+                units = min_units
+            volume_to_send = units
 
-        # If MT5 sent a meaningful min volume in lots, convert to units
-        if mt5_vol_min is not None and mt5_vol_min > 0:
-            mt5_min_units = mapper.lots_to_units(mt5_vol_min, mt5_symbol)
-            MIN_UNITS = int(mt5_min_units)
+        # Forex: send cents of units (volume/100 = units in cTrader)
         else:
-            MIN_UNITS = default_min_units
+            units = int(base_units)  # e.g. 0.01 lot EURUSD -> 1000 units
+            cents = units * 100
 
-        volume_units = int(base_units)
-        if volume_units < MIN_UNITS:
-            logger.warning(
-                f"[{account_name}] Volume {volume_units} below minimum {MIN_UNITS}, "
-                f"adjusting to {MIN_UNITS} units"
-            )
-            volume_units = MIN_UNITS
+            min_units = 1000         # 0.01 lot forex
+            min_cents = min_units * 100
+            if cents < min_cents:
+                logger.warning(
+                    f"[{account_name}] Volume {cents} below minimum {min_cents}, "
+                    f"adjusting to {min_cents}"
+                )
+                cents = min_cents
+
+            volume_to_send = cents
 
         final_sl = sl if (sl > 0 and config.copy_sl) else None
         final_tp = tp if (tp > 0 and config.copy_tp) else None
 
         logger.info(
             f"[{account_name}] Sending: symbol_id={symbol_id}, side={side}, "
-            f"volume={volume_units} units (from {volume} lots * {config.lot_multiplier})"
+            f"volume={volume_to_send} (from {volume} lots * {config.lot_multiplier})"
         )
 
         client.send_market_order(
             account_id=config.account_id,
             symbol_id=symbol_id,
             side=side,
-            volume=volume_units,
+            volume=volume_to_send,
             sl=final_sl,
             tp=final_tp,
             label=f"MT5_{ticket}",
