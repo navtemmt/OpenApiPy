@@ -71,17 +71,19 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
     def _process_trade_event(self, event):
         """Process trade event and forward to cTrader.
         
-        Expected event format:
+        MT5 EA sends events with 'action' field (OPEN/MODIFY/CLOSE).
+        
+        Expected event format from MT5:
         {
-            "event": "open|modify|close",
+            "action": "OPEN|MODIFY|CLOSE",
             "ticket": 12345,
-            "symbol": "XAUUSD",
-            "side": "buy|sell",
-            "lots": 0.10,
-            "price": 2410.50,
-            "sl": 2400.00,
-            "tp": 2430.00,
-            "comment": "optional"
+            "symbol": "EURUSD",
+            "type": "BUY|SELL",
+            "volume": 0.01,
+            "price": 1.19779,
+            "sl": 0.0,
+            "tp": 0.0,
+            "magic": 0
         }
         """
         if not self.ctrader_client or not self.ctrader_client.is_app_authed:
@@ -89,7 +91,10 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             # TODO: Implement queue for events received before cTrader is ready
             return
         
-        event_type = event.get('event')
+        # Get action from either 'action' or 'event' field, normalize to lowercase
+        event_type = event.get('action', event.get('event'))
+        if event_type:
+            event_type = event_type.lower()
         
         if event_type == 'open':
             self._handle_open(event)
@@ -106,28 +111,32 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
         # TODO: Convert lots to units (MT5 uses lots, cTrader uses units)
         # TODO: Get account_id from configuration
         
+        ticket = event.get('ticket')
         symbol = event.get('symbol')
-        side = event.get('side', 'buy').lower()
-        lots = event.get('lots', 0.01)
-        sl = event.get('sl')
-        tp = event.get('tp')
+        # MT5 EA sends 'type' (BUY/SELL), not 'side'
+        side = event.get('type', event.get('side', 'BUY')).lower()
+        # MT5 EA sends 'volume' (in lots), not 'lots'
+        volume = event.get('volume', event.get('lots', 0.01))
+        sl = event.get('sl', 0.0)
+        tp = event.get('tp', 0.0)
+        magic = event.get('magic', 0)
         
-        logger.info(f"Opening {side} order: {lots} lots of {symbol}")
+        logger.info(f"Opening {side} order: {volume} lots of {symbol} (ticket #{ticket}, magic {magic})")
         
         # Example mapping (you'll need to implement proper symbol/account lookup)
         # account_id = 12345  # Your cTrader account ID
-        # symbol_id = 1  # Symbol ID for XAUUSD on cTrader
-        # volume = int(lots * 100000)  # Convert lots to units
+        # symbol_id = 1  # Symbol ID for EURUSD on cTrader
+        # volume_units = int(volume * 100000)  # Convert lots to units (for forex)
         
         # Uncomment when cTrader is active:
         # self.ctrader_client.send_market_order(
         #     account_id=account_id,
         #     symbol_id=symbol_id,
         #     side=side,
-        #     volume=volume,
-        #     sl=sl,
-        #     tp=tp,
-        #     label=f"MT5_{event.get('ticket')}"
+        #     volume=volume_units,
+        #     sl=sl if sl > 0 else None,
+        #     tp=tp if tp > 0 else None,
+        #     label=f"MT5_{ticket}"
         # )
         
         logger.info(f"Order forwarded to cTrader (placeholder)")
@@ -135,8 +144,8 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
     def _handle_modify(self, event):
         """Handle position modification event."""
         ticket = event.get('ticket')
-        sl = event.get('sl')
-        tp = event.get('tp')
+        sl = event.get('sl', 0.0)
+        tp = event.get('tp', 0.0)
         
         logger.info(f"Modifying position {ticket}: SL={sl}, TP={tp}")
         
@@ -148,8 +157,8 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
         # self.ctrader_client.modify_position(
         #     account_id=account_id,
         #     position_id=position_id,
-        #     sl=sl,
-        #     tp=tp
+        #     sl=sl if sl > 0 else None,
+        #     tp=tp if tp > 0 else None
         # )
         
         logger.info(f"Position modification forwarded to cTrader (placeholder)")
@@ -157,20 +166,20 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
     def _handle_close(self, event):
         """Handle position close event."""
         ticket = event.get('ticket')
-        lots = event.get('lots', 0)
+        volume = event.get('volume', event.get('lots', 0))
         
-        logger.info(f"Closing position {ticket}: {lots} lots")
+        logger.info(f"Closing position {ticket}: {volume} lots")
         
         # TODO: Look up cTrader position_id and convert lots to units
         # position_id = get_ctrader_position_id(ticket)
         # account_id = get_account_id()
-        # volume = int(lots * 100000)
+        # volume_units = int(volume * 100000)
         
         # Uncomment when cTrader is active:
         # self.ctrader_client.close_position(
         #     account_id=account_id,
         #     position_id=position_id,
-        #     volume=volume
+        #     volume=volume_units
         # )
         
         logger.info(f"Position close forwarded to cTrader (placeholder)")
