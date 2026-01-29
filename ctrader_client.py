@@ -3,7 +3,6 @@
 Provides high-level trading methods wrapping the low-level OpenApiPy SDK.
 """
 import os
-import sys
 import logging
 from typing import Optional, Callable
 from dotenv import load_dotenv
@@ -29,7 +28,7 @@ logger = logging.getLogger(__name__)
 class CTraderClient:
     """High-level wrapper for cTrader Open API trading operations."""
     
-    def __init__(self, env="demo"):
+    def __init__(self, env: str = "demo"):
         """Initialize client.
         
         Args:
@@ -55,12 +54,12 @@ class CTraderClient:
         self.is_connected = False
         self.is_app_authed = False
         self.is_account_authed = False
-        self.account_id = None
-        self.access_token = None
+        self.account_id: Optional[int] = None
+        self.access_token: Optional[str] = None
         
         # Callbacks
-        self._on_connect_callback = None
-        self._on_message_callback = None
+        self._on_connect_callback: Optional[Callable] = None
+        self._on_message_callback: Optional[Callable] = None
         
         # Setup client callbacks
         self.client.setConnectedCallback(self._handle_connected)
@@ -111,10 +110,13 @@ class CTraderClient:
         self.is_app_authed = True
         
         # Authorize the trading account to keep connection alive
-        if self.account_id and self.access_token:
+        if self.account_id and self.account_id > 0:
             self._authorize_account()
         else:
-            logger.warning("No account credentials set - connection may close")
+            logger.warning(
+                "No valid account credentials set - connection may close "
+                f"(account_id={self.account_id}, access_token={'set' if self.access_token else 'not set'})"
+            )
         
         if self._on_connect_callback:
             self._on_connect_callback()
@@ -124,7 +126,7 @@ class CTraderClient:
         logger.info(f"Authorizing account {self.account_id}...")
         req = ProtoOAAccountAuthReq()
         req.ctidTraderAccountId = self.account_id
-        req.accessToken = self.access_token
+        req.accessToken = self.access_token or ""
         d = self.client.send(req)
         d.addCallback(self._on_account_auth_success)
         d.addErrback(self._on_error)
@@ -185,9 +187,16 @@ class CTraderClient:
         d = self.client.send(req)
         d.addErrback(self._on_error)
     
-    def send_market_order(self, account_id: int, symbol_id: int, side: str, 
-                         volume: int, sl: Optional[float] = None, 
-                         tp: Optional[float] = None, label: str = "MT5_Copy"):
+    def send_market_order(
+        self,
+        account_id: int,
+        symbol_id: int,
+        side: str,
+        volume: int,
+        sl: Optional[float] = None,
+        tp: Optional[float] = None,
+        label: str = "MT5_Copy",
+    ):
         """Send a market order.
         
         Args:
@@ -221,11 +230,26 @@ class CTraderClient:
         
         logger.info(f"Sending market order: {side} {volume} units of symbol {symbol_id}")
         d = self.client.send(req)
+
+        # Log server response for debugging why trades might not appear
+        def _on_order_response(result):
+            try:
+                extracted = Protobuf.extract(result)
+                logger.info(f"Order response message: {extracted}")
+            except Exception as e:
+                logger.warning(f"Failed to extract order response: {e}; raw={result}")
+
+        d.addCallback(_on_order_response)
         d.addErrback(self._on_error)
         return d
     
-    def modify_position(self, account_id: int, position_id: int, 
-                       sl: Optional[float] = None, tp: Optional[float] = None):
+    def modify_position(
+        self,
+        account_id: int,
+        position_id: int,
+        sl: Optional[float] = None,
+        tp: Optional[float] = None,
+    ):
         """Modify position SL/TP.
         
         Args:
