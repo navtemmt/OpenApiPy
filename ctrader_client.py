@@ -145,32 +145,44 @@ class CTraderClient:
         self._load_symbol_map()
     
     def _load_symbol_map(self):
-        """Fetch all symbols for this account and build NAME -> symbolId map."""
-        if not self.account_id:
-            return
-        logger.info(f"Loading symbol map for account {self.account_id}...")
-        req = ProtoOASymbolsListReq()
-        req.ctidTraderAccountId = self.account_id
-        d = self.client.send(req)
+    if not self.account_id:
+        return
+    logger.info(f"Loading symbol map for account {self.account_id}...")
+    req = ProtoOASymbolsListReq()
+    req.ctidTraderAccountId = self.account_id
+    d = self.client.send(req)
 
-        def _on_symbols_list(result):
-            try:
-                extracted = Protobuf.extract(result)
-                count = 0
-                self.symbol_name_to_id.clear()
-                self.symbol_details.clear()
-                # extracted.symbol is a repeated ProtoOASymbol
-                for s in extracted.symbol:
-                    name = s.symbolName.upper()
-                    self.symbol_name_to_id[name] = s.symbolId
-                    self.symbol_details[s.symbolId] = s
-                    count += 1
-                logger.info(f"Loaded {count} symbols for account {self.account_id}")
-            except Exception as e:
-                logger.error(f"Failed to build symbol map: {e}", exc_info=True)
+    def _on_symbols_list(result):
+        try:
+            extracted = Protobuf.extract(result)
+            # Try common container field names
+            if hasattr(extracted, "symbol"):
+                symbols = extracted.symbol
+            elif hasattr(extracted, "symbolList"):
+                symbols = extracted.symbolList
+            else:
+                logger.error(f"Unexpected symbols list response: {extracted}")
+                return
 
-        d.addCallback(_on_symbols_list)
-        d.addErrback(self._on_error)
+            count = 0
+            self.symbol_name_to_id.clear()
+            self.symbol_details.clear()
+
+            for s in symbols:
+                name = s.symbolName.upper()
+                self.symbol_name_to_id[name] = s.symbolId
+                self.symbol_details[s.symbolId] = s
+                count += 1
+
+            logger.info(
+                f"Loaded {count} symbols for account {self.account_id}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to build symbol map: {e}", exc_info=True)
+
+    d.addCallback(_on_symbols_list)
+    d.addErrback(self._on_error)
+
 
     def get_symbol_id_by_name(self, name: str) -> Optional[int]:
         """Get broker symbolId by symbol name (uppercased)."""
