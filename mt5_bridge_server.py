@@ -1,6 +1,6 @@
-"""MT5 to cTrader Copy Trading Bridge Server
+"""MT5 to cTrader Copy Trading Bridge Server - Multi-Account Version
 
-Receives trade events from MT5 EA via JSON and forwards to cTrader.
+Receives trade events from MT5 EA via JSON and forwards to multiple cTrader accounts.
 """
 import json
 import logging
@@ -9,7 +9,9 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
 from twisted.internet import reactor
 
-from ctrader_client import CTraderClient
+from config_loader import get_multi_account_config
+from account_manager import get_account_manager
+from symbol_mapper import SymbolMapper
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,8 +23,8 @@ logger = logging.getLogger(__name__)
 class MT5BridgeHandler(BaseHTTPRequestHandler):
     """HTTP request handler for MT5 trade events."""
     
-    # Class-level reference to cTrader client
-    ctrader_client = None
+    # Class-level reference to account manager
+    account_manager = None
     
     def log_message(self, format, *args):
         """Override to use Python logging instead of printing."""
@@ -58,18 +60,32 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
     
     def do_GET(self):
         """Handle GET request (health check)."""
+        # Get account status
+        accounts = self.account_manager.get_all_accounts() if self.account_manager else {}
+        account_status = {
+            name: {
+                "account_id": config.account_id,
+                "enabled": config.enabled,
+                "connected": client.is_app_authed if client else False,
+                "daily_trades": config.daily_trade_count,
+                "current_positions": config.current_positions
+            }
+            for name, (client, config) in accounts.items()
+        }
+        
         self.send_response(200)
         self.send_header('Content-type', 'application/json')
         self.end_headers()
         response = json.dumps({
             "status": "online",
-            "service": "MT5 to cTrader Bridge",
-            "version": "1.0.0"
-        })
+            "service": "MT5 to cTrader Bridge (Multi-Account)",
+            "version": "2.0.0",
+            "accounts": account_status
+        }, indent=2)
         self.wfile.write(response.encode('utf-8'))
     
     def _process_trade_event(self, event):
-        """Process trade event and forward to cTrader.
+        """Process trade event and forward to all enabled cTrader accounts.
         
         MT5 EA sends events with 'action' field (OPEN/MODIFY/CLOSE).
         
@@ -86,9 +102,8 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             "magic": 0
         }
         """
-        if not self.ctrader_client or not self.ctrader_client.is_app_authed:
-            logger.warning("cTrader client not ready, queueing trade event")
-            # TODO: Implement queue for events received before cTrader is ready
+        if not self.account_manager:
+            logger.error("Account manager not initialized")
             return
         
         # Get action from either 'action' or 'event' field, normalize to lowercase
@@ -106,40 +121,87 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             logger.error(f"Unknown event type: {event_type}")
     
     def _handle_open(self, event):
-        """Handle new order event."""
-        # TODO: Map MT5 symbol to cTrader symbol_id
-        # TODO: Convert lots to units (MT5 uses lots, cTrader uses units)
-        # TODO: Get account_id from configuration
-        
+        """Handle new order event - copy to all enabled accounts."""
         ticket = event.get('ticket')
-        symbol = event.get('symbol')
-        # MT5 EA sends 'type' (BUY/SELL), not 'side'
+        mt5_symbol = event.get('symbol')
         side = event.get('type', event.get('side', 'BUY')).lower()
-        # MT5 EA sends 'volume' (in lots), not 'lots'
         volume = event.get('volume', event.get('lots', 0.01))
         sl = event.get('sl', 0.0)
         tp = event.get('tp', 0.0)
         magic = event.get('magic', 0)
         
-        logger.info(f"Opening {side} order: {volume} lots of {symbol} (ticket #{ticket}, magic {magic})")
+        logger.info(f"Opening {side} order: {volume} lots of {mt5_symbol} (ticket #{ticket}, magic {magic})")
         
-        # Example mapping (you'll need to implement proper symbol/account lookup)
-        # account_id = 12345  # Your cTrader account ID
-        # symbol_id = 1  # Symbol ID for EURUSD on cTrader
-        # volume_units = int(volume * 100000)  # Convert lots to units (for forex)
+        # Get all active accounts
+        accounts = self.account_manager.get_all_accounts()
         
-        # Uncomment when cTrader is active:
-        # self.ctrader_client.send_market_order(
-        #     account_id=account_id,
-        #     symbol_id=symbol_id,
-        #     side=side,
-        #     volume=volume_units,
-        #     sl=sl if sl > 0 else None,
-        #     tp=tp if tp > 0 else None,
-        #     label=f"MT5_{ticket}"
-        # )
+        for account_name, (client, config) in accounts.items():
+            try:
+                self._copy_open_to_account(
+                    account_name, client, config,
+                    ticket, mt5_symbol, side, volume, sl, tp, magic
+                )
+            except Exception as e:
+                logger.error(f"Failed to copy trade to {account_name}: {e}", exc_info=True)
+    
+    def _copy_open_to_account(self, account_name, client, config, ticket, mt5_symbol, side, volume, sl, tp, magic):
+        """Copy open order to a specific account."""
+        # Check if client is ready
+        if not client or not client.is_app_authed:
+            logger.warning(f"[{account_name}] Client not ready, skipping")
+            return
         
-        logger.info(f"Order forwarded to cTrader (placeholder)")
+        # Get multi-account config
+        multi_config = get_multi_account_config()
+        
+        # Check if trade should be copied based on account filters
+        should_copy, reason = multi_config.should_copy_trade(config, mt5_symbol, magic, volume)
+        if not should_copy:
+            logger.info(f"[{account_name}] Skipping: {reason}")
+            return
+        
+        # Create symbol mapper for this account
+        mapper = SymbolMapper(
+            prefix=config.symbol_prefix,
+            suffix=config.symbol_suffix,
+            custom_map=config.custom_symbols
+        )
+        
+        # Get cTrader symbol ID
+        symbol_id = mapper.get_symbol_id(mt5_symbol)
+        if symbol_id is None:
+            logger.error(f"[{account_name}] Unknown symbol {mt5_symbol}, skipping")
+            return
+        
+        # Apply account-specific lot multiplier and limits
+        adjusted_volume = config.lot_multiplier * volume
+        adjusted_volume = max(config.min_lot_size, min(adjusted_volume, config.max_lot_size))
+        
+        # Convert to units
+        volume_units = mapper.lots_to_units(adjusted_volume, mt5_symbol)
+        
+        # Check if SL/TP should be copied
+        final_sl = sl if (sl > 0 and config.copy_sl) else None
+        final_tp = tp if (tp > 0 and config.copy_tp) else None
+        
+        logger.info(f"[{account_name}] Sending: symbol_id={symbol_id}, side={side}, volume={volume_units} units (from {volume} lots * {config.lot_multiplier})")
+        
+        # Send order to cTrader
+        client.send_market_order(
+            account_id=config.account_id,
+            symbol_id=symbol_id,
+            side=side,
+            volume=volume_units,
+            sl=final_sl,
+            tp=final_tp,
+            label=f"MT5_{ticket}"
+        )
+        
+        # Update trade counter
+        config.daily_trade_count += 1
+        config.current_positions += 1
+        
+        logger.info(f"✓ [{account_name}] Order sent successfully (daily: {config.daily_trade_count}/{config.max_daily_trades})")
     
     def _handle_modify(self, event):
         """Handle position modification event."""
@@ -149,19 +211,9 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
         
         logger.info(f"Modifying position {ticket}: SL={sl}, TP={tp}")
         
-        # TODO: Look up cTrader position_id from MT5 ticket mapping
-        # position_id = get_ctrader_position_id(ticket)
-        # account_id = get_account_id()
-        
-        # Uncomment when cTrader is active:
-        # self.ctrader_client.modify_position(
-        #     account_id=account_id,
-        #     position_id=position_id,
-        #     sl=sl if sl > 0 else None,
-        #     tp=tp if tp > 0 else None
-        # )
-        
-        logger.info(f"Position modification forwarded to cTrader (placeholder)")
+        # TODO: Implement position tracking to map MT5 ticket to cTrader position_id per account
+        # For now, just log
+        logger.warning("Position modification not yet implemented for multi-account")
     
     def _handle_close(self, event):
         """Handle position close event."""
@@ -170,19 +222,9 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
         
         logger.info(f"Closing position {ticket}: {volume} lots")
         
-        # TODO: Look up cTrader position_id and convert lots to units
-        # position_id = get_ctrader_position_id(ticket)
-        # account_id = get_account_id()
-        # volume_units = int(volume * 100000)
-        
-        # Uncomment when cTrader is active:
-        # self.ctrader_client.close_position(
-        #     account_id=account_id,
-        #     position_id=position_id,
-        #     volume=volume_units
-        # )
-        
-        logger.info(f"Position close forwarded to cTrader (placeholder)")
+        # TODO: Implement position tracking to map MT5 ticket to cTrader position_id per account
+        # For now, just log
+        logger.warning("Position close not yet implemented for multi-account")
 
 
 def run_http_server(host='127.0.0.1', port=3140):
@@ -195,31 +237,47 @@ def run_http_server(host='127.0.0.1', port=3140):
 
 def main():
     """Main entry point for the bridge server."""
-    logger.info("Starting MT5 to cTrader Copy Trading Bridge")
+    logger.info("=" * 70)
+    logger.info("MT5 to cTrader Copy Trading Bridge - Multi-Account Version")
+    logger.info("=" * 70)
     
-    # Initialize cTrader client
-    logger.info("Initializing cTrader client...")
-    ctrader = CTraderClient(env="demo")  # Change to "live" when ready
+    # Load multi-account configuration
+    logger.info("Loading account configurations...")
+    try:
+        config = get_multi_account_config()
+    except FileNotFoundError as e:
+        logger.error(str(e))
+        logger.error("Please create accounts_config.ini file")
+        return
     
-    # Set cTrader client reference in handler
-    MT5BridgeHandler.ctrader_client = ctrader
+    enabled_accounts = config.get_enabled_accounts()
+    if not enabled_accounts:
+        logger.error("No enabled accounts found in accounts_config.ini")
+        return
     
-    # Define callback for when cTrader connection is ready
-    def on_ctrader_connected():
-        logger.info("cTrader client authenticated and ready")
-        # TODO: Authenticate account if needed
-        # ctrader.authenticate_account(access_token="your_token")
+    logger.info(f"Found {len(enabled_accounts)} enabled account(s):")
+    for acc in enabled_accounts:
+        logger.info(f"  - {acc.name}: Account ID {acc.account_id} ({acc.environment})")
     
-    # Connect to cTrader
-    logger.info("Connecting to cTrader Open API...")
-    ctrader.connect(on_connect=on_ctrader_connected)
+    # Initialize account manager
+    logger.info("\nInitializing cTrader connections...")
+    account_manager = get_account_manager()
+    
+    # Connect all enabled accounts
+    for account in enabled_accounts:
+        account_manager.add_account(account)
+    
+    # Set account manager reference in handler
+    MT5BridgeHandler.account_manager = account_manager
     
     # Start HTTP server in a separate thread
+    logger.info("\nStarting HTTP server...")
     server_thread = Thread(target=run_http_server, daemon=True)
     server_thread.start()
     
     # Run Twisted reactor (blocks here)
-    logger.info("Starting Twisted reactor...")
+    logger.info("Bridge server is running. Press Ctrl+C to stop.")
+    logger.info("=" * 70)
     reactor.run()
 
 
@@ -227,5 +285,5 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        logger.info("Shutting down bridge server...")
+        logger.info("\nShutting down bridge server...")
         reactor.stop()
