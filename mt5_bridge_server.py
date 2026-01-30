@@ -403,15 +403,15 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
         """Handle position close event."""
         ticket = event.get("ticket")
         volume = event.get("volume", event.get("lots", 0))
-
+    
         logger.info(f"Closing position {ticket}: {volume} lots")
-
+    
         if not self.account_manager:
             logger.error("Account manager not initialized")
             return
-
+    
         accounts = self.account_manager.get_all_accounts()
-
+    
         for account_name, (client, config) in accounts.items():
             try:
                 position_id = self.account_manager.get_position_id(account_name, ticket)
@@ -421,25 +421,99 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                         f"ticket {ticket}, skipping close"
                     )
                     continue
-
+    
                 if not client or not client.is_app_authed:
                     logger.warning(f"[{account_name}] Client not ready, skipping close")
                     continue
-
+    
+                # Get the position details to determine volume
+                # For partial close: convert MT5 volume to cTrader volume
+                # For full close: need to get the full position volume from cTrader
+                
+                mt5_symbol = event.get("symbol")
+                
+                # Convert MT5 lots to cTrader volume (same logic as open)
+                if volume > 0 and mt5_symbol:
+                    adjusted_lots = config.lot_multiplier * volume
+                    adjusted_lots = max(
+                        config.min_lot_size, min(adjusted_lots, config.max_lot_size)
+                    )
+                    
+                    mapper = SymbolMapper(
+                        prefix=config.symbol_prefix,
+                        suffix=config.symbol_suffix,
+                        custom_map=config.custom_symbols,
+                        broker_symbol_map=client.symbol_name_to_id,
+                    )
+                    
+                    symbol_id = mapper.get_symbol_id(mt5_symbol)
+                    
+                    # Use same conversion logic as _handle_open
+                    mt5_contract_size = float(event.get("mt5_contract_size", 1.0))
+                    mt5_volume_min = float(event.get("mt5_volume_min", 0.01))
+                    mt5_volume_step = float(event.get("mt5_volume_step", 0.01))
+                    
+                    symbol = client.symbol_details.get(symbol_id) if symbol_id and hasattr(client, "symbol_details") else None
+                    
+                    if symbol is None:
+                        logger.warning(
+                            f"[{account_name}] No symbol details for {mt5_symbol}, "
+                            f"using fallback volume calculation"
+                        )
+                        base_units = mapper.lots_to_units(adjusted_lots, mt5_symbol)
+                        sym_upper = (mt5_symbol or "").upper()
+                        
+                        if any(metal in sym_upper for metal in ["XAU", "XAG", "GOLD", "SILVER"]):
+                            volume_to_send = int(base_units)
+                        else:
+                            volume_to_send = int(base_units) * 100
+                    else:
+                        lot_size_cents = getattr(symbol, "lotSize", 0)
+                        min_volume_cents = getattr(symbol, "minVolume", 0)
+                        max_volume_cents = getattr(symbol, "maxVolume", 0)
+                        step_volume_cents = getattr(symbol, "stepVolume", 0)
+                        
+                        volume_to_send = convert_mt5_lots_to_ctrader_cents(
+                            mt5_lots=adjusted_lots,
+                            mt5_contract_size=mt5_contract_size,
+                            mt5_volume_min=mt5_volume_min,
+                            mt5_volume_step=mt5_volume_step,
+                            lot_size_cents=lot_size_cents,
+                            min_volume_cents=min_volume_cents,
+                            max_volume_cents=max_volume_cents,
+                            step_volume_cents=step_volume_cents,
+                        )
+                else:
+                    # If volume is 0 or missing, this indicates a full close
+                    # We need to get the actual position volume from the account
+                    # For now, log a warning - you may need to track position volumes
+                    logger.warning(
+                        f"[{account_name}] Close event has volume={volume}, "
+                        f"need to implement position volume tracking"
+                    )
+                    # As a workaround, you could use a very large number to close the entire position
+                    # cTrader API will automatically cap it to the actual position size
+                    volume_to_send = 9999999999  # Max volume to ensure full close
+    
                 logger.info(
                     f"[{account_name}] Applying close: ticket {ticket} -> "
-                    f"positionId {position_id}"
+                    f"positionId {position_id}, volume={volume_to_send}"
                 )
-
+    
                 client.close_position(
                     account_id=config.account_id,
                     position_id=position_id,
+                    volume=volume_to_send,
                 )
+                
+                config.current_positions -= 1
+                
             except Exception as e:
                 logger.error(
                     f"[{account_name}] Failed to close position for ticket {ticket}: {e}",
                     exc_info=True,
                 )
+
 
 
 def run_http_server(host: str = "127.0.0.1", port: int = 3140):
