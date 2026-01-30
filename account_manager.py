@@ -55,6 +55,8 @@ class AccountManager:
 
         # Hook message callback (for future position tracking)
         def on_message(message, acc_name=account.name):
+            # Optional: uncomment for raw debug
+            # logger.debug(f"[{acc_name}] on_message raw: {message}")
             try:
                 extracted = Protobuf.extract(message)
 
@@ -87,6 +89,8 @@ class AccountManager:
             except Exception as e:
                 logger.debug(f"[{acc_name}] Failed to parse message: {e}")
 
+        # Register the callback so it actually runs
+        client.set_message_callback(on_message)
         
         # Connect the client (will auto-authorize account)
         def on_connected():
