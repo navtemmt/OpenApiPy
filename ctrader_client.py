@@ -187,6 +187,18 @@ class CTraderClient:
         """Get broker symbolId by symbol name (uppercased)."""
         return self.symbol_name_to_id.get(name.upper())
     
+    def round_price_for_symbol(self, symbol_id: int, price: float) -> float:
+        """Round a price to the symbol's configured digits, if available."""
+        symbol = self.symbol_details.get(symbol_id)
+        if not symbol or not hasattr(symbol, "digits"):
+            return price
+        try:
+            digits = int(symbol.digits)
+        except Exception:
+            return price
+        factor = 10 ** digits
+        return round(price * factor) / factor
+    
     def _on_error(self, failure):
         """Internal: Handle errors."""
         logger.error(f"Error: {failure}")
@@ -268,21 +280,37 @@ class CTraderClient:
         position_id: int,
         sl: Optional[float] = None,
         tp: Optional[float] = None,
+        symbol_id: Optional[int] = None,
     ):
-        """Modify position SL/TP."""
+        """Modify position SL/TP.
+        
+        If symbol_id is provided and symbol details are known, SL/TP will be
+        rounded to the symbol's price precision before sending.
+        """
         if not self.is_app_authed:
             raise RuntimeError("Not authenticated. Call connect() first.")
+        
+        # Optional per-symbol rounding
+        orig_sl, orig_tp = sl, tp
+        if symbol_id is not None:
+            if sl is not None:
+                sl = self.round_price_for_symbol(symbol_id, sl)
+            if tp is not None:
+                tp = self.round_price_for_symbol(symbol_id, tp)
         
         req = ProtoOAAmendPositionSLTPReq()
         req.ctidTraderAccountId = account_id
         req.positionId = position_id
         
-        if sl:
+        if sl is not None:
             req.stopLoss = sl
-        if tp:
+        if tp is not None:
             req.takeProfit = tp
         
-        logger.info(f"Modifying position {position_id}: SL={sl}, TP={tp}")
+        logger.info(
+            f"Modifying position {position_id}: "
+            f"SL={orig_sl} -> {sl}, TP={orig_tp} -> {tp}, symbol_id={symbol_id}"
+        )
         d = self.client.send(req)
         d.addErrback(self._on_error)
         return d
