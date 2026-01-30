@@ -51,7 +51,7 @@ class CTraderClient:
         self.client = Client(self.host, self.port, TcpProtocol)
         
         self.is_connected = False
-               self.is_app_authed = False
+        self.is_app_authed = False
         self.is_account_authed = False
         self.account_id: Optional[int] = None
         self.access_token: Optional[str] = None
