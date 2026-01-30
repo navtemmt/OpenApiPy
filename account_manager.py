@@ -3,7 +3,8 @@
 Manages multiple cTrader client connections for different accounts.
 """
 import logging
-from typing import Dict
+from typing import Dict, Optional
+
 from ctrader_client import CTraderClient
 from config_loader import AccountConfig
 
@@ -17,6 +18,8 @@ class AccountManager:
         """Initialize account manager."""
         self.clients: Dict[str, CTraderClient] = {}
         self.configs: Dict[str, AccountConfig] = {}
+        # New: per-account mapping MT5 ticket -> cTrader positionId
+        self.position_maps: Dict[str, Dict[int, int]] = {}
     
     def add_account(self, account: AccountConfig):
         """Add and connect a cTrader account.
@@ -47,6 +50,9 @@ class AccountManager:
         # Store references
         self.clients[account.name] = client
         self.configs[account.name] = account
+        self.position_maps[account.name] = {}  # init empty map
+        
+        # Optional: later we will hook message callbacks here to fill position_maps
         
         # Connect the client (will auto-authorize account)
         def on_connected():
@@ -55,35 +61,24 @@ class AccountManager:
         client.connect(on_connect=on_connected)
     
     def get_client(self, account_name: str) -> CTraderClient:
-        """Get cTrader client for an account.
-        
-        Args:
-            account_name: Account name
-        
-        Returns:
-            CTrader client instance
-        """
+        """Get cTrader client for an account."""
         return self.clients.get(account_name)
     
     def get_config(self, account_name: str) -> AccountConfig:
-        """Get account configuration.
-        
-        Args:
-            account_name: Account name
-        
-        Returns:
-            Account configuration
-        """
+        """Get account configuration."""
         return self.configs.get(account_name)
+
+    def get_position_id(self, account_name: str, mt5_ticket: int) -> Optional[int]:
+        """Get cTrader positionId for an MT5 ticket on a given account."""
+        pos_map = self.position_maps.get(account_name) or {}
+        return pos_map.get(int(mt5_ticket))
     
     def get_all_accounts(self) -> Dict[str, tuple[CTraderClient, AccountConfig]]:
-        """Get all active accounts.
-        
-        Returns:
-            Dict mapping account name to (client, config) tuple
-        """
-        return {name: (self.clients[name], self.configs[name]) 
-                for name in self.clients.keys()}
+        """Get all active accounts."""
+        return {
+            name: (self.clients[name], self.configs[name])
+            for name in self.clients.keys()
+        }
 
 
 # Global instance
