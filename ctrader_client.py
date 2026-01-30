@@ -312,6 +312,15 @@ class CTraderClient:
             f"SL={orig_sl} -> {sl}, TP={orig_tp} -> {tp}, symbol_id={symbol_id}"
         )
         d = self.client.send(req)
+
+        def _on_amend_response(result):
+            try:
+                extracted = Protobuf.extract(result)
+                logger.info(f"Amend response message: {extracted}")
+            except Exception as e:
+                logger.warning(f"Failed to extract amend response: {e}; raw={result}")
+
+        d.addCallback(_on_amend_response)
         d.addErrback(self._on_error)
         return d
     
