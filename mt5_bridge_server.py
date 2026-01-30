@@ -306,7 +306,7 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                 f"volume_cents={volume_to_send}"
             )
 
-                # Broker restriction: absolute SL/TP are not allowed on MARKET orders.
+        # Broker restriction: absolute SL/TP are not allowed on MARKET orders.
         # Send a naked market order; SL/TP can be applied later via modify_position.
         final_sl = None
         final_tp = None
@@ -326,7 +326,6 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             label=f"MT5_{ticket}",
         )
 
-
         config.daily_trade_count += 1
         config.current_positions += 1
 
@@ -342,7 +341,44 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
         tp = event.get("tp", 0.0)
 
         logger.info(f"Modifying position {ticket}: SL={sl}, TP={tp}")
-        logger.warning("Position modification not yet implemented for multi-account")
+
+        if not self.account_manager:
+            logger.error("Account manager not initialized")
+            return
+
+        accounts = self.account_manager.get_all_accounts()
+
+        for account_name, (client, config) in accounts.items():
+            try:
+                position_id = self.account_manager.get_position_id(account_name, ticket)
+                if not position_id:
+                    logger.warning(
+                        f"[{account_name}] No cTrader positionId mapped for MT5 "
+                        f"ticket {ticket}, skipping modify"
+                    )
+                    continue
+
+                if not client or not client.is_app_authed:
+                    logger.warning(f"[{account_name}] Client not ready, skipping modify")
+                    continue
+
+                logger.info(
+                    f"[{account_name}] Applying modify: ticket {ticket} -> "
+                    f"positionId {position_id}, SL={sl}, TP={tp}"
+                )
+
+                # Adjust signature if your CTraderClient differs
+                client.modify_position(
+                    account_id=config.account_id,
+                    position_id=position_id,
+                    sl=sl if sl > 0 else None,
+                    tp=tp if tp > 0 else None,
+                )
+            except Exception as e:
+                logger.error(
+                    f"[{account_name}] Failed to modify position for ticket {ticket}: {e}",
+                    exc_info=True,
+                )
 
     def _handle_close(self, event):
         """Handle position close event."""
@@ -350,7 +386,42 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
         volume = event.get("volume", event.get("lots", 0))
 
         logger.info(f"Closing position {ticket}: {volume} lots")
-        logger.warning("Position close not yet implemented for multi-account")
+
+        if not self.account_manager:
+            logger.error("Account manager not initialized")
+            return
+
+        accounts = self.account_manager.get_all_accounts()
+
+        for account_name, (client, config) in accounts.items():
+            try:
+                position_id = self.account_manager.get_position_id(account_name, ticket)
+                if not position_id:
+                    logger.warning(
+                        f"[{account_name}] No cTrader positionId mapped for MT5 "
+                        f"ticket {ticket}, skipping close"
+                    )
+                    continue
+
+                if not client or not client.is_app_authed:
+                    logger.warning(f"[{account_name}] Client not ready, skipping close")
+                    continue
+
+                logger.info(
+                    f"[{account_name}] Applying close: ticket {ticket} -> "
+                    f"positionId {position_id}"
+                )
+
+                # If your API supports partial close, map MT5 volume to cTrader volume here
+                client.close_position(
+                    account_id=config.account_id,
+                    position_id=position_id,
+                )
+            except Exception as e:
+                logger.error(
+                    f"[{account_name}] Failed to close position for ticket {ticket}: {e}",
+                    exc_info=True,
+                )
 
 
 def run_http_server(host: str = "127.0.0.1", port: int = 3140):
