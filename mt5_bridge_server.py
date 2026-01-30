@@ -426,35 +426,35 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                     logger.warning(f"[{account_name}] Client not ready, skipping close")
                     continue
     
-                # Get the position details to determine volume
-                # For partial close: convert MT5 volume to cTrader volume
-                # For full close: need to get the full position volume from cTrader
-                
                 mt5_symbol = event.get("symbol")
-                
-                # Convert MT5 lots to cTrader volume (same logic as open)
+                volume_to_send = None
+    
+                # Partial close: MT5 sends non-zero lots -> convert like in _handle_open
                 if volume > 0 and mt5_symbol:
                     adjusted_lots = config.lot_multiplier * volume
                     adjusted_lots = max(
                         config.min_lot_size, min(adjusted_lots, config.max_lot_size)
                     )
-                    
+    
                     mapper = SymbolMapper(
                         prefix=config.symbol_prefix,
                         suffix=config.symbol_suffix,
                         custom_map=config.custom_symbols,
                         broker_symbol_map=client.symbol_name_to_id,
                     )
-                    
+    
                     symbol_id = mapper.get_symbol_id(mt5_symbol)
-                    
-                    # Use same conversion logic as _handle_open
+    
                     mt5_contract_size = float(event.get("mt5_contract_size", 1.0))
                     mt5_volume_min = float(event.get("mt5_volume_min", 0.01))
                     mt5_volume_step = float(event.get("mt5_volume_step", 0.01))
-                    
-                    symbol = client.symbol_details.get(symbol_id) if symbol_id and hasattr(client, "symbol_details") else None
-                    
+    
+                    symbol = (
+                        client.symbol_details.get(symbol_id)
+                        if symbol_id and hasattr(client, "symbol_details")
+                        else None
+                    )
+    
                     if symbol is None:
                         logger.warning(
                             f"[{account_name}] No symbol details for {mt5_symbol}, "
@@ -462,7 +462,7 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                         )
                         base_units = mapper.lots_to_units(adjusted_lots, mt5_symbol)
                         sym_upper = (mt5_symbol or "").upper()
-                        
+    
                         if any(metal in sym_upper for metal in ["XAU", "XAG", "GOLD", "SILVER"]):
                             volume_to_send = int(base_units)
                         else:
@@ -472,7 +472,7 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                         min_volume_cents = getattr(symbol, "minVolume", 0)
                         max_volume_cents = getattr(symbol, "maxVolume", 0)
                         step_volume_cents = getattr(symbol, "stepVolume", 0)
-                        
+    
                         volume_to_send = convert_mt5_lots_to_ctrader_cents(
                             mt5_lots=adjusted_lots,
                             mt5_contract_size=mt5_contract_size,
@@ -484,16 +484,18 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                             step_volume_cents=step_volume_cents,
                         )
                 else:
-                    # If volume is 0 or missing, this indicates a full close
-                    # We need to get the actual position volume from the account
-                    # For now, log a warning - you may need to track position volumes
-                    logger.warning(
-                        f"[{account_name}] Close event has volume={volume}, "
-                        f"need to implement position volume tracking"
+                    # Full close: MT5 sends 0 lots -> use the actual cTrader position volume
+                    stored_volume = self.account_manager.get_position_volume(
+                        account_name, position_id
                     )
-                    # As a workaround, you could use a very large number to close the entire position
-                    # cTrader API will automatically cap it to the actual position size
-                    volume_to_send = 9999999999  # Max volume to ensure full close
+                    if stored_volume is None:
+                        logger.warning(
+                            f"[{account_name}] No stored volume for positionId {position_id}, "
+                            f"cannot close position"
+                        )
+                        continue
+    
+                    volume_to_send = stored_volume
     
                 logger.info(
                     f"[{account_name}] Applying close: ticket {ticket} -> "
@@ -505,14 +507,15 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                     position_id=position_id,
                     volume=volume_to_send,
                 )
-                
+    
                 config.current_positions -= 1
-                
+    
             except Exception as e:
                 logger.error(
                     f"[{account_name}] Failed to close position for ticket {ticket}: {e}",
                     exc_info=True,
                 )
+
 
 
 
