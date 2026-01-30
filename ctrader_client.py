@@ -51,7 +51,7 @@ class CTraderClient:
         self.client = Client(self.host, self.port, TcpProtocol)
         
         self.is_connected = False
-        self.is_app_authed = False
+               self.is_app_authed = False
         self.is_account_authed = False
         self.account_id: Optional[int] = None
         self.access_token: Optional[str] = None
@@ -188,14 +188,14 @@ class CTraderClient:
         return self.symbol_name_to_id.get(name.upper())
     
     def round_price_for_symbol(self, symbol_id: int, price: float) -> float:
-        """Round a price to the symbol's configured digits, if available."""
+        """Round a price to the symbol's configured digits, capped at 4."""
         symbol = self.symbol_details.get(symbol_id)
-        if not symbol or not hasattr(symbol, "digits"):
-            return price
-        try:
-            digits = int(symbol.digits)
-        except Exception:
-            return price
+        digits = 4
+        if symbol and hasattr(symbol, "digits"):
+            try:
+                digits = min(4, int(symbol.digits))
+            except Exception:
+                digits = 4
         factor = 10 ** digits
         return round(price * factor) / factor
     
@@ -285,7 +285,7 @@ class CTraderClient:
         """Modify position SL/TP.
         
         If symbol_id is provided and symbol details are known, SL/TP will be
-        rounded to the symbol's price precision before sending.
+        rounded to the symbol's price precision (capped at 4 digits) before sending.
         """
         if not self.is_app_authed:
             raise RuntimeError("Not authenticated. Call connect() first.")
