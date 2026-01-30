@@ -306,8 +306,10 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                 f"volume_cents={volume_to_send}"
             )
 
-        final_sl = sl if (sl > 0 and config.copy_sl) else None
-        final_tp = tp if (tp > 0 and config.copy_tp) else None
+                # Broker restriction: absolute SL/TP are not allowed on MARKET orders.
+        # Send a naked market order; SL/TP can be applied later via modify_position.
+        final_sl = None
+        final_tp = None
 
         logger.info(
             f"[{account_name}] Sending: symbol_id={symbol_id}, side={side}, "
@@ -323,6 +325,7 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             tp=final_tp,
             label=f"MT5_{ticket}",
         )
+
 
         config.daily_trade_count += 1
         config.current_positions += 1
