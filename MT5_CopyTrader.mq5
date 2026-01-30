@@ -188,19 +188,19 @@ void SendOpenSignal(ulong ticket)
 
    string jsonData = StringFormat(
       "{"
-         "\"action\":\"OPEN\","
-         "\"ticket\":%d,"
-         "\"symbol\":\"%s\","
-         "\"type\":\"%s\","
-         "\"volume\":%.2f,"
-         "\"price\":%.5f,"
-         "\"sl\":%.5f,"
-         "\"tp\":%.5f,"
-         "\"magic\":%d,"
-         "\"mt5_contract_size\":%.2f,"
-         "\"mt5_volume_min\":%.2f,"
-         "\"mt5_volume_max\":%.2f,"
-         "\"mt5_volume_step\":%.2f"
+         "\\\"action\\\":\\\"OPEN\\\","
+         "\\\"ticket\\\":%d,"
+         "\\\"symbol\\\":\\\"%s\\\","
+         "\\\"type\\\":\\\"%s\\\","
+         "\\\"volume\\\":%.2f,"
+         "\\\"price\\\":%.5f,"
+         "\\\"sl\\\":%.5f,"
+         "\\\"tp\\\":%.5f,"
+         "\\\"magic\\\":%d,"
+         "\\\"mt5_contract_size\\\":%.2f,"
+         "\\\"mt5_volume_min\\\":%.2f,"
+         "\\\"mt5_volume_max\\\":%.2f,"
+         "\\\"mt5_volume_step\\\":%.2f"
       "}",
       ticket,
       symbol,
@@ -226,7 +226,7 @@ void SendOpenSignal(ulong ticket)
 void SendCloseSignal(long ticket)
 {
    string jsonData = StringFormat(
-      "{\"action\":\"CLOSE\",\"ticket\":%d}",
+      "{\\\"action\\\":\\\"CLOSE\\\",\\\"ticket\\\":%d}",
       ticket
    );
 
@@ -239,15 +239,45 @@ void SendCloseSignal(long ticket)
 //+------------------------------------------------------------------+
 void SendModifySignal(ulong ticket, double sl, double tp)
 {
-   string jsonData = StringFormat(
-      "{\"action\":\"MODIFY\",\"ticket\":%d,\"sl\":%.5f,\"tp\":%.5f}",
-      ticket,
-      sl,
-      tp
-   );
+   // Look up symbol for this ticket from our last known trades
+   string symbol = "";
+   for(int i = 0; i < g_lastTradeCount; i++)
+   {
+      if(g_lastTrades[i].ticket == (long)ticket)
+      {
+         symbol = g_lastTrades[i].symbol;
+         break;
+      }
+   }
+
+   string jsonData;
+   if(symbol != "")
+   {
+      jsonData = StringFormat(
+         "{\\\"action\\\":\\\"MODIFY\\\","
+         "\\\"ticket\\\":%d,"
+         "\\\"symbol\\\":\\\"%s\\\","
+         "\\\"sl\\\":%.5f,"
+         "\\\"tp\\\":%.5f}",
+         ticket,
+         symbol,
+         sl,
+         tp
+      );
+   }
+   else
+   {
+      // Fallback: send without symbol if not found
+      jsonData = StringFormat(
+         "{\\\"action\\\":\\\"MODIFY\\\",\\\"ticket\\\":%d,\\\"sl\\\":%.5f,\\\"tp\\\":%.5f}",
+         ticket,
+         sl,
+         tp
+      );
+   }
 
    SendToServer(jsonData);
-   Print("Sent MODIFY signal for ticket #", ticket, ": SL=", sl, " TP=", tp);
+   Print("Sent MODIFY signal for ticket #", ticket, ": ", symbol, " SL=", sl, " TP=", tp);
 }
 
 //+------------------------------------------------------------------+
