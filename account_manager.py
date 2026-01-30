@@ -21,6 +21,8 @@ class AccountManager:
         self.configs: Dict[str, AccountConfig] = {}
         # Per-account mapping: MT5 ticket -> cTrader positionId
         self.position_maps: Dict[str, Dict[int, int]] = {}
+        # Per-account mapping: cTrader positionId -> volume (cents of units)
+        self.position_volumes: Dict[str, Dict[int, int]] = {}
     
     def add_account(self, account: AccountConfig):
         """Add and connect a cTrader account.
@@ -51,7 +53,8 @@ class AccountManager:
         # Store references
         self.clients[account.name] = client
         self.configs[account.name] = account
-        self.position_maps[account.name] = {}  # init empty map
+        self.position_maps[account.name] = {}     # init empty map
+        self.position_volumes[account.name] = {}  # init empty volume map
 
         # Hook message callback (for future position tracking)
         def on_message(message, acc_name=account.name):
@@ -82,9 +85,15 @@ class AccountManager:
 
                 # Save mapping: MT5 ticket -> cTrader positionId
                 self.position_maps[acc_name][mt5_ticket] = position_id
+
+                # Also store current volume (Proto position.volume is in cents of units)
+                volume = getattr(position, "volume", 0)
+                if volume:
+                    self.position_volumes[acc_name][position_id] = int(volume)
+
                 logger.info(
                     f"[{acc_name}] mapped MT5 ticket {mt5_ticket} -> "
-                    f"cTrader positionId {position_id}"
+                    f"cTrader positionId {position_id}, volume={volume}"
                 )
             except Exception as e:
                 logger.debug(f"[{acc_name}] Failed to parse message: {e}")
@@ -110,6 +119,11 @@ class AccountManager:
         """Get cTrader positionId for an MT5 ticket on a given account."""
         pos_map = self.position_maps.get(account_name) or {}
         return pos_map.get(int(mt5_ticket))
+
+    def get_position_volume(self, account_name: str, position_id: int) -> Optional[int]:
+        """Get stored cTrader volume (cents of units) for a positionId."""
+        vol_map = self.position_volumes.get(account_name) or {}
+        return vol_map.get(int(position_id))
     
     def get_all_accounts(self) -> Dict[str, tuple[CTraderClient, AccountConfig]]:
         """Get all active accounts."""
