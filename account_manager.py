@@ -47,11 +47,20 @@ class AccountManager:
             access_token=account.access_token or ""
         )
         
+
+
         # Store references
         self.clients[account.name] = client
         self.configs[account.name] = account
         self.position_maps[account.name] = {}  # init empty map
-        
+
+        # Hook message callback (for future position tracking)
+        def on_message(message, acc_name=account.name):
+            logger.debug(f"[{acc_name}] raw cTrader message: {message!r}")
+            # later: parse Protobuf.extract(message) and update position_maps
+
+        client.set_message_callback(on_message)
+
         # Optional: later we will hook message callbacks here to fill position_maps
         
         # Connect the client (will auto-authorize account)
