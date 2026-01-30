@@ -55,10 +55,38 @@ class AccountManager:
 
         # Hook message callback (for future position tracking)
         def on_message(message, acc_name=account.name):
-            logger.debug(f"[{acc_name}] raw cTrader message: {message!r}")
-            # later: parse Protobuf.extract(message) and update position_maps
+            try:
+                extracted = Protobuf.extract(message)
 
-        client.set_message_callback(on_message)
+                # Only care about messages that contain a position with tradeData.label
+                if not hasattr(extracted, "position"):
+                    return
+
+                position = extracted.position
+                position_id = getattr(position, "positionId", 0)
+                trade_data = getattr(position, "tradeData", None)
+                if not (position_id and trade_data and hasattr(trade_data, "label")):
+                    return
+
+                label = trade_data.label  # e.g. "MT5_1441124621"
+                if not (isinstance(label, str) and label.startswith("MT5_")):
+                    return
+
+                mt5_ticket_str = label.split("_", 1)[1]
+                try:
+                    mt5_ticket = int(mt5_ticket_str)
+                except ValueError:
+                    return
+
+                # Save mapping: MT5 ticket -> cTrader positionId
+                self.position_maps[acc_name][mt5_ticket] = position_id
+                logger.info(
+                    f"[{acc_name}] mapped MT5 ticket {mt5_ticket} -> "
+                    f"cTrader positionId {position_id}"
+                )
+            except Exception as e:
+                logger.debug(f"[{acc_name}] Failed to parse message: {e}")
+
         
         # Connect the client (will auto-authorize account)
         def on_connected():
