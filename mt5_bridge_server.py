@@ -240,8 +240,6 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             config.min_lot_size, min(adjusted_lots, config.max_lot_size)
         )
 
-        # --- New: use MT5 metadata + cTrader symbol specs to compute volume in cents-of-units ---
-
         # MT5 side metadata sent by EA (with safe defaults)
         mt5_contract_size = float(raw_event.get("mt5_contract_size", 1.0))
         mt5_volume_min = float(raw_event.get("mt5_volume_min", 0.01))
@@ -251,7 +249,6 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
         symbol = client.symbol_details.get(symbol_id) if hasattr(client, "symbol_details") else None
 
         if symbol is None:
-            # Fallback to old behavior if we don't have symbol details
             logger.warning(
                 f"[{account_name}] No symbol details for {mt5_symbol} "
                 f"(id={symbol_id}), falling back to lots_to_units"
@@ -362,17 +359,32 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                     logger.warning(f"[{account_name}] Client not ready, skipping modify")
                     continue
 
+                mt5_symbol = event.get("symbol")
+                symbol_id = None
+                if mt5_symbol:
+                    mapper = SymbolMapper(
+                        prefix=config.symbol_prefix,
+                        suffix=config.symbol_suffix,
+                        custom_map=config.custom_symbols,
+                        broker_symbol_map=client.symbol_name_to_id,
+                    )
+                    symbol_id = mapper.get_symbol_id(mt5_symbol)
+
+                sl_arg = sl if sl > 0 else None
+                tp_arg = tp if tp > 0 else None
+
                 logger.info(
                     f"[{account_name}] Applying modify: ticket {ticket} -> "
-                    f"positionId {position_id}, SL={sl}, TP={tp}"
+                    f"positionId {position_id}, SL={sl_arg}, TP={tp_arg}, "
+                    f"symbol_id={symbol_id}"
                 )
 
-                # Adjust signature if your CTraderClient differs
                 client.modify_position(
                     account_id=config.account_id,
                     position_id=position_id,
-                    sl=sl if sl > 0 else None,
-                    tp=tp if tp > 0 else None,
+                    sl=sl_arg,
+                    tp=tp_arg,
+                    symbol_id=symbol_id,
                 )
             except Exception as e:
                 logger.error(
@@ -412,7 +424,6 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                     f"positionId {position_id}"
                 )
 
-                # If your API supports partial close, map MT5 volume to cTrader volume here
                 client.close_position(
                     account_id=config.account_id,
                     position_id=position_id,
