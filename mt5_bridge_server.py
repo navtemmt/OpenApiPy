@@ -46,7 +46,6 @@ def convert_mt5_lots_to_ctrader_cents(
         units_per_lot_ctrader = lot_size_cents / 100.0
 
     # 2) Map MT5 units into cTrader "lots" for this symbol
-    #    target_lots_ctrader = how many cTrader lots correspond to mt5_units
     if units_per_lot_ctrader <= 0:
         target_lots_ctrader = mt5_lots
     else:
@@ -64,7 +63,6 @@ def convert_mt5_lots_to_ctrader_cents(
 
     # 5) Snap to stepVolume in cents
     if step_volume_cents and step_volume_cents > 0:
-        # If min is defined, snap relative to it; otherwise snap from zero
         base = min_volume_cents if (min_volume_cents and min_volume_cents > 0) else 0
         steps = (target_cents - base) / step_volume_cents
         steps = round(steps)
@@ -304,7 +302,6 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             )
 
         # Broker restriction: absolute SL/TP are not allowed on MARKET orders.
-        # Send a naked market order; SL/TP can be applied later via modify_position.
         final_sl = None
         final_tp = None
 
@@ -373,17 +370,27 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                 sl_arg = sl if sl > 0 else None
                 tp_arg = tp if tp > 0 else None
 
+                # Extra safety: round to symbol digits before calling client
+                if symbol_id is not None and sl_arg is not None:
+                    sl_rounded = client.round_price_for_symbol(symbol_id, sl_arg)
+                else:
+                    sl_rounded = sl_arg
+                if symbol_id is not None and tp_arg is not None:
+                    tp_rounded = client.round_price_for_symbol(symbol_id, tp_arg)
+                else:
+                    tp_rounded = tp_arg
+
                 logger.info(
                     f"[{account_name}] Applying modify: ticket {ticket} -> "
-                    f"positionId {position_id}, SL={sl_arg}, TP={tp_arg}, "
-                    f"symbol_id={symbol_id}"
+                    f"positionId {position_id}, SL={sl_arg} -> {sl_rounded}, "
+                    f"TP={tp_arg} -> {tp_rounded}, symbol_id={symbol_id}"
                 )
 
                 client.modify_position(
                     account_id=config.account_id,
                     position_id=position_id,
-                    sl=sl_arg,
-                    tp=tp_arg,
+                    sl=sl_rounded,
+                    tp=tp_rounded,
                     symbol_id=symbol_id,
                 )
             except Exception as e:
