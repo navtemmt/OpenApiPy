@@ -178,7 +178,7 @@ void SendOpenSignal(ulong ticket)
    double tp        = PositionGetDouble(POSITION_TP);
    long   magic     = PositionGetInteger(POSITION_MAGIC);
 
-   // --- MT5 symbol properties for better volume mapping ---
+   // MT5 symbol properties for better volume mapping
    double contract_size = SymbolInfoDouble(symbol, SYMBOL_TRADE_CONTRACT_SIZE);
    double vol_min       = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
    double vol_max       = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
@@ -186,35 +186,21 @@ void SendOpenSignal(ulong ticket)
 
    string tradeType = (type == POSITION_TYPE_BUY) ? "BUY" : "SELL";
 
-   string jsonData = StringFormat(
-      "{"
-         "\\\"action\\\":\\\"OPEN\\\","
-         "\\\"ticket\\\":%d,"
-         "\\\"symbol\\\":\\\"%s\\\","
-         "\\\"type\\\":\\\"%s\\\","
-         "\\\"volume\\\":%.2f,"
-         "\\\"price\\\":%.5f,"
-         "\\\"sl\\\":%.5f,"
-         "\\\"tp\\\":%.5f,"
-         "\\\"magic\\\":%d,"
-         "\\\"mt5_contract_size\\\":%.2f,"
-         "\\\"mt5_volume_min\\\":%.2f,"
-         "\\\"mt5_volume_max\\\":%.2f,"
-         "\\\"mt5_volume_step\\\":%.2f"
-      "}",
-      ticket,
-      symbol,
-      tradeType,
-      volume,
-      openPrice,
-      sl,
-      tp,
-      magic,
-      contract_size,
-      vol_min,
-      vol_max,
-      vol_step
-   );
+   string jsonData = "{"
+      "\"action\":\"OPEN\","
+      "\"ticket\":" + (string)ticket + ","
+      "\"symbol\":\"" + symbol + "\","
+      "\"type\":\"" + tradeType + "\","
+      "\"volume\":" + DoubleToString(volume, 2) + ","
+      "\"price\":" + DoubleToString(openPrice, 5) + ","
+      "\"sl\":" + DoubleToString(sl, 5) + ","
+      "\"tp\":" + DoubleToString(tp, 5) + ","
+      "\"magic\":" + (string)magic + ","
+      "\"mt5_contract_size\":" + DoubleToString(contract_size, 2) + ","
+      "\"mt5_volume_min\":" + DoubleToString(vol_min, 2) + ","
+      "\"mt5_volume_max\":" + DoubleToString(vol_max, 2) + ","
+      "\"mt5_volume_step\":" + DoubleToString(vol_step, 2) +
+      "}";
 
    SendToServer(jsonData);
    Print("Sent OPEN signal for ticket #", ticket, ": ", symbol, " ", tradeType, " ", volume);
@@ -225,10 +211,10 @@ void SendOpenSignal(ulong ticket)
 //+------------------------------------------------------------------+
 void SendCloseSignal(long ticket)
 {
-   string jsonData = StringFormat(
-      "{\\\"action\\\":\\\"CLOSE\\\",\\\"ticket\\\":%d}",
-      ticket
-   );
+   string jsonData = "{"
+      "\"action\":\"CLOSE\","
+      "\"ticket\":" + (string)ticket +
+      "}";
 
    SendToServer(jsonData);
    Print("Sent CLOSE signal for ticket #", ticket);
@@ -250,31 +236,17 @@ void SendModifySignal(ulong ticket, double sl, double tp)
       }
    }
 
-   string jsonData;
+   string jsonData = "{"
+      "\"action\":\"MODIFY\","
+      "\"ticket\":" + (string)ticket + ",";
+
    if(symbol != "")
-   {
-      jsonData = StringFormat(
-         "{\\\"action\\\":\\\"MODIFY\\\","
-         "\\\"ticket\\\":%d,"
-         "\\\"symbol\\\":\\\"%s\\\","
-         "\\\"sl\\\":%.5f,"
-         "\\\"tp\\\":%.5f}",
-         ticket,
-         symbol,
-         sl,
-         tp
-      );
-   }
-   else
-   {
-      // Fallback: send without symbol if not found
-      jsonData = StringFormat(
-         "{\\\"action\\\":\\\"MODIFY\\\",\\\"ticket\\\":%d,\\\"sl\\\":%.5f,\\\"tp\\\":%.5f}",
-         ticket,
-         sl,
-         tp
-      );
-   }
+      jsonData += "\"symbol\":\"" + symbol + "\",";
+
+   jsonData +=
+      "\"sl\":" + DoubleToString(sl, 5) + ","
+      "\"tp\":" + DoubleToString(tp, 5) +
+      "}";
 
    SendToServer(jsonData);
    Print("Sent MODIFY signal for ticket #", ticket, ": ", symbol, " SL=", sl, " TP=", tp);
@@ -288,6 +260,9 @@ void SendToServer(string jsonData)
    char   post[];
    char   result[];
    string headers;
+
+   // Debug: see what is actually sent
+   Print("DEBUG JSON -> ", jsonData);
 
    StringToCharArray(jsonData, post, 0, StringLen(jsonData));
 
