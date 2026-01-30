@@ -7,6 +7,7 @@ from typing import Dict, Optional
 
 from ctrader_client import CTraderClient
 from config_loader import AccountConfig
+from ctrader_open_api import Protobuf
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +19,7 @@ class AccountManager:
         """Initialize account manager."""
         self.clients: Dict[str, CTraderClient] = {}
         self.configs: Dict[str, AccountConfig] = {}
-        # New: per-account mapping MT5 ticket -> cTrader positionId
+        # Per-account mapping: MT5 ticket -> cTrader positionId
         self.position_maps: Dict[str, Dict[int, int]] = {}
     
     def add_account(self, account: AccountConfig):
@@ -47,8 +48,6 @@ class AccountManager:
             access_token=account.access_token or ""
         )
         
-
-
         # Store references
         self.clients[account.name] = client
         self.configs[account.name] = account
@@ -60,8 +59,6 @@ class AccountManager:
             # later: parse Protobuf.extract(message) and update position_maps
 
         client.set_message_callback(on_message)
-
-        # Optional: later we will hook message callbacks here to fill position_maps
         
         # Connect the client (will auto-authorize account)
         def on_connected():
