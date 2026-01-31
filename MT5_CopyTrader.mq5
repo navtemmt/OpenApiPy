@@ -3,7 +3,7 @@
 //|                                  MT5 to cTrader Copy Trading EA  |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025"
-#property version   "1.03"
+#property version   "1.04"
 #property strict
 
 // Input parameters
@@ -132,8 +132,8 @@ void CheckTradeChanges()
                PrintFormat("Partial close detected: ticket=%I64u symbol=%s oldVol=%.2f newVol=%.2f closedPart=%.2f",
                            ticket, symbol, g_lastTrades[j].volume, currentVol, closedPart);
 
-               // Send CLOSE with remaining volume (currentVol)
-               SendCloseSignal((long)ticket, symbol, currentVol);
+               // Send CLOSE with *closed lots* (closedPart)
+               SendCloseSignal((long)ticket, symbol, closedPart);
                g_lastTrades[j].volume = currentVol;
             }
 
@@ -170,7 +170,7 @@ void CheckTradeChanges()
 
       if(!exists)
       {
-         // Use last known symbol & volume from g_lastTrades
+         // Use last known symbol & volume from g_lastTrades as "closed part"
          long   ticket  = g_lastTrades[i].ticket;
          string symbol  = g_lastTrades[i].symbol;
          double volume  = g_lastTrades[i].volume;
@@ -178,6 +178,7 @@ void CheckTradeChanges()
          PrintFormat("Full close detected: ticket=%I64d symbol=%s lastVol=%.2f",
                      ticket, symbol, volume);
 
+         // Here the closed part == last remaining volume
          SendCloseSignal(ticket, symbol, volume);
       }
    }
@@ -234,7 +235,7 @@ void SendOpenSignal(ulong ticket)
 //+------------------------------------------------------------------+
 //| Send close trade signal to bridge server (full or partial)       |
 //+------------------------------------------------------------------+
-void SendCloseSignal(long ticket, string symbol, double remainingVolume)
+void SendCloseSignal(long ticket, string symbol, double closedVolume)
 {
    string jsonData = "{"
       "\"action\":\"CLOSE\","
@@ -244,12 +245,12 @@ void SendCloseSignal(long ticket, string symbol, double remainingVolume)
       jsonData += "\"symbol\":\"" + symbol + "\",";
 
    jsonData +=
-      "\"volume\":" + DoubleToString(remainingVolume, 2) +
+      "\"volume\":" + DoubleToString(closedVolume, 2) +
       "}";
 
    SendToServer(jsonData);
    Print("Sent CLOSE signal for ticket #", ticket,
-         " symbol=", symbol, " remainingVolume=", remainingVolume);
+         " symbol=", symbol, " closedVolume=", closedVolume);
 }
 
 //+------------------------------------------------------------------+
