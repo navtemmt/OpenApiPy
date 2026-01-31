@@ -66,7 +66,11 @@ class AccountManager:
             try:
                 extracted = Protobuf.extract(message)
 
-                # 1) Execution events: new fills / partial fills
+                # DEBUG: log all execution events so we can see fills vs accepts
+                if isinstance(extracted, ProtoOAExecutionEvent):
+                    logger.info(f"[{acc_name}] RAW EXECUTION: {extracted}")
+
+                # 1) Execution events: map ticket -> positionId and try to store volume
                 if isinstance(extracted, ProtoOAExecutionEvent):
                     position = getattr(extracted, "position", None)
                     if position is not None:
@@ -76,11 +80,7 @@ class AccountManager:
                         volume = getattr(position, "volume", 0)
 
                         if position_id:
-                            # Store latest positive volume for this position
-                            if volume > 0:
-                                self.position_volumes[acc_name][position_id] = int(volume)
-
-                            # If label is MT5_..., also build ticket mapping
+                            # Map MT5 ticket -> positionId as soon as we know it
                             if isinstance(label, str) and label.startswith("MT5_"):
                                 mt5_ticket_str = label.split("_", 1)[1]
                                 try:
@@ -90,10 +90,15 @@ class AccountManager:
 
                                 if mt5_ticket is not None:
                                     self.position_maps[acc_name][mt5_ticket] = position_id
-                                    logger.info(
-                                        f"[{acc_name}] (exec) mapped MT5 ticket {mt5_ticket} -> "
-                                        f"cTrader positionId {position_id}, volume={volume}"
-                                    )
+
+                            # Store positive volume when present
+                            if volume > 0:
+                                self.position_volumes[acc_name][position_id] = int(volume)
+                                logger.info(
+                                    f"[{acc_name}] (exec) positionId {position_id} "
+                                    f"volume={volume}"
+                                )
+
                     return  # done handling execution event
 
                 # 2) Reconcile response: preload ALL positions
