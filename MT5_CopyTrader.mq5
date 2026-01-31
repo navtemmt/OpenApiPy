@@ -3,7 +3,7 @@
 //|                                  MT5 to cTrader Copy Trading EA  |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025"
-#property version   "1.01"
+#property version   "1.03"
 #property strict
 
 // Input parameters
@@ -33,10 +33,8 @@ int       g_lastTradeCount = 0;
 int OnInit()
 {
    Print("MT5 CopyTrader EA initialized. Bridge server: ", BridgeServerURL);
-
-   // Load initial positions
    UpdateTradeList();
-
+   Print("Initial positions tracked: ", g_lastTradeCount);
    return(INIT_SUCCEEDED);
 }
 
@@ -53,41 +51,46 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   // Check for trade changes on every tick
    CheckTradeChanges();
 }
 
 //+------------------------------------------------------------------+
-//| Update current trade list                                        |
+//| Update current trade list (dense indexing)                       |
 //+------------------------------------------------------------------+
 void UpdateTradeList()
 {
    int totalPositions = PositionsTotal();
    ArrayResize(g_lastTrades, totalPositions);
 
+   int idx = 0;
    for(int i = 0; i < totalPositions; i++)
    {
       ulong ticket = PositionGetTicket(i);
-      if(ticket > 0)
-      {
-         long magic = PositionGetInteger(POSITION_MAGIC);
+      if(ticket == 0)
+         continue;
 
-         // Filter by magic number if specified
-         if(MagicNumberFilter != "" && magic != StringToInteger(MagicNumberFilter))
-            continue;
+      long magic = PositionGetInteger(POSITION_MAGIC);
 
-         g_lastTrades[i].ticket      = (long)ticket;
-         g_lastTrades[i].symbol      = PositionGetString(POSITION_SYMBOL);
-         g_lastTrades[i].type        = (int)PositionGetInteger(POSITION_TYPE);
-         g_lastTrades[i].volume      = PositionGetDouble(POSITION_VOLUME);
-         g_lastTrades[i].openPrice   = PositionGetDouble(POSITION_PRICE_OPEN);
-         g_lastTrades[i].stopLoss    = PositionGetDouble(POSITION_SL);
-         g_lastTrades[i].takeProfit  = PositionGetDouble(POSITION_TP);
-         g_lastTrades[i].magicNumber = magic;
-      }
+      // Filter by magic number if specified
+      if(MagicNumberFilter != "" && magic != StringToInteger(MagicNumberFilter))
+         continue;
+
+      string sym = PositionGetString(POSITION_SYMBOL);
+
+      g_lastTrades[idx].ticket      = (long)ticket;
+      g_lastTrades[idx].symbol      = sym;
+      g_lastTrades[idx].type        = (int)PositionGetInteger(POSITION_TYPE);
+      g_lastTrades[idx].volume      = PositionGetDouble(POSITION_VOLUME);
+      g_lastTrades[idx].openPrice   = PositionGetDouble(POSITION_PRICE_OPEN);
+      g_lastTrades[idx].stopLoss    = PositionGetDouble(POSITION_SL);
+      g_lastTrades[idx].takeProfit  = PositionGetDouble(POSITION_TP);
+      g_lastTrades[idx].magicNumber = magic;
+
+      idx++;
    }
 
-   g_lastTradeCount = totalPositions;
+   g_lastTradeCount = idx;
+   ArrayResize(g_lastTrades, g_lastTradeCount);
 }
 
 //+------------------------------------------------------------------+
@@ -97,48 +100,61 @@ void CheckTradeChanges()
 {
    int currentPositions = PositionsTotal();
 
-   // Check for new positions
+   // New positions / modifications / partial closes
    for(int i = 0; i < currentPositions; i++)
    {
       ulong ticket = PositionGetTicket(i);
-      if(ticket > 0)
+      if(ticket == 0)
+         continue;
+
+      string symbol = PositionGetString(POSITION_SYMBOL);
+      long   magic  = PositionGetInteger(POSITION_MAGIC);
+
+      // Filter by magic number if specified
+      if(MagicNumberFilter != "" && magic != StringToInteger(MagicNumberFilter))
+         continue;
+
+      double currentVol = PositionGetDouble(POSITION_VOLUME);
+      double currentSL  = PositionGetDouble(POSITION_SL);
+      double currentTP  = PositionGetDouble(POSITION_TP);
+
+      bool isNew = true;
+      for(int j = 0; j < g_lastTradeCount; j++)
       {
-         long magic = PositionGetInteger(POSITION_MAGIC);
-
-         // Filter by magic number if specified
-         if(MagicNumberFilter != "" && magic != StringToInteger(MagicNumberFilter))
-            continue;
-
-         // Check if this is a new trade
-         bool isNew = true;
-         for(int j = 0; j < g_lastTradeCount; j++)
+         if(g_lastTrades[j].ticket == (long)ticket)
          {
-            if(g_lastTrades[j].ticket == (long)ticket)
+            isNew = false;
+
+            // Detect partial close: volume reduced while ticket still exists
+            if(currentVol < g_lastTrades[j].volume)
             {
-               isNew = false;
+               double closedPart = g_lastTrades[j].volume - currentVol;
+               PrintFormat("Partial close detected: ticket=%I64u symbol=%s oldVol=%.2f newVol=%.2f closedPart=%.2f",
+                           ticket, symbol, g_lastTrades[j].volume, currentVol, closedPart);
 
-               // Check for modifications
-               double currentSL = PositionGetDouble(POSITION_SL);
-               double currentTP = PositionGetDouble(POSITION_TP);
-
-               if(currentSL != g_lastTrades[j].stopLoss || currentTP != g_lastTrades[j].takeProfit)
-               {
-                  SendModifySignal(ticket, currentSL, currentTP);
-                  g_lastTrades[j].stopLoss   = currentSL;
-                  g_lastTrades[j].takeProfit = currentTP;
-               }
-               break;
+               // Send CLOSE with remaining volume (currentVol)
+               SendCloseSignal((long)ticket, symbol, currentVol);
+               g_lastTrades[j].volume = currentVol;
             }
-         }
 
-         if(isNew)
-         {
-            SendOpenSignal(ticket);
+            // Detect SL/TP modification
+            if(currentSL != g_lastTrades[j].stopLoss || currentTP != g_lastTrades[j].takeProfit)
+            {
+               SendModifySignal(ticket, currentSL, currentTP);
+               g_lastTrades[j].stopLoss   = currentSL;
+               g_lastTrades[j].takeProfit = currentTP;
+            }
+            break;
          }
+      }
+
+      if(isNew)
+      {
+         SendOpenSignal(ticket);
       }
    }
 
-   // Check for closed positions
+   // Detect fully closed positions (ticket disappeared)
    for(int i = 0; i < g_lastTradeCount; i++)
    {
       bool exists = false;
@@ -147,18 +163,25 @@ void CheckTradeChanges()
          ulong ticket = PositionGetTicket(j);
          if((long)ticket == g_lastTrades[i].ticket)
          {
-            exists = true;
-            break;
+           exists = true;
+           break;
          }
       }
 
       if(!exists)
       {
-         SendCloseSignal(g_lastTrades[i].ticket);
+         // Use last known symbol & volume from g_lastTrades
+         long   ticket  = g_lastTrades[i].ticket;
+         string symbol  = g_lastTrades[i].symbol;
+         double volume  = g_lastTrades[i].volume;
+
+         PrintFormat("Full close detected: ticket=%I64d symbol=%s lastVol=%.2f",
+                     ticket, symbol, volume);
+
+         SendCloseSignal(ticket, symbol, volume);
       }
    }
 
-   // Update the trade list
    UpdateTradeList();
 }
 
@@ -168,7 +191,10 @@ void CheckTradeChanges()
 void SendOpenSignal(ulong ticket)
 {
    if(!PositionSelectByTicket(ticket))
+   {
+      Print("SendOpenSignal: PositionSelectByTicket failed for ", ticket);
       return;
+   }
 
    string symbol    = PositionGetString(POSITION_SYMBOL);
    int    type      = (int)PositionGetInteger(POSITION_TYPE);
@@ -178,7 +204,6 @@ void SendOpenSignal(ulong ticket)
    double tp        = PositionGetDouble(POSITION_TP);
    long   magic     = PositionGetInteger(POSITION_MAGIC);
 
-   // MT5 symbol properties for better volume mapping
    double contract_size = SymbolInfoDouble(symbol, SYMBOL_TRADE_CONTRACT_SIZE);
    double vol_min       = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
    double vol_max       = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
@@ -207,17 +232,24 @@ void SendOpenSignal(ulong ticket)
 }
 
 //+------------------------------------------------------------------+
-//| Send close trade signal to bridge server                         |
+//| Send close trade signal to bridge server (full or partial)       |
 //+------------------------------------------------------------------+
-void SendCloseSignal(long ticket)
+void SendCloseSignal(long ticket, string symbol, double remainingVolume)
 {
    string jsonData = "{"
       "\"action\":\"CLOSE\","
-      "\"ticket\":" + (string)ticket +
+      "\"ticket\":" + (string)ticket + ",";
+
+   if(symbol != "")
+      jsonData += "\"symbol\":\"" + symbol + "\",";
+
+   jsonData +=
+      "\"volume\":" + DoubleToString(remainingVolume, 2) +
       "}";
 
    SendToServer(jsonData);
-   Print("Sent CLOSE signal for ticket #", ticket);
+   Print("Sent CLOSE signal for ticket #", ticket,
+         " symbol=", symbol, " remainingVolume=", remainingVolume);
 }
 
 //+------------------------------------------------------------------+
@@ -225,7 +257,6 @@ void SendCloseSignal(long ticket)
 //+------------------------------------------------------------------+
 void SendModifySignal(ulong ticket, double sl, double tp)
 {
-   // Look up symbol for this ticket from our last known trades
    string symbol = "";
    for(int i = 0; i < g_lastTradeCount; i++)
    {
@@ -261,7 +292,6 @@ void SendToServer(string jsonData)
    char   result[];
    string headers;
 
-   // Debug: see what is actually sent
    Print("DEBUG JSON -> ", jsonData);
 
    StringToCharArray(jsonData, post, 0, StringLen(jsonData));
