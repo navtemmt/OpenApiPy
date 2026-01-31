@@ -10,7 +10,8 @@ from config_loader import AccountConfig
 from ctrader_open_api import Protobuf, TcpProtocol
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAReconcileReq,
-    ProtoOAReconcileRes
+    ProtoOAReconcileRes,
+    ProtoOAExecutionEvent,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,12 +61,42 @@ class AccountManager:
         self.position_maps[account.name] = {}     # init empty map
         self.position_volumes[account.name] = {}  # init empty volume map
 
-        # Hook message callback (now handles reconcile + single positions)
+        # Hook message callback (handles execution events + reconcile + position updates)
         def on_message(message, acc_name=account.name):
             try:
                 extracted = Protobuf.extract(message)
 
-                # Handle reconcile response: preload ALL positions
+                # 1) Execution events: new fills / partial fills
+                if isinstance(extracted, ProtoOAExecutionEvent):
+                    position = getattr(extracted, "position", None)
+                    if position is not None:
+                        position_id = getattr(position, "positionId", 0)
+                        trade_data = getattr(position, "tradeData", None)
+                        label = getattr(trade_data, "label", "") if trade_data else ""
+                        volume = getattr(position, "volume", 0)
+
+                        if position_id:
+                            # Store latest positive volume for this position
+                            if volume > 0:
+                                self.position_volumes[acc_name][position_id] = int(volume)
+
+                            # If label is MT5_..., also build ticket mapping
+                            if isinstance(label, str) and label.startswith("MT5_"):
+                                mt5_ticket_str = label.split("_", 1)[1]
+                                try:
+                                    mt5_ticket = int(mt5_ticket_str)
+                                except ValueError:
+                                    mt5_ticket = None
+
+                                if mt5_ticket is not None:
+                                    self.position_maps[acc_name][mt5_ticket] = position_id
+                                    logger.info(
+                                        f"[{acc_name}] (exec) mapped MT5 ticket {mt5_ticket} -> "
+                                        f"cTrader positionId {position_id}, volume={volume}"
+                                    )
+                    return  # done handling execution event
+
+                # 2) Reconcile response: preload ALL positions
                 if isinstance(extracted, ProtoOAReconcileRes):
                     count = 0
                     for pos in extracted.position:
@@ -77,7 +108,7 @@ class AccountManager:
                         if not position_id:
                             continue
 
-                        # Always store volume for this position
+                        # Always store positive volume for this position
                         if volume > 0:
                             self.position_volumes[acc_name][position_id] = int(volume)
 
@@ -98,7 +129,7 @@ class AccountManager:
                     )
                     return  # done handling reconcile
 
-                # Handle single-position events (execution updates etc.)
+                # 3) Single-position updates with a .position field
                 if not hasattr(extracted, "position"):
                     return
 
@@ -149,7 +180,7 @@ class AccountManager:
                 
                 def _on_reconcile(result):
                     try:
-                        extracted = Protobuf.extract(result)
+                        Protobuf.extract(result)
                         logger.info(f"[{account.name}] Reconcile response processed")
                     except Exception as e:
                         logger.warning(
