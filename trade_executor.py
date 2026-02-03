@@ -20,7 +20,20 @@ def copy_open_to_account(
     magic,
 ):
     """Execute a new market order on cTrader for a given account."""
-    ctrader_symbol = SymbolMapper.map_symbol(mt5_symbol)
+    # FIX: Create SymbolMapper instance with account-specific config
+    mapper = SymbolMapper(
+        prefix=config.get("symbol_prefix", ""),
+        suffix=config.get("symbol_suffix", ""),
+        custom_map=config.get("custom_symbols", {}),
+        broker_symbol_map=client.symbol_name_to_id,
+    )
+    symbol_id = mapper.get_symbol_id(mt5_symbol)
+    
+    if symbol_id is None:
+        logger.error(
+            f"[{account_name}] Could not map MT5 symbol {mt5_symbol} to cTrader symbolId"
+        )
+        return
 
     # Convert MT5 lots to cTrader volume in cents
     volume_cents = convert_mt5_lots_to_ctrader_cents(
@@ -38,14 +51,14 @@ def copy_open_to_account(
     trade_side = "BUY" if side.upper() in ("BUY", "LONG") else "SELL"
 
     logger.info(
-        f"[{account_name}] Opening {trade_side} {ctrader_symbol} | "
+        f"[{account_name}] Opening {trade_side} {mt5_symbol} (symbolId={symbol_id}) | "
         f"Volume: {volume_cents} cents | SL: {sl} | TP: {tp} | "
         f"Label: MT5_{ticket}"
     )
 
     try:
         response = client.send_market_order(
-            symbol=ctrader_symbol,
+            symbol_id=symbol_id,
             side=trade_side,
             volume=volume_cents,
             stop_loss=sl if sl > 0 else None,
