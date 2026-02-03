@@ -23,7 +23,8 @@ def main():
         account_manager = get_account_manager()
 
         # Initialize all enabled cTrader accounts
-        enabled_accounts = [acc for acc in config.accounts if getattr(acc, "enabled", False)]
+        # Use config.get_enabled_accounts() method for proper filtering
+        enabled_accounts = config.get_enabled_accounts()
         logger.info(f"Initializing {len(enabled_accounts)} cTrader account(s)...")
 
         for account_config in enabled_accounts:
@@ -38,7 +39,7 @@ def main():
         # Start HTTP server for MT5 events (blocking)
         http_host = getattr(config, "http_host", "127.0.0.1")
         http_port = getattr(config, "http_port", 3140)
-        logger.info(f"Starting HTTP server on {http_host}:{http_port}...")
+        logger.info(f"Starting HTTP server on {http_host}:{{http_port}}...")
         run_http_server(http_host, http_port, account_manager)
 
     except KeyboardInterrupt:
