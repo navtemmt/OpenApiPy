@@ -7,6 +7,7 @@ from config_loader import get_multi_account_config
 from account_manager import get_account_manager
 from bridge_server import run_http_server
 from app_state import logger
+import traceback
 
 
 def main():
@@ -17,27 +18,26 @@ def main():
     logger.info("Loading account configurations...")
 
     try:
+        # Load config and account manager
         config = get_multi_account_config()
         account_manager = get_account_manager()
 
         # Initialize all enabled cTrader accounts
-        logger.info(f"Initializing {len(config.accounts)} cTrader account(s)...")
-        for account_name in config.accounts:
-            logger.info(f"  - {account_name}")
-            account_manager.initialize_account(account_name, config)
+        enabled_accounts = [acc for acc in config.accounts if getattr(acc, "enabled", False)]
+        logger.info(f"Initializing {len(enabled_accounts)} cTrader account(s)...")
 
-        # Start cTrader clients (Twisted reactor in separate thread)
+        for account_config in enabled_accounts:
+            logger.info(f"  - {account_config.name}")
+            account_manager.add_account(account_config)
+
+        # Start cTrader clients (Twisted reactor in a separate thread)
         logger.info("Starting cTrader API clients...")
-        reactor_thread = Thread(
-            target=reactor.run,
-            args=(False,),
-            daemon=True,
-        )
+        reactor_thread = Thread(target=reactor.run, args=(False,), daemon=True)
         reactor_thread.start()
 
         # Start HTTP server for MT5 events (blocking)
-        http_host = config.http_host
-        http_port = config.http_port
+        http_host = getattr(config, "http_host", "127.0.0.1")
+        http_port = getattr(config, "http_port", 3140)
         logger.info(f"Starting HTTP server on {http_host}:{http_port}...")
         run_http_server(http_host, http_port, account_manager)
 
@@ -46,7 +46,8 @@ def main():
         reactor.stop()
 
     except Exception as e:
-        logger.exception("Fatal error during startup")
+        logger.error("Fatal error during startup")
+        traceback.print_exc()
         raise
 
 
