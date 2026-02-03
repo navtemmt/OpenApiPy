@@ -20,14 +20,13 @@ def main():
         config = get_multi_account_config()
         account_manager = get_account_manager()
 
-        # Initialize all cTrader accounts
+        # Initialize all enabled cTrader accounts
         logger.info(f"Initializing {len(config.accounts)} cTrader account(s)...")
-        for account_config in config.accounts:
-            account_name = account_config.name
+        for account_name in config.accounts:
             logger.info(f"  - {account_name}")
-            account_manager.initialize_account(account_name, account_config)
+            account_manager.initialize_account(account_name, config)
 
-        # Start cTrader clients
+        # Start cTrader clients (Twisted reactor in separate thread)
         logger.info("Starting cTrader API clients...")
         reactor_thread = Thread(
             target=reactor.run,
@@ -36,7 +35,7 @@ def main():
         )
         reactor_thread.start()
 
-        # Start HTTP server
+        # Start HTTP server for MT5 events (blocking)
         http_host = config.http_host
         http_port = config.http_port
         logger.info(f"Starting HTTP server on {http_host}:{http_port}...")
@@ -47,18 +46,7 @@ def main():
         reactor.stop()
 
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        raise
-
-        logger.info(f"Starting HTTP server on {http_host}:{http_port}...")
-        run_http_server(http_host, http_port, account_manager)
-
-    except KeyboardInterrupt:
-        logger.info("Shutting down bridge server...")
-        reactor.stop()
-
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
+        logger.exception("Fatal error during startup")
         raise
 
 
