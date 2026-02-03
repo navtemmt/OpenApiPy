@@ -5,7 +5,7 @@ from threading import Thread
 from twisted.internet import reactor
 from config_loader import get_multi_account_config
 from account_manager import get_account_manager
-from bridge_server import MT5BridgeHandler, run_http_server
+from bridge_server import run_http_server
 from app_state import logger
 
 
