@@ -26,10 +26,11 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             # Support: 'action' (MT5), 'event' (old), 'event_type' (new)
             if 'event_type' not in data:
                 if 'action' in data:
-                    # Convert 'OPEN' -> 'open', 'CLOSE' -> 'close', etc.
-                    data['event_type'] = data['action'].lower()
+                    # Keep action uppercase: 'OPEN', 'CLOSE', 'MODIFY'
+                    data['event_type'] = data['action'].upper()
                 elif 'event' in data:
-                    data['event_type'] = data['event']
+                    # Convert old 'event' field to uppercase
+                    data['event_type'] = data['event'].upper()
 
             logger.info(
                 f"Received trade event: {data.get('event_type')} "
@@ -63,7 +64,7 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(
                 json.dumps(
-                    {"status": "ok", "service": "MT5$to cTrader Bridge"}
+                    {"status": "ok", "service": "MT54to cTrader Bridge"}
                 ).encode("utf-8")
             )
         else:
