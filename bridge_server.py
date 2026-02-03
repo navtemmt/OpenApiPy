@@ -31,6 +31,10 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                 elif 'event' in data:
                     # Convert old 'event' field to uppercase
                     data['event_type'] = data['event'].upper()
+            
+            # Normalize 'type' to 'side' (MT5 sends 'type': 'BUY'/'SELL')
+            if 'type' in data and 'side' not in data:
+                data['side'] = data['type']
 
             logger.info(
                 f"Received trade event: {data.get('event_type')} "
@@ -64,7 +68,7 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(
                 json.dumps(
-                    {"status": "ok", "service": "MT54to cTrader Bridge"}
+                    {"status": "ok", "service": "MT5$to cTrader Bridge"}
                 ).encode("utf-8")
             )
         else:
