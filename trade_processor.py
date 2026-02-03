@@ -83,13 +83,13 @@ def handle_open_event(data, account_manager):
         f"Side: {side}, Volume: {volume}, SL: {sl}, TP: {tp}"
     )
 
-    # FIX: Use .items() to get key-value pairs from dict
-    for account_name, client_config in account_manager.get_all_accounts().items():
+    # FIX: Unpack the (client, config) tuple directly
+    for account_name, (client, config) in account_manager.get_all_accounts().items():
         try:
             copy_open_to_account(
                 account_name=account_name,
-                client=client_config["client"],
-                config=client_config["config"],
+                client=client,
+                config=config,
                 ticket=ticket,
                 mt5_symbol=mt5_symbol,
                 side=side,
@@ -114,13 +114,12 @@ def handle_modify_event(data, account_manager):
         f"New SL: {new_sl}, New TP: {new_tp}"
     )
 
-    # FIX: Use .items() to get key-value pairs from dict
-    for account_name, client_config in account_manager.get_all_accounts().items():
+    # FIX: Unpack the (client, config) tuple directly
+    for account_name, (client, config) in account_manager.get_all_accounts().items():
         try:
             position_id = account_manager.get_position_id(account_name, ticket)
 
             if position_id:
-                client = client_config["client"]
                 client.amend_position(
                     position_id=position_id,
                     stop_loss=new_sl if new_sl > 0 else None,
@@ -153,13 +152,12 @@ def handle_close_event(data, account_manager):
 
     logger.info(f"CLOSE event - Ticket: {ticket}, Symbol: {mt5_symbol}")
 
-    # FIX: Use .items() to get key-value pairs from dict
-    for account_name, client_config in account_manager.get_all_accounts().items():
+    # FIX: Unpack the (client, config) tuple directly
+    for account_name, (client, config) in account_manager.get_all_accounts().items():
         try:
             position_id = account_manager.get_position_id(account_name, ticket)
 
             if position_id:
-                client = client_config["client"]
                 client.close_position(position_id)
                 account_manager.remove_mapping(account_name, ticket)
                 logger.info(
