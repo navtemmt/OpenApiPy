@@ -12,7 +12,6 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAReconcileReq,
     ProtoOAReconcileRes,
     ProtoOAExecutionEvent,
-    ProtoOAExecutionType,
 )
 
 logger = logging.getLogger(__name__)
@@ -91,11 +90,9 @@ class AccountManager:
                                     self.position_maps[acc_name][mt5_ticket] = position_id
 
                             # Only trust volume on FILLED / PARTIALLY_FILLED events
+                            # ORDER_FILLED = 4, ORDER_PARTIALLY_FILLED = 5
                             volume = getattr(position, "volume", 0)
-                            if exec_type in (
-                                ProtoOAExecutionType.ORDER_FILLED,
-                                ProtoOAExecutionType.ORDER_PARTIALLY_FILLED,
-                            ) and volume > 0:
+                            if exec_type in (4, 5) and volume > 0:
                                 self.position_volumes[acc_name][position_id] = int(volume)
                                 logger.info(
                                     f"[{acc_name}] (exec fill) positionId {position_id} "
