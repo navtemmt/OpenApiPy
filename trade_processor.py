@@ -83,7 +83,8 @@ def handle_open_event(data, account_manager):
         f"Side: {side}, Volume: {volume}, SL: {sl}, TP: {tp}"
     )
 
-    for account_name, client_config in account_manager.get_all_accounts():
+    # FIX: Use .items() to get key-value pairs from dict
+    for account_name, client_config in account_manager.get_all_accounts().items():
         try:
             copy_open_to_account(
                 account_name=account_name,
@@ -113,7 +114,8 @@ def handle_modify_event(data, account_manager):
         f"New SL: {new_sl}, New TP: {new_tp}"
     )
 
-    for account_name, client_config in account_manager.get_all_accounts():
+    # FIX: Use .items() to get key-value pairs from dict
+    for account_name, client_config in account_manager.get_all_accounts().items():
         try:
             position_id = account_manager.get_position_id(account_name, ticket)
 
@@ -151,7 +153,8 @@ def handle_close_event(data, account_manager):
 
     logger.info(f"CLOSE event - Ticket: {ticket}, Symbol: {mt5_symbol}")
 
-    for account_name, client_config in account_manager.get_all_accounts():
+    # FIX: Use .items() to get key-value pairs from dict
+    for account_name, client_config in account_manager.get_all_accounts().items():
         try:
             position_id = account_manager.get_position_id(account_name, ticket)
 
