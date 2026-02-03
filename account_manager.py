@@ -12,6 +12,7 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAReconcileReq,
     ProtoOAReconcileRes,
     ProtoOAExecutionEvent,
+    ProtoOAExecutionType,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,18 +67,16 @@ class AccountManager:
             try:
                 extracted = Protobuf.extract(message)
 
-                # DEBUG: log all execution events so we can see fills vs accepts
+                # 1) Execution events: new fills / partial fills
                 if isinstance(extracted, ProtoOAExecutionEvent):
                     logger.info(f"[{acc_name}] RAW EXECUTION: {extracted}")
 
-                # 1) Execution events: map ticket -> positionId and try to store volume
-                if isinstance(extracted, ProtoOAExecutionEvent):
+                    exec_type = getattr(extracted, "executionType", None)
                     position = getattr(extracted, "position", None)
                     if position is not None:
                         position_id = getattr(position, "positionId", 0)
                         trade_data = getattr(position, "tradeData", None)
                         label = getattr(trade_data, "label", "") if trade_data else ""
-                        volume = getattr(position, "volume", 0)
 
                         if position_id:
                             # Map MT5 ticket -> positionId as soon as we know it
@@ -91,15 +90,19 @@ class AccountManager:
                                 if mt5_ticket is not None:
                                     self.position_maps[acc_name][mt5_ticket] = position_id
 
-                            # Store positive volume when present
-                            if volume > 0:
+                            # Only trust volume on FILLED / PARTIALLY_FILLED events
+                            volume = getattr(position, "volume", 0)
+                            if exec_type in (
+                                ProtoOAExecutionType.ORDER_FILLED,
+                                ProtoOAExecutionType.ORDER_PARTIALLY_FILLED,
+                            ) and volume > 0:
                                 self.position_volumes[acc_name][position_id] = int(volume)
                                 logger.info(
-                                    f"[{acc_name}] (exec) positionId {position_id} "
+                                    f"[{acc_name}] (exec fill) positionId {position_id} "
                                     f"volume={volume}"
                                 )
 
-                    return  # done handling execution event
+                    # IMPORTANT: Do NOT return here, let it fall through to other handlers
 
                 # 2) Reconcile response: preload ALL positions
                 if isinstance(extracted, ProtoOAReconcileRes):
