@@ -20,11 +20,11 @@ def copy_open_to_account(
     magic,
 ):
     """Execute a new market order on cTrader for a given account."""
-    # FIX: Create SymbolMapper instance with account-specific config
+    # FIX: Use getattr to safely access AccountConfig attributes
     mapper = SymbolMapper(
-        prefix=config.get("symbol_prefix", ""),
-        suffix=config.get("symbol_suffix", ""),
-        custom_map=config.get("custom_symbols", {}),
+        prefix=getattr(config, "symbol_prefix", ""),
+        suffix=getattr(config, "symbol_suffix", ""),
+        custom_map=getattr(config, "custom_symbols", {}),
         broker_symbol_map=client.symbol_name_to_id,
     )
     symbol_id = mapper.get_symbol_id(mt5_symbol)
@@ -38,7 +38,7 @@ def copy_open_to_account(
     # Convert MT5 lots to cTrader volume in cents
     volume_cents = convert_mt5_lots_to_ctrader_cents(
         mt5_lots=volume,
-        multiplier=config.get("volume_multiplier", 1.0),
+        multiplier=getattr(config, "lot_multiplier", 1.0),
     )
 
     if volume_cents <= 0:
