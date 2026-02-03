@@ -21,6 +21,8 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             content_length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_length).decode("utf-8")
             data = json.loads(body)
+            logger.info(f"DEBUG - Raw JSON received: {body}")
+            logger.info(f"DEBUG - Parsed data keys: {list(data.keys())}")
             
             # Backward compatibility: accept both 'event' and 'event_type'
             if 'event' in data and 'event_type' not in data:
