@@ -21,6 +21,10 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             content_length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_length).decode("utf-8")
             data = json.loads(body)
+            
+            # Backward compatibility: accept both 'event' and 'event_type'
+            if 'event' in data and 'event_type' not in data:
+                data['event_type'] = data['event']
 
             logger.info(
                 f"Received trade event: {data.get('event_type')} "
@@ -54,7 +58,7 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(
                 json.dumps(
-                    {"status": "ok", "service": "MT5 to cTrader Bridge"}
+                    {"status": "ok", "service": "MT54to cTrader Bridge"}
                 ).encode("utf-8")
             )
         else:
