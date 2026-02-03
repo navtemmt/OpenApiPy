@@ -68,6 +68,10 @@ def convert_mt5_lots_to_ctrader_cents(
     return max(target_cents, min_volume_cents or 0)
 
 
+# Global pending SL/TP map: ticket -> dict(symbol, sl, tp)
+PENDING_SLTP = {}
+
+
 class MT5BridgeHandler(BaseHTTPRequestHandler):
     """HTTP request handler for MT5 trade events."""
 
@@ -150,6 +154,52 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
         else:
             logger.error(f"Unknown event type: {event_type}")
 
+    def _try_apply_pending_sltp(self, account_name, client, config, ticket):
+        """Try to apply pending SL/TP for a ticket if positionId is now known."""
+        pending = PENDING_SLTP.get(int(ticket))
+        if not pending:
+            return
+
+        position_id = self.account_manager.get_position_id(account_name, int(ticket))
+        if not position_id:
+            return  # not mapped yet
+
+        mt5_symbol = pending.get("symbol")
+        sl = float(pending.get("sl", 0.0))
+        tp = float(pending.get("tp", 0.0))
+
+        mapper = SymbolMapper(
+            prefix=config.symbol_prefix,
+            suffix=config.symbol_suffix,
+            custom_map=config.custom_symbols,
+            broker_symbol_map=client.symbol_name_to_id,
+        )
+        symbol_id = mapper.get_symbol_id(mt5_symbol) if mt5_symbol else None
+
+        sl_arg = sl if sl > 0 else None
+        tp_arg = tp if tp > 0 else None
+
+        if symbol_id is not None and sl_arg is not None:
+            sl_arg = client.round_price_for_symbol(symbol_id, sl_arg)
+        if symbol_id is not None and tp_arg is not None:
+            tp_arg = client.round_price_for_symbol(symbol_id, tp_arg)
+
+        logger.info(
+            f"[{account_name}] Applying pending SL/TP for ticket {ticket} -> "
+            f"positionId {position_id}, SL={sl_arg}, TP={tp_arg}"
+        )
+
+        client.modify_position(
+            account_id=config.account_id,
+            position_id=position_id,
+            sl=sl_arg,
+            tp=tp_arg,
+            symbol_id=symbol_id,
+        )
+
+        # done
+        PENDING_SLTP.pop(int(ticket), None)
+
     def _handle_open(self, event):
         """Handle new order event - copy to all enabled accounts."""
         ticket = event.get("ticket")
@@ -164,6 +214,14 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             f"Opening {side} order: {volume} lots of {mt5_symbol} "
             f"(ticket #{ticket}, magic {magic})"
         )
+
+        # Store pending SL/TP if provided
+        if (sl and float(sl) > 0) or (tp and float(tp) > 0):
+            PENDING_SLTP[int(ticket)] = {
+                "symbol": mt5_symbol,
+                "sl": float(sl),
+                "tp": float(tp),
+            }
 
         accounts = self.account_manager.get_all_accounts()
 
@@ -182,6 +240,8 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                     magic,
                     event,
                 )
+                # Try to apply pending SL/TP immediately after order sent
+                self._try_apply_pending_sltp(account_name, client, config, ticket)
             except Exception as e:
                 logger.error(
                     f"Failed to copy trade to {account_name}: {e}", exc_info=True
@@ -293,6 +353,7 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                 f"volume_cents={volume_to_send}"
             )
 
+        # Send market order without SL/TP
         final_sl = None
         final_tp = None
 
@@ -335,6 +396,9 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
 
         for account_name, (client, config) in accounts.items():
             try:
+                # Try to apply any pending SL/TP first
+                self._try_apply_pending_sltp(account_name, client, config, ticket)
+
                 position_id = self.account_manager.get_position_id(account_name, ticket)
                 if not position_id:
                     logger.warning(
@@ -408,6 +472,9 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
 
         for account_name, (client, config) in accounts.items():
             try:
+                # Try to apply any pending SL/TP first
+                self._try_apply_pending_sltp(account_name, client, config, ticket)
+
                 position_id = self.account_manager.get_position_id(account_name, ticket)
                 if not position_id:
                     logger.warning(
@@ -562,3 +629,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("\nShutting down bridge server...")
         reactor.stop()
+
