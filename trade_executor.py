@@ -7,6 +7,11 @@ from volume_converter import convert_mt5_lots_to_ctrader_cents
 from app_state import logger
 
 
+def _is_metal_symbol(symbol: str) -> bool:
+    s = (symbol or "").upper()
+    return any(m in s for m in ["XAU", "XAG", "GOLD", "SILVER"])
+
+
 def copy_open_to_account(
     account_name,
     client,
@@ -20,6 +25,7 @@ def copy_open_to_account(
     magic,
 ):
     """Execute a new market order on cTrader for a given account."""
+
     # Create SymbolMapper instance with account-specific config
     mapper = SymbolMapper(
         prefix=getattr(config, "symbol_prefix", ""),
@@ -28,33 +34,69 @@ def copy_open_to_account(
         broker_symbol_map=client.symbol_name_to_id,
     )
     symbol_id = mapper.get_symbol_id(mt5_symbol)
-    
+
     if symbol_id is None:
         logger.error(
             f"[{account_name}] Could not map MT5 symbol {mt5_symbol} to cTrader symbolId"
         )
         return
 
+    # Check risk/mirroring rules
+    multi_config = get_multi_account_config()
+    should_copy, reason = multi_config.should_copy_trade(
+        config, mt5_symbol, magic, volume
+    )
+    if not should_copy:
+        logger.info(f"[{account_name}] Skipping: {reason}")
+        return
+
     # Adjust lots based on account config
     adjusted_lots = getattr(config, "lot_multiplier", 1.0) * volume
     adjusted_lots = max(
         getattr(config, "min_lot_size", 0.01),
-        min(adjusted_lots, getattr(config, "max_lot_size", 100.0))
+        min(adjusted_lots, getattr(config, "max_lot_size", 100.0)),
     )
 
-    # Get symbol details from client
-    symbol = client.symbol_details.get(symbol_id) if hasattr(client, "symbol_details") else None
+    # Get symbol details from client (cTrader side)
+    symbol = client.symbol_details.get(symbol_id) if hasattr(
+        client, "symbol_details"
+    ) else None
+
+    # MT5-side contract info if available (otherwise defaults)
+    mt5_contract_size = getattr(client, "mt5_contract_size", 1.0)
+    mt5_volume_min = getattr(client, "mt5_volume_min", 0.01)
+    mt5_volume_step = getattr(client, "mt5_volume_step", 0.01)
+
+    # Decide whether to use legacy lots_to_units fallback
+    use_legacy = False
+    lot_size_cents = 0
+    min_volume_cents = 0
+    max_volume_cents = 0
+    step_volume_cents = 0
 
     if symbol is None:
-        # Fallback: use lots_to_units
-        logger.warning(
-            f"[{account_name}] No symbol details for {mt5_symbol} "
-            f"(id={symbol_id}), falling back to lots_to_units"
-        )
-        base_units = mapper.lots_to_units(adjusted_lots, mt5_symbol)
-        sym_upper = (mt5_symbol or "").upper()
+        use_legacy = True
+    else:
+        lot_size_cents = getattr(symbol, "lotSize", 0)
+        min_volume_cents = getattr(symbol, "minVolume", 0)
+        max_volume_cents = getattr(symbol, "maxVolume", 0)
+        step_volume_cents = getattr(symbol, "stepVolume", 0)
 
-        if any(metal in sym_upper for metal in ["XAU", "XAG", "GOLD", "SILVER"]):
+        # If broker does not provide meaningful specs, fall back to old logic
+        if lot_size_cents <= 0 or min_volume_cents <= 0 or step_volume_cents <= 0:
+            use_legacy = True
+
+    if use_legacy:
+        logger.warning(
+            f"[{account_name}] Using legacy lots_to_units volume calc for {mt5_symbol} "
+            f"(symbol_details missing or invalid: lotSize={lot_size_cents}, "
+            f"min={min_volume_cents}, step={step_volume_cents})"
+        )
+
+        base_units = mapper.lots_to_units(adjusted_lots, mt5_symbol)
+
+        if _is_metal_symbol(mt5_symbol):
+            # Metals: enforce minimum units and send units directly
             min_units = 100
             units = int(base_units)
             if units < min_units:
@@ -65,6 +107,7 @@ def copy_open_to_account(
                 units = min_units
             volume_to_send = units
         else:
+            # Everything else (forex / indices / crypto): units -> cents with min clamp
             units = int(base_units)
             cents = units * 100
             min_units = 1000
@@ -78,16 +121,11 @@ def copy_open_to_account(
             volume_to_send = cents
     else:
         # Use proper volume conversion with symbol details
-        lot_size_cents = getattr(symbol, "lotSize", 0)
-        min_volume_cents = getattr(symbol, "minVolume", 0)
-        max_volume_cents = getattr(symbol, "maxVolume", 0)
-        step_volume_cents = getattr(symbol, "stepVolume", 0)
-
         volume_to_send = convert_mt5_lots_to_ctrader_cents(
             mt5_lots=adjusted_lots,
-            mt5_contract_size=1.0,  # Default
-            mt5_volume_min=0.01,  # Default
-            mt5_volume_step=0.01,  # Default
+            mt5_contract_size=mt5_contract_size,
+            mt5_volume_min=mt5_volume_min,
+            mt5_volume_step=mt5_volume_step,
             lot_size_cents=lot_size_cents,
             min_volume_cents=min_volume_cents,
             max_volume_cents=max_volume_cents,
@@ -96,9 +134,10 @@ def copy_open_to_account(
 
         logger.info(
             f"[{account_name}] Volume conversion: symbol_id={symbol_id}, "
-            f"mt5_lots={adjusted_lots:.4f}, lotSize={lot_size_cents}, "
-            f"min={min_volume_cents}, max={max_volume_cents}, "
-            f"step={step_volume_cents} -> volume_cents={volume_to_send}"
+            f"mt5_lots={adjusted_lots:.4f}, mt5_contract_size={mt5_contract_size}, "
+            f"lotSize={lot_size_cents}, min={min_volume_cents}, "
+            f"max={max_volume_cents}, step={step_volume_cents} -> "
+            f"volume_cents={volume_to_send}"
         )
 
     if volume_to_send <= 0:
