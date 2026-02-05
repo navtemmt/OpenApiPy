@@ -99,7 +99,7 @@ def copy_open_to_account(
             # Metals: enforce minimum units and send units directly
             # Metals: send units directly (1 lot = 100 units in lots_to_units)
             volume_to_send = int(base_units)
-        else::
+        else:
             # Everything else (forex / indices / crypto): units -> cents with min clamp
             units = int(base_units)
             cents = units * 100
