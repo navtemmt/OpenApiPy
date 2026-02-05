@@ -97,16 +97,9 @@ def copy_open_to_account(
 
         if _is_metal_symbol(mt5_symbol):
             # Metals: enforce minimum units and send units directly
-            min_units = 100
-            units = int(base_units)
-            if units < min_units:
-                logger.warning(
-                    f"[{account_name}] Volume {units} below minimum {min_units}, "
-                    f"adjusting to {min_units} units"
-                )
-                units = min_units
-            volume_to_send = units
-        else:
+            # Metals: send units directly (1 lot = 100 units in lots_to_units)
+            volume_to_send = int(base_units)
+        else::
             # Everything else (forex / indices / crypto): units -> cents with min clamp
             units = int(base_units)
             cents = units * 100
