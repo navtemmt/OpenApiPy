@@ -12,6 +12,33 @@ def _is_metal_symbol(symbol: str) -> bool:
     return any(m in s for m in ["XAU", "XAG", "GOLD", "SILVER"])
 
 
+def _snap_volume_cents(
+    volume_cents: int,
+    min_cents: int,
+    max_cents: int,
+    step_cents: int,
+) -> int:
+    """
+    Clamp and snap cTrader Open API volume (cents-of-units) to broker constraints.
+    """
+    v = int(volume_cents or 0)
+
+    if min_cents and min_cents > 0:
+        v = max(v, int(min_cents))
+    if max_cents and max_cents > 0:
+        v = min(v, int(max_cents))
+
+    if step_cents and step_cents > 0:
+        base = int(min_cents) if (min_cents and min_cents > 0) else 0
+        steps = round((v - base) / float(step_cents))
+        v = base + int(steps) * int(step_cents)
+
+    if min_cents and min_cents > 0:
+        v = max(v, int(min_cents))
+
+    return v
+
+
 def copy_open_to_account(
     account_name,
     client,
@@ -95,23 +122,21 @@ def copy_open_to_account(
 
         base_units = mapper.lots_to_units(adjusted_lots, mt5_symbol)
 
-        if _is_metal_symbol(mt5_symbol):
-            # Metals: enforce minimum units and send units directly
-            # Metals: send units directly (1 lot = 100 units in lots_to_units)
-            volume_to_send = int(base_units)
-        else:
-            # Everything else (forex / indices / crypto): units -> cents with min clamp
-            units = int(base_units)
-            cents = units * 100
-            min_units = 1000
-            min_cents = min_units * 100
-            if cents < min_cents:
-                logger.warning(
-                    f"[{account_name}] Volume {cents} below minimum {min_cents}, "
-                    f"adjusting to {min_cents}"
-                )
-                cents = min_cents
-            volume_to_send = cents
+        # Legacy path: treat mapper.lots_to_units() output as *units* and convert to cents-of-units.
+        units = float(base_units or 0.0)
+        volume_to_send = int(round(units * 100))
+
+        # Conservative safety minimum in legacy mode to avoid tiny sizes (e.g. 0.05 units = 5 cents).
+        # If you want, make this per-symbol configurable later.
+        if volume_to_send < 100:  # 1.00 unit
+            logger.warning(
+                f"[{account_name}] Legacy volume {volume_to_send} cents is too small; bumping to 100 cents"
+            )
+            volume_to_send = 100
+
+        # Optional: metal-specific nudge if your mapper returns very small base_units for metals
+        if _is_metal_symbol(mt5_symbol) and volume_to_send < 100:
+            volume_to_send = 100
     else:
         # Use proper volume conversion with symbol details
         volume_to_send = convert_mt5_lots_to_ctrader_cents(
@@ -132,6 +157,16 @@ def copy_open_to_account(
             f"max={max_volume_cents}, step={step_volume_cents} -> "
             f"volume_cents={volume_to_send}"
         )
+
+        snapped = _snap_volume_cents(
+            volume_to_send, min_volume_cents, max_volume_cents, step_volume_cents
+        )
+        if snapped != volume_to_send:
+            logger.info(
+                f"[{account_name}] Volume snapped: {volume_to_send} -> {snapped} "
+                f"(min={min_volume_cents}, max={max_volume_cents}, step={step_volume_cents})"
+            )
+        volume_to_send = snapped
 
     if volume_to_send <= 0:
         logger.warning(
