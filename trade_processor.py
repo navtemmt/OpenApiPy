@@ -25,16 +25,23 @@ def _get_symbol_id_for_account(client, config, mt5_symbol: str):
         return None
 
 
-def _get_full_close_volume_cents(account_manager, account_name: str, ticket: int):
+def _get_full_close_volume_cents(account_manager, account_name: str, ticket: int, position_id: int):
     """
-    Tries to get a full-close volume (cents-of-units) from account_manager.
-    You should implement ONE of these in account_manager:
-      - get_position_volume(account_name, ticket) -> int
-      - get_volume(account_name, ticket) -> int
+    Full-close needs volume (cents-of-units). Try in this order:
+      1) account_manager.get_ticket_volume(account_name, ticket)  (recommended helper)
+      2) account_manager.get_position_volume(account_name, position_id)  (existing method)
+      3) legacy account_manager.get_volume(account_name, ticket) if present
     """
+    if hasattr(account_manager, "get_ticket_volume"):
+        try:
+            v = account_manager.get_ticket_volume(account_name, int(ticket))
+            return None if v is None else int(v)
+        except Exception:
+            pass
+
     if hasattr(account_manager, "get_position_volume"):
         try:
-            v = account_manager.get_position_volume(account_name, int(ticket))
+            v = account_manager.get_position_volume(account_name, int(position_id))
             return None if v is None else int(v)
         except Exception:
             pass
@@ -186,21 +193,25 @@ def handle_close_event(data, account_manager):
     for account_name, (client, config) in account_manager.get_all_accounts().items():
         try:
             position_id = account_manager.get_position_id(account_name, ticket)
-
             if not position_id:
                 logger.warning(f"[{account_name}] No position found for ticket {ticket} to close")
                 continue
 
             symbol_id = _get_symbol_id_for_account(client, config, mt5_symbol)
 
-            # We need a volume to close (Open API partial/full close uses a volume param).
-            close_volume = _get_full_close_volume_cents(account_manager, account_name, ticket)
-            if close_volume is None or close_volume <= 0:
+            close_volume = _get_full_close_volume_cents(
+                account_manager=account_manager,
+                account_name=account_name,
+                ticket=ticket,
+                position_id=position_id,
+            )
+
+            if close_volume is None or int(close_volume) <= 0:
                 logger.warning(
                     f"[{account_name}] Cannot close ticket {ticket} (positionId={position_id}) "
                     f"because close volume is unknown/invalid. "
-                    f"Implement account_manager.get_position_volume() (preferred) "
-                    f"or include close volume in the MT5 CLOSE payload."
+                    f"Fix: account_manager.get_position_volume(account_name, position_id) must return > 0 "
+                    f"(or implement get_ticket_volume / include volume in CLOSE payload)."
                 )
                 continue
 
