@@ -1,10 +1,52 @@
-"""Trade event processing and handling logic.
+"""
+Trade event processing and handling logic.
 Processes incoming MT5 trade events and routes them to appropriate handlers.
 """
+
 from app_state import logger, PENDING_SLTP
 from trade_executor import copy_open_to_account
 from symbol_mapper import SymbolMapper
-from volume_converter import convert_mt5_lots_to_ctrader_cents
+
+
+def _build_account_symbol_mapper(client, config) -> SymbolMapper:
+    return SymbolMapper(
+        prefix=getattr(config, "symbol_prefix", ""),
+        suffix=getattr(config, "symbol_suffix", ""),
+        custom_map=getattr(config, "custom_symbols", {}),
+        broker_symbol_map=getattr(client, "symbol_name_to_id", {}),
+    )
+
+
+def _get_symbol_id_for_account(client, config, mt5_symbol: str):
+    try:
+        mapper = _build_account_symbol_mapper(client, config)
+        return mapper.get_symbol_id(mt5_symbol)
+    except Exception:
+        return None
+
+
+def _get_full_close_volume_cents(account_manager, account_name: str, ticket: int):
+    """
+    Tries to get a full-close volume (cents-of-units) from account_manager.
+    You should implement ONE of these in account_manager:
+      - get_position_volume(account_name, ticket) -> int
+      - get_volume(account_name, ticket) -> int
+    """
+    if hasattr(account_manager, "get_position_volume"):
+        try:
+            v = account_manager.get_position_volume(account_name, int(ticket))
+            return None if v is None else int(v)
+        except Exception:
+            pass
+
+    if hasattr(account_manager, "get_volume"):
+        try:
+            v = account_manager.get_volume(account_name, int(ticket))
+            return None if v is None else int(v)
+        except Exception:
+            pass
+
+    return None
 
 
 def try_apply_pending_sltp(account_name, client, config, ticket, account_manager):
@@ -18,29 +60,28 @@ def try_apply_pending_sltp(account_name, client, config, ticket, account_manager
         return  # not mapped yet
 
     mt5_symbol = pending.get("symbol")
-    ctrader_symbol = SymbolMapper.map_symbol(mt5_symbol)
-    new_sl = pending.get("sl", 0)
-    new_tp = pending.get("tp", 0)
+    new_sl = float(pending.get("sl", 0) or 0)
+    new_tp = float(pending.get("tp", 0) or 0)
+
+    symbol_id = _get_symbol_id_for_account(client, config, mt5_symbol)
 
     logger.info(
         f"[{account_name}] Applying pending SL/TP for ticket {ticket} -> "
-        f"positionId={position_id}, SL={new_sl}, TP={new_tp}"
+        f"positionId={position_id}, symbolId={symbol_id}, SL={new_sl}, TP={new_tp}"
     )
 
     try:
         client.amend_position(
+            account_id=config.account_id,
             position_id=position_id,
+            symbol_id=symbol_id,
             stop_loss=new_sl if new_sl > 0 else None,
             take_profit=new_tp if new_tp > 0 else None,
         )
-        logger.info(
-            f"[{account_name}] Successfully applied pending SL/TP for ticket {ticket}"
-        )
+        logger.info(f"[{account_name}] Successfully applied pending SL/TP for ticket {ticket}")
         del PENDING_SLTP[int(ticket)]
     except Exception as e:
-        logger.error(
-            f"[{account_name}] Failed to apply pending SL/TP for ticket {ticket}: {e}"
-        )
+        logger.error(f"[{account_name}] Failed to apply pending SL/TP for ticket {ticket}: {e}")
 
 
 def process_trade_event(data, account_manager):
@@ -50,9 +91,7 @@ def process_trade_event(data, account_manager):
         ticket = int(data.get("ticket", 0))
         magic = int(data.get("magic", 0))
 
-        logger.info(
-            f"Processing event: {event_type} for ticket {ticket} (magic: {magic})"
-        )
+        logger.info(f"Processing event: {event_type} for ticket {ticket} (magic: {magic})")
 
         if event_type == "OPEN":
             handle_open_event(data, account_manager)
@@ -83,7 +122,6 @@ def handle_open_event(data, account_manager):
         f"Side: {side}, Volume: {volume}, SL: {sl}, TP: {tp}"
     )
 
-    # FIX: Unpack the (client, config) tuple directly
     for account_name, (client, config) in account_manager.get_all_accounts().items():
         try:
             copy_open_to_account(
@@ -114,35 +152,28 @@ def handle_modify_event(data, account_manager):
         f"New SL: {new_sl}, New TP: {new_tp}"
     )
 
-    # FIX: Unpack the (client, config) tuple directly
     for account_name, (client, config) in account_manager.get_all_accounts().items():
         try:
             position_id = account_manager.get_position_id(account_name, ticket)
+            symbol_id = _get_symbol_id_for_account(client, config, mt5_symbol)
 
             if position_id:
                 client.amend_position(
+                    account_id=config.account_id,
                     position_id=position_id,
+                    symbol_id=symbol_id,
                     stop_loss=new_sl if new_sl > 0 else None,
                     take_profit=new_tp if new_tp > 0 else None,
                 )
-                logger.info(
-                    f"[{account_name}] Modified position {position_id} for ticket {ticket}"
-                )
+                logger.info(f"[{account_name}] Modified position {position_id} for ticket {ticket}")
             else:
                 logger.warning(
-                    f"[{account_name}] Position not found for ticket {ticket}, "
-                    f"storing pending SL/TP"
+                    f"[{account_name}] Position not found for ticket {ticket}, storing pending SL/TP"
                 )
-                PENDING_SLTP[ticket] = {
-                    "symbol": mt5_symbol,
-                    "sl": new_sl,
-                    "tp": new_tp,
-                }
+                PENDING_SLTP[ticket] = {"symbol": mt5_symbol, "sl": new_sl, "tp": new_tp}
 
         except Exception as e:
-            logger.error(
-                f"[{account_name}] Failed to modify position for ticket {ticket}: {e}"
-            )
+            logger.error(f"[{account_name}] Failed to modify position for ticket {ticket}: {e}")
 
 
 def handle_close_event(data, account_manager):
@@ -152,26 +183,39 @@ def handle_close_event(data, account_manager):
 
     logger.info(f"CLOSE event - Ticket: {ticket}, Symbol: {mt5_symbol}")
 
-    # FIX: Unpack the (client, config) tuple directly
     for account_name, (client, config) in account_manager.get_all_accounts().items():
         try:
             position_id = account_manager.get_position_id(account_name, ticket)
 
-            if position_id:
-                client.close_position(position_id)
-                account_manager.remove_mapping(account_name, ticket)
-                logger.info(
-                    f"[{account_name}] Closed position {position_id} for ticket {ticket}"
-                )
-            else:
+            if not position_id:
+                logger.warning(f"[{account_name}] No position found for ticket {ticket} to close")
+                continue
+
+            symbol_id = _get_symbol_id_for_account(client, config, mt5_symbol)
+
+            # We need a volume to close (Open API partial/full close uses a volume param).
+            close_volume = _get_full_close_volume_cents(account_manager, account_name, ticket)
+            if close_volume is None or close_volume <= 0:
                 logger.warning(
-                    f"[{account_name}] No position found for ticket {ticket} to close"
+                    f"[{account_name}] Cannot close ticket {ticket} (positionId={position_id}) "
+                    f"because close volume is unknown/invalid. "
+                    f"Implement account_manager.get_position_volume() (preferred) "
+                    f"or include close volume in the MT5 CLOSE payload."
                 )
+                continue
+
+            client.close_position(
+                account_id=config.account_id,
+                position_id=position_id,
+                volume=int(close_volume),
+                symbol_id=symbol_id,
+            )
+
+            account_manager.remove_mapping(account_name, ticket)
+            logger.info(f"[{account_name}] Closed position {position_id} for ticket {ticket}")
 
         except Exception as e:
-            logger.error(
-                f"[{account_name}] Failed to close position for ticket {ticket}: {e}"
-            )
+            logger.error(f"[{account_name}] Failed to close position for ticket {ticket}: {e}")
 
     if ticket in PENDING_SLTP:
         del PENDING_SLTP[ticket]
