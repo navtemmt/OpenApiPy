@@ -453,4 +453,3 @@ def convert_mt5_lots_to_ctrader_cents(
         target_cents = base + int(steps) * step_volume_cents
 
     return max(target_cents, min_volume_cents or 0)
-        reactor.stop()
