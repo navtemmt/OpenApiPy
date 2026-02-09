@@ -34,10 +34,6 @@ class CTraderClient:
     """High-level wrapper for cTrader Open API trading operations."""
 
     def __init__(self, env: str = "demo"):
-        """
-        Args:
-            env: "demo" or "live"
-        """
         load_dotenv()
 
         self.client_id = os.getenv("CTRADER_CLIENT_ID")
@@ -221,7 +217,6 @@ class CTraderClient:
     def _on_symbols_list(self, result):
         try:
             msg = Protobuf.extract(result)
-
             symbols = getattr(msg, "symbol", None)
             if not symbols:
                 logger.error("SymbolsList response has no symbols field: %r", msg)
@@ -252,18 +247,13 @@ class CTraderClient:
         digits = 4
         if symbol and hasattr(symbol, "digits"):
             try:
-                # Use symbol precision as-is (do not cap)
-                digits = int(symbol.digits)
+                digits = int(symbol.digits)  # do not cap
             except Exception:
                 pass
         factor = 10 ** digits
         return round(float(price) * factor) / factor
 
     def snap_volume_for_symbol(self, symbol_id: int, volume_cents: int) -> int:
-        """
-        Snap Open API volume (cents-of-units) to symbol constraints:
-        minVolume/maxVolume/stepVolume (all ints, cents-of-units).
-        """
         v = int(volume_cents or 0)
         symbol = self.symbol_details.get(symbol_id)
         if not symbol:
@@ -302,7 +292,6 @@ class CTraderClient:
     # ------------------------------------------------------------------
 
     def set_account_credentials(self, account_id: int, access_token: str):
-        """Must be called BEFORE connect() if you want auto account auth."""
         self.account_id = int(account_id)
         self.access_token = access_token
         logger.info("Account credentials set: %s", account_id)
@@ -319,7 +308,6 @@ class CTraderClient:
     # Trading
     # ------------------------------------------------------------------
 
-    # Backward compatible name (your app_state calls amend_position)
     def amend_position(
         self,
         account_id: int,
@@ -327,7 +315,15 @@ class CTraderClient:
         sl: Optional[float] = None,
         tp: Optional[float] = None,
         symbol_id: Optional[int] = None,
+        # compatibility keywords used by app_state:
+        stop_loss: Optional[float] = None,
+        take_profit: Optional[float] = None,
     ):
+        if stop_loss is not None:
+            sl = stop_loss
+        if take_profit is not None:
+            tp = take_profit
+
         return self.modify_position(
             account_id=account_id,
             position_id=position_id,
@@ -349,19 +345,7 @@ class CTraderClient:
         if not self.is_account_authed:
             raise RuntimeError("Account not authenticated yet")
 
-        snapped_vol = self.snap_volume_for_symbol(symbol_id, volume)
-        if snapped_vol != int(volume):
-            s = self.symbol_details.get(symbol_id)
-            logger.info(
-                "Snapped order volume for symbolId=%s: %s -> %s (min=%s max=%s step=%s)",
-                symbol_id,
-                int(volume),
-                snapped_vol,
-                getattr(s, "minVolume", None) if s else None,
-                getattr(s, "maxVolume", None) if s else None,
-                getattr(s, "stepVolume", None) if s else None,
-            )
-        volume = snapped_vol
+        volume = self.snap_volume_for_symbol(symbol_id, volume)
 
         req = ProtoOANewOrderReq()
         req.ctidTraderAccountId = int(account_id)
@@ -370,7 +354,6 @@ class CTraderClient:
         req.tradeSide = ProtoOATradeSide.BUY if side.lower() == "buy" else ProtoOATradeSide.SELL
         req.volume = int(volume)
 
-        # Never send 0.0 as a price level
         if sl is not None and float(sl) > 0.0:
             req.stopLoss = float(sl)
         if tp is not None and float(tp) > 0.0:
@@ -405,7 +388,6 @@ class CTraderClient:
 
         orig_sl, orig_tp = sl, tp
 
-        # Treat <= 0 as "not set"
         if sl is not None and float(sl) <= 0.0:
             sl = None
         if tp is not None and float(tp) <= 0.0:
@@ -442,18 +424,16 @@ class CTraderClient:
 
     def close_position(self, *args: Any, **kwargs: Any):
         """
-        Backward/forward compatible close.
+        Compatible close.
 
-        Supported:
-          close_position(account_id, position_id, volume, symbol_id=None)
-          close_position(account_id=?, position_id=?, volume=?, symbol_id=?)
-
-        This avoids the crash you saw where app_state called close_position()
-        with missing positional args; it'll raise a clearer error.
+        Requires:
+          (account_id, position_id, volume[, symbol_id])
+        Accepts alt keyword names:
+          pos_id, position, qty, volume_cents
         """
         account_id = kwargs.get("account_id")
-        position_id = kwargs.get("position_id")
-        volume = kwargs.get("volume")
+        position_id = kwargs.get("position_id", kwargs.get("pos_id", kwargs.get("position")))
+        volume = kwargs.get("volume", kwargs.get("qty", kwargs.get("volume_cents")))
         symbol_id = kwargs.get("symbol_id")
 
         if account_id is None and len(args) >= 1:
@@ -466,9 +446,7 @@ class CTraderClient:
             symbol_id = args[3]
 
         if account_id is None or position_id is None or volume is None:
-            raise TypeError(
-                "close_position requires (account_id, position_id, volume[, symbol_id])"
-            )
+            raise TypeError("close_position requires (account_id, position_id, volume[, symbol_id])")
 
         if not self.is_account_authed:
             raise RuntimeError("Account not authenticated yet")
@@ -479,19 +457,7 @@ class CTraderClient:
 
         if symbol_id is not None:
             symbol_id = int(symbol_id)
-            snapped_vol = self.snap_volume_for_symbol(symbol_id, volume)
-            if snapped_vol != int(volume):
-                s = self.symbol_details.get(symbol_id)
-                logger.info(
-                    "Snapped close volume for symbolId=%s: %s -> %s (min=%s max=%s step=%s)",
-                    symbol_id,
-                    int(volume),
-                    snapped_vol,
-                    getattr(s, "minVolume", None) if s else None,
-                    getattr(s, "maxVolume", None) if s else None,
-                    getattr(s, "stepVolume", None) if s else None,
-                )
-            volume = int(snapped_vol)
+            volume = self.snap_volume_for_symbol(symbol_id, volume)
 
         req = ProtoOAClosePositionReq()
         req.ctidTraderAccountId = account_id
@@ -520,10 +486,6 @@ class CTraderClient:
             reactor.stop()
 
 
-# ----------------------------------------------------------------------
-# Utility
-# ----------------------------------------------------------------------
-
 def convert_mt5_lots_to_ctrader_cents(
     mt5_lots: float,
     mt5_contract_size: float,
@@ -536,9 +498,6 @@ def convert_mt5_lots_to_ctrader_cents(
 ) -> int:
     """
     Convert MT5 lots to cTrader volume in *cents of units*.
-
-    Returns:
-        Volume in cents of units for cTrader
     """
     mt5_units = mt5_lots * mt5_contract_size
 
