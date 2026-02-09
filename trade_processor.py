@@ -25,12 +25,9 @@ def _get_symbol_id_for_account(client, config, mt5_symbol: str):
         return None
 
 
-def _get_full_close_volume_cents(account_manager, account_name: str, ticket: int, position_id: int):
+def _get_close_volume_cents(account_manager, account_name: str, ticket: int, position_id: int):
     """
-    Full-close needs volume (cents-of-units). Try in this order:
-      1) account_manager.get_ticket_volume(account_name, ticket)  (recommended helper)
-      2) account_manager.get_position_volume(account_name, position_id)  (existing method)
-      3) legacy account_manager.get_volume(account_name, ticket) if present
+    Prefer volume by MT5 ticket if available, else fall back to volume by position_id.
     """
     if hasattr(account_manager, "get_ticket_volume"):
         try:
@@ -42,13 +39,6 @@ def _get_full_close_volume_cents(account_manager, account_name: str, ticket: int
     if hasattr(account_manager, "get_position_volume"):
         try:
             v = account_manager.get_position_volume(account_name, int(position_id))
-            return None if v is None else int(v)
-        except Exception:
-            pass
-
-    if hasattr(account_manager, "get_volume"):
-        try:
-            v = account_manager.get_volume(account_name, int(ticket))
             return None if v is None else int(v)
         except Exception:
             pass
@@ -69,7 +59,6 @@ def try_apply_pending_sltp(account_name, client, config, ticket, account_manager
     mt5_symbol = pending.get("symbol")
     new_sl = float(pending.get("sl", 0) or 0)
     new_tp = float(pending.get("tp", 0) or 0)
-
     symbol_id = _get_symbol_id_for_account(client, config, mt5_symbol)
 
     logger.info(
@@ -192,28 +181,35 @@ def handle_close_event(data, account_manager):
 
     for account_name, (client, config) in account_manager.get_all_accounts().items():
         try:
+            # If mapping is already gone, treat as duplicate CLOSE and skip
             position_id = account_manager.get_position_id(account_name, ticket)
             if not position_id:
-                logger.warning(f"[{account_name}] No position found for ticket {ticket} to close")
+                logger.info(
+                    f"[{account_name}] CLOSE ignored for ticket {ticket} (already unmapped/closed)"
+                )
                 continue
 
             symbol_id = _get_symbol_id_for_account(client, config, mt5_symbol)
+            close_volume = _get_close_volume_cents(account_manager, account_name, ticket, position_id)
 
-            close_volume = _get_full_close_volume_cents(
-                account_manager=account_manager,
-                account_name=account_name,
-                ticket=ticket,
-                position_id=position_id,
-            )
-
+            # If volume is missing/0, it's already closed (or not yet known) -> skip rather than spam.
             if close_volume is None or int(close_volume) <= 0:
-                logger.warning(
-                    f"[{account_name}] Cannot close ticket {ticket} (positionId={position_id}) "
-                    f"because close volume is unknown/invalid. "
-                    f"Fix: account_manager.get_position_volume(account_name, position_id) must return > 0 "
-                    f"(or implement get_ticket_volume / include volume in CLOSE payload)."
+                logger.info(
+                    f"[{account_name}] CLOSE ignored for ticket {ticket} (positionId={position_id}) "
+                    f"because volume is {close_volume}"
                 )
+                # still remove mapping to prevent repeated CLOSE loops
+                try:
+                    account_manager.remove_mapping(account_name, ticket)
+                except Exception:
+                    pass
                 continue
+
+            # Remove mapping BEFORE sending to make close idempotent (2nd CLOSE won't resend)
+            try:
+                account_manager.remove_mapping(account_name, ticket)
+            except Exception:
+                pass
 
             client.close_position(
                 account_id=config.account_id,
@@ -222,7 +218,6 @@ def handle_close_event(data, account_manager):
                 symbol_id=symbol_id,
             )
 
-            account_manager.remove_mapping(account_name, ticket)
             logger.info(f"[{account_name}] Closed position {position_id} for ticket {ticket}")
 
         except Exception as e:
