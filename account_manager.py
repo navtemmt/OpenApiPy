@@ -1,4 +1,5 @@
-"""Account Manager for Multiple cTrader Connections
+"""
+Account Manager for Multiple cTrader Connections
 
 Manages multiple cTrader client connections for different accounts.
 """
@@ -21,6 +22,7 @@ class AccountManager:
     """Manages multiple cTrader client connections."""
 
     def __init__(self):
+        """Initialize account manager."""
         self.clients: Dict[str, CTraderClient] = {}
         self.configs: Dict[str, AccountConfig] = {}
         # Per-account mapping: MT5 ticket -> cTrader positionId
@@ -28,34 +30,9 @@ class AccountManager:
         # Per-account mapping: cTrader positionId -> volume (cents of units)
         self.position_volumes: Dict[str, Dict[int, int]] = {}
 
-    # ----------------------------
+    # ------------------------------------------------------------------
     # Helpers
-    # ----------------------------
-
-    @staticmethod
-    def _extract_position_volume(pos) -> int:
-        """
-        Best-effort volume extractor.
-
-        For ProtoOAExecutionEvent.position / position updates the volume you want is typically:
-          pos.tradeData.volume
-
-        For some messages it may also exist directly on pos.volume (reconcile response positions).
-        """
-        try:
-            td = getattr(pos, "tradeData", None)
-            if td is not None:
-                v = getattr(td, "volume", 0)
-                if int(v) > 0:
-                    return int(v)
-        except Exception:
-            pass
-
-        try:
-            v = getattr(pos, "volume", 0)
-            return int(v) if int(v) > 0 else 0
-        except Exception:
-            return 0
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _extract_position_label(pos) -> str:
@@ -77,15 +54,41 @@ class AccountManager:
         except Exception:
             return None
 
+    @staticmethod
+    def _extract_position_volume(pos) -> int:
+        """
+        Best-effort volume extractor.
+
+        In execution events and many position updates:
+          pos.tradeData.volume
+
+        In reconcile:
+          pos.volume may be present too.
+        """
+        try:
+            td = getattr(pos, "tradeData", None)
+            if td is not None:
+                v = getattr(td, "volume", 0)
+                if int(v) > 0:
+                    return int(v)
+        except Exception:
+            pass
+
+        try:
+            v = getattr(pos, "volume", 0)
+            return int(v) if int(v) > 0 else 0
+        except Exception:
+            return 0
+
     def _ensure_account_maps(self, acc_name: str):
         if acc_name not in self.position_maps:
             self.position_maps[acc_name] = {}
         if acc_name not in self.position_volumes:
             self.position_volumes[acc_name] = {}
 
-    # ----------------------------
-    # Account setup
-    # ----------------------------
+    # ------------------------------------------------------------------
+    # Account lifecycle
+    # ------------------------------------------------------------------
 
     def add_account(self, account: AccountConfig):
         """Add and connect a cTrader account."""
@@ -95,23 +98,25 @@ class AccountManager:
 
         logger.info("Initializing account: %s", account.name)
 
+        # Create cTrader client for this environment
         client = CTraderClient(env=account.environment)
 
-        # Override app credentials
+        # Override client credentials with account-specific values FIRST
         client.client_id = account.client_id
         client.client_secret = account.client_secret
 
-        # Set account credentials
+        # Now set account credentials (account_id and access_token)
         client.set_account_credentials(
             account_id=account.account_id,
             access_token=account.access_token or "",
         )
 
+        # Store references
         self.clients[account.name] = client
         self.configs[account.name] = account
         self._ensure_account_maps(account.name)
 
-        # Hook message callback
+        # Hook message callback (handles execution events + reconcile + position updates)
         def on_message(message, acc_name=account.name):
             try:
                 extracted = Protobuf.extract(message)
@@ -131,8 +136,8 @@ class AccountManager:
                         if position_id and ticket is not None:
                             self.position_maps[acc_name][int(ticket)] = position_id
 
-                        # Trust volume on fill-like events, but still extract from tradeData
-                        # (your log shows pos.tradeData.volume is set correctly on ORDER_FILLED)
+                        # Only trust volume on FILLED / PARTIALLY_FILLED events
+                        # ORDER_FILLED = 4, ORDER_PARTIALLY_FILLED = 5 (as observed in your logs)
                         vol = self._extract_position_volume(pos)
                         if position_id and vol > 0 and exec_type in (4, 5):
                             self.position_volumes[acc_name][position_id] = int(vol)
@@ -140,9 +145,7 @@ class AccountManager:
                                 f"[{acc_name}] (exec fill) positionId {position_id} volume={vol}"
                             )
 
-                    # Do not return; allow reconcile/other handlers to run too.
-
-                # 2) Reconcile response: preload all open positions
+                # 2) Reconcile response: preload ALL positions
                 if isinstance(extracted, ProtoOAReconcileRes):
                     count = 0
                     for pos in extracted.position:
@@ -165,9 +168,9 @@ class AccountManager:
                         f"[{acc_name}] Reconcile complete: {count} MT5 positions "
                         f"({len(self.position_volumes[acc_name])} with volume)"
                     )
-                    return
+                    return  # done handling reconcile
 
-                # 3) Generic messages that contain a single .position
+                # 3) Single-position updates with a .position field
                 if not hasattr(extracted, "position"):
                     return
 
@@ -181,8 +184,10 @@ class AccountManager:
                 if ticket is None:
                     return
 
+                # Update mapping: MT5 ticket -> cTrader positionId
                 self.position_maps[acc_name][int(ticket)] = position_id
 
+                # Update current volume
                 vol = self._extract_position_volume(pos)
                 if vol > 0:
                     self.position_volumes[acc_name][position_id] = int(vol)
@@ -197,21 +202,25 @@ class AccountManager:
 
         client.set_message_callback(on_message)
 
-        # Connect and reconcile once connected
+        # Connect the client (will auto-authorize account)
         def on_connected():
             logger.info("✓ Account %s connected and authenticated", account.name)
+
+            # Immediately reconcile open positions once account is authorized
             try:
                 req = ProtoOAReconcileReq()
                 req.ctidTraderAccountId = int(account.account_id)
                 logger.info("[%s] Sending reconcile request...", account.name)
-                d = client.client.send(req)
+                d = client.client.send(req)  # low-level client inside CTraderClient
 
                 def _on_reconcile(result):
                     try:
                         Protobuf.extract(result)
                         logger.info("[%s] Reconcile response processed", account.name)
                     except Exception as e:
-                        logger.warning("[%s] Failed to process reconcile response: %s", account.name, e)
+                        logger.warning(
+                            "[%s] Failed to process reconcile response: %s", account.name, e
+                        )
 
                 d.addCallback(_on_reconcile)
                 d.addErrback(client._on_error)
@@ -220,9 +229,9 @@ class AccountManager:
 
         client.connect(on_connect=on_connected)
 
-    # ----------------------------
+    # ------------------------------------------------------------------
     # Accessors
-    # ----------------------------
+    # ------------------------------------------------------------------
 
     def get_client(self, account_name: str) -> Optional[CTraderClient]:
         return self.clients.get(account_name)
@@ -246,20 +255,25 @@ class AccountManager:
         return self.get_position_volume(account_name, pid)
 
     def remove_mapping(self, account_name: str, mt5_ticket: int):
-        """Remove ticket->positionId mapping (and keep volume cache for safety)."""
+        """Remove ticket->positionId mapping."""
         try:
             self.position_maps.get(account_name, {}).pop(int(mt5_ticket), None)
         except Exception:
             pass
 
     def get_all_accounts(self) -> Dict[str, Tuple[CTraderClient, AccountConfig]]:
-        return {name: (self.clients[name], self.configs[name]) for name in self.clients.keys()}
+        return {
+            name: (self.clients[name], self.configs[name])
+            for name in self.clients.keys()
+        }
 
 
+# Global instance
 _manager_instance = None
 
 
 def get_account_manager() -> AccountManager:
+    """Get or create global account manager instance."""
     global _manager_instance
     if _manager_instance is None:
         _manager_instance = AccountManager()
