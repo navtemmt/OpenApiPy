@@ -12,7 +12,7 @@ So this module only maintains:
 
 import logging
 from typing import Optional
-
+from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOASymbolByIdReq
 from ctrader_open_api import Protobuf
 from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOASymbolsListReq
 
