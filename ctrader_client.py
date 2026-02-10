@@ -15,11 +15,10 @@ from twisted.internet import reactor
 from ctrader_utils import convert_mt5_lots_to_ctrader_cents  # kept for compatibility
 import ctrader_symbols_impl as symbols_impl
 import ctrader_monitor_impl as monitor_impl
+import ctrader_auth_impl as auth_impl
 
 from ctrader_open_api import Client, Protobuf, TcpProtocol, EndPoints
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
-    ProtoOAApplicationAuthReq,
-    ProtoOAAccountAuthReq,
     ProtoOANewOrderReq,
     ProtoOAAmendPositionSLTPReq,
     ProtoOAClosePositionReq,
@@ -136,50 +135,20 @@ class CTraderClient:
         return monitor_impl.stop_periodic_tasks(self)
 
     # ------------------------------------------------------------------
-    # Authentication
+    # Authentication (delegated to ctrader_auth_impl.py)
     # ------------------------------------------------------------------
 
     def _authenticate_app(self):
-        logger.info("Authenticating application...")
-        req = ProtoOAApplicationAuthReq()
-        req.clientId = self.client_id
-        req.clientSecret = self.client_secret
-
-        d = self.client.send(req)
-        d.addCallback(self._on_app_auth_success)
-        d.addErrback(self._on_error)
+        return auth_impl.authenticate_app(self)
 
     def _on_app_auth_success(self, result):
-        logger.info("Application authenticated successfully")
-        self.is_app_authed = True
-
-        if self.account_id and self.access_token:
-            self._authorize_account()
-        else:
-            logger.warning(
-                "Account credentials not set yet (call set_account_credentials before connect())"
-            )
-
-        if self._on_connect_callback:
-            try:
-                self._on_connect_callback()
-            except Exception:
-                logger.exception("on_connect callback crashed")
+        return auth_impl.on_app_auth_success(self, result)
 
     def _authorize_account(self):
-        logger.info("Authorizing account %s...", self.account_id)
-        req = ProtoOAAccountAuthReq()
-        req.ctidTraderAccountId = int(self.account_id)
-        req.accessToken = self.access_token
-
-        d = self.client.send(req)
-        d.addCallback(self._on_account_auth_success)
-        d.addErrback(self._on_error)
+        return auth_impl.authorize_account(self)
 
     def _on_account_auth_success(self, result):
-        logger.info("Account %s authorized successfully", self.account_id)
-        self.is_account_authed = True
-        self._load_symbol_map()
+        return auth_impl.on_account_auth_success(self, result)
 
     # ------------------------------------------------------------------
     # Symbols (delegated to ctrader_symbols_impl.py)
@@ -383,38 +352,4 @@ class CTraderClient:
             raise TypeError("close_position requires (account_id, position_id, volume[, symbol_id])")
 
         if not self.is_account_authed:
-            raise RuntimeError("Account not authenticated yet")
-
-        account_id = int(account_id)
-        position_id = int(position_id)
-        volume = int(volume)
-
-        if symbol_id is not None:
-            symbol_id = int(symbol_id)
-            volume = self.snap_volume_for_symbol(symbol_id, volume)
-
-        req = ProtoOAClosePositionReq()
-        req.ctidTraderAccountId = account_id
-        req.positionId = position_id
-        req.volume = volume
-
-        logger.info("Closing position %s: %s units", position_id, volume)
-
-        d = self.client.send(req)
-        d.addErrback(self._on_error)
-        return d
-
-    # ------------------------------------------------------------------
-    # Reactor control
-    # ------------------------------------------------------------------
-
-    def run(self):
-        logger.info("Starting reactor...")
-        if not reactor.running:
-            reactor.run()
-
-    def stop(self):
-        logger.info("Stopping reactor...")
-        self._stop_periodic_tasks()
-        if reactor.running:
-            reactor.stop()
+            raise RuntimeError("Account not authenticated y
