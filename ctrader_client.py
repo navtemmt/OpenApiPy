@@ -201,6 +201,10 @@ class CTraderClient:
     def set_message_callback(self, callback: Callable):
         self._on_message_callback = callback
 
+    def send(self, req):
+        """Facade for low-level client.send(req) to reduce coupling."""
+        return self.client.send(req)
+
     # ------------------------------------------------------------------
     # Trading
     # ------------------------------------------------------------------
