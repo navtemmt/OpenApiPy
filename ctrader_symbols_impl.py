@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 def load_symbol_map(self) -> None:
-    """Formerly: CTraderClient._load_symbol_map"""
+    """Request and populate symbol_name_to_id and symbol_details."""
     if not getattr(self, "account_id", None):
         return
 
@@ -36,7 +36,7 @@ def load_symbol_map(self) -> None:
 
 
 def on_symbols_list(self, result) -> None:
-    """Formerly: CTraderClient._on_symbols_list"""
+    """Parse symbols list response and build maps."""
     try:
         msg = Protobuf.extract(result)
         symbols = getattr(msg, "symbol", None)
@@ -53,8 +53,21 @@ def on_symbols_list(self, result) -> None:
                 sid = int(getattr(s, "symbolId", 0) or 0)
                 if not name or not sid:
                     continue
+
                 self.symbol_name_to_id[name] = sid
                 self.symbol_details[sid] = s
+
+                # DEBUG: dump the actual available fields for specific symbols.
+                # Leave this in until we confirm correct extraction; then you can remove it.
+                if name in ("EURAUD", "XAUUSD"):
+                    try:
+                        logger.info("DBG SYMBOL %s id=%s repr=%r", name, sid, s)
+                        if hasattr(s, "ListFields"):
+                            fields = [(f.name, v) for f, v in s.ListFields()]
+                            logger.info("DBG SYMBOL %s fields=%s", name, fields)
+                    except Exception as e:
+                        logger.info("DBG SYMBOL dump failed for %s: %s", name, e)
+
             except Exception:
                 continue
 
@@ -64,20 +77,20 @@ def on_symbols_list(self, result) -> None:
 
 
 def get_symbol_id_by_name(self, name: str) -> Optional[int]:
-    """Formerly: CTraderClient.get_symbol_id_by_name"""
+    """Lookup symbolId by symbol name (case-insensitive)."""
     return self.symbol_name_to_id.get((name or "").upper())
 
 
 def round_price_for_symbol(self, symbol_id: int, price: float) -> float:
-    """Formerly: CTraderClient.round_price_for_symbol"""
+    """Round price to symbol precision (digits) if available."""
     symbol = self.symbol_details.get(int(symbol_id))
     digits = 4
-    if symbol and hasattr(symbol, "digits"):
+    if symbol is not None and hasattr(symbol, "digits"):
         try:
-            digits = int(symbol.digits)  # do not cap
+            digits = int(getattr(symbol, "digits", digits))
         except Exception:
             pass
-    factor = 10 ** digits
+    factor = 10 ** int(digits)
     return round(float(price) * factor) / factor
 
 
@@ -85,14 +98,15 @@ def snap_volume_for_symbol(self, symbol_id: int, volume_units: int) -> int:
     """
     Clamp volume to symbol min/max/step.
 
-    NOTE: the input is already "units" as cTrader expects (not money).
-    Many Open API fields are called minVolume/maxVolume/stepVolume.
+    Assumes volume_units is in the same unit that the Open API expects for orders
+    (i.e., ProtoOANewOrderReq.volume).
     """
     v = int(volume_units or 0)
     symbol = self.symbol_details.get(int(symbol_id))
-    if not symbol:
+    if symbol is None:
         return v
 
+    # Common field names (may be zero / absent depending on broker/API build)
     min_v = int(getattr(symbol, "minVolume", 0) or 0)
     max_v = int(getattr(symbol, "maxVolume", 0) or 0)
     step_v = int(getattr(symbol, "stepVolume", 0) or 0)
@@ -114,17 +128,15 @@ def snap_volume_for_symbol(self, symbol_id: int, volume_units: int) -> int:
 
 def mt5_lots_to_ctrader_volume(self, symbol_id: int, mt5_lots: float) -> int:
     """
-    Convert MT5 lots to cTrader volume units, using cTrader symbol metadata when possible,
+    Convert MT5 lots to cTrader volume "units", using cTrader symbol metadata when possible,
     then clamp with snap_volume_for_symbol().
 
-    If your MT5 bridge always sends "lots" (0.05, 1.0, etc.), this should be the only
-    conversion you use (do NOT use SymbolMapper.lots_to_units for CFDs/crypto/indices).
+    NOTE: If lotSize is missing/zero, this falls back to 100000 units/lot (FX convention).
     """
     sid = int(symbol_id)
     lots = float(mt5_lots or 0.0)
     symbol = self.symbol_details.get(sid)
 
-    # Best effort: many symbols provide lotSize; if not, fall back to Forex convention.
     lot_size = 0
     if symbol is not None:
         try:
@@ -133,8 +145,7 @@ def mt5_lots_to_ctrader_volume(self, symbol_id: int, mt5_lots: float) -> int:
             lot_size = 0
 
     if lot_size <= 0:
-        # Conservative default: FX convention
-        lot_size = 100000
+        lot_size = 100000  # FX default fallback
 
-    raw_units = int(round(lots * lot_size))
+    raw_units = int(round(lots * float(lot_size)))
     return snap_volume_for_symbol(self, sid, raw_units)
