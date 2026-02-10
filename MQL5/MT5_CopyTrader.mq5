@@ -13,11 +13,15 @@ input string MagicNumberFilter = "";
 input bool   CopyPendingOrders = true;
 
 #include <CopyTrader/CopyTrader_State.mqh>
+#include <CopyTrader/CopyTrader_Common.mqh>
 #include <CopyTrader/CopyTrader_HTTP.mqh>
 #include <CopyTrader/CopyTrader_Signals.mqh>
 #include <CopyTrader/CopyTrader_Trades.mqh>
-#include <CopyTrader/CopyTrader_Pendings.mqh>   // <-- add this
+#include <CopyTrader/CopyTrader_Pendings.mqh>
 
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
 int OnInit()
 {
    Print("MT5 CopyTrader EA initialized. Bridge server: ", BridgeServerURL);
@@ -35,11 +39,32 @@ int OnInit()
    return(INIT_SUCCEEDED);
 }
 
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
    Print("MT5 CopyTrader EA stopped. Reason: ", reason);
 }
 
+//+------------------------------------------------------------------+
+//| Trade transaction handler (fires on delete/fill/expire too)       |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+{
+   // You said "any removal" should behave like cancel, so we just rescan
+   if(CopyPendingOrders)
+      CheckPendingChanges();
+
+   // Optional: if you want position changes to react instantly too, uncomment:
+   // CheckTradeChanges();
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
 void OnTick()
 {
    CheckTradeChanges();
