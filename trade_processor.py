@@ -14,6 +14,7 @@ def _build_account_symbol_mapper(client, config) -> SymbolMapper:
         suffix=getattr(config, "symbol_suffix", ""),
         custom_map=getattr(config, "custom_symbols", {}),
         broker_symbol_map=getattr(client, "symbol_name_to_id", {}),
+        strict=True,
     )
 
 
@@ -68,9 +69,29 @@ def try_apply_pending_sltp(account_name, client, config, ticket, account_manager
         logger.error(f"[{account_name}] Failed to apply pending SL/TP for ticket {ticket}: {e}")
 
 
+def notify_position_update(account_name, ticket, account_manager):
+    """
+    Call this when you learn ticket->positionId mapping (usually on ORDER_FILLED).
+    It tries to apply pending SL/TP immediately.
+    """
+    try:
+        client = account_manager.get_client(account_name)
+        config = account_manager.get_config(account_name)
+        if not client or not config:
+            return
+        try_apply_pending_sltp(
+            account_name=account_name,
+            client=client,
+            config=config,
+            ticket=int(ticket),
+            account_manager=account_manager,
+        )
+    except Exception as e:
+        logger.debug(f"[{account_name}] notify_position_update failed: {e}")
+
+
 def process_trade_event(data, account_manager):
     try:
-        # Your MT5 payload uses "action"
         event_type = data.get("event_type") or data.get("action")
         ticket = int(data.get("ticket", 0))
         magic = int(data.get("magic", 0))
@@ -104,6 +125,10 @@ def handle_open_event(data, account_manager):
         f"OPEN event - Ticket: {ticket}, Symbol: {mt5_symbol}, "
         f"Side: {side}, Volume: {volume}, SL: {sl}, TP: {tp}"
     )
+
+    # Store pending SL/TP immediately so it can be applied as soon as positionId is known
+    if (sl and sl > 0) or (tp and tp > 0):
+        PENDING_SLTP[int(ticket)] = {"symbol": mt5_symbol, "sl": float(sl), "tp": float(tp)}
 
     for account_name, (client, config) in account_manager.get_all_accounts().items():
         try:
@@ -152,7 +177,7 @@ def handle_modify_event(data, account_manager):
                 logger.warning(
                     f"[{account_name}] Position not found for ticket {ticket}, storing pending SL/TP"
                 )
-                PENDING_SLTP[ticket] = {"symbol": mt5_symbol, "sl": new_sl, "tp": new_tp}
+                PENDING_SLTP[int(ticket)] = {"symbol": mt5_symbol, "sl": new_sl, "tp": new_tp}
 
         except Exception as e:
             logger.error(f"[{account_name}] Failed to modify position for ticket {ticket}: {e}")
@@ -162,14 +187,10 @@ def handle_close_event(data, account_manager):
     ticket = int(data.get("ticket"))
     mt5_symbol = data.get("symbol")
 
-    # MT5 EA sends partial close lots in data["volume"]
     close_lots = data.get("volume", None)
     mt5_contract_size = float(data.get("mt5_contract_size", 0) or 0)
 
-    logger.info(
-        f"CLOSE event - Ticket: {ticket}, Symbol: {mt5_symbol}, "
-        f"close_lots={close_lots}"
-    )
+    logger.info(f"CLOSE event - Ticket: {ticket}, Symbol: {mt5_symbol}, close_lots={close_lots}")
 
     for account_name, (client, config) in account_manager.get_all_accounts().items():
         try:
@@ -180,13 +201,11 @@ def handle_close_event(data, account_manager):
 
             symbol_id = _get_symbol_id_for_account(client, config, mt5_symbol)
 
-            # If MT5 provided lots-to-close and contract size, do partial close
             close_volume_cents = None
             if close_lots is not None and mt5_contract_size > 0:
                 close_volume_cents = _lots_to_ctrader_cents(float(close_lots), mt5_contract_size)
 
             if close_volume_cents is None or close_volume_cents <= 0:
-                # Fallback: full close using cached cTrader volume
                 close_volume_cents = account_manager.get_position_volume(account_name, position_id)
 
             if close_volume_cents is None or int(close_volume_cents) <= 0:
@@ -208,13 +227,11 @@ def handle_close_event(data, account_manager):
                 f"(ticket {ticket}) volume_cents={int(close_volume_cents)}"
             )
 
-            # Only remove mapping if it looks like a full close request (no explicit partial volume)
-            # For your testing, keep mapping for partial-close so next CLOSE (remaining volume) works.
             if close_lots is None:
                 account_manager.remove_mapping(account_name, ticket)
 
         except Exception as e:
             logger.error(f"[{account_name}] Failed to close position for ticket {ticket}: {e}")
 
-    if ticket in PENDING_SLTP:
-        del PENDING_SLTP[ticket]
+    if int(ticket) in PENDING_SLTP:
+        del PENDING_SLTP[int(ticket)]
