@@ -5,4 +5,13 @@
 input string BridgeServerURL   = "http://127.0.0.1:3140";
 input int    RequestTimeout    = 5000;
 input string MagicNumberFilter = "";
-input bool   CopyPendingOrders = true; // still unused in v1.04
+input bool   CopyPendingOrders = true;
+
+// Helper: escape string for JSON
+string JsonEscape(const string s)
+{
+   string out = s;
+   StringReplace(out, "\\", "\\\\");
+   StringReplace(out, "\"", "\\\"");
+   return out;
+}
