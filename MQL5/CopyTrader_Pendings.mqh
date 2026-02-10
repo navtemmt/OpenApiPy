@@ -1,20 +1,18 @@
 //+------------------------------------------------------------------+
 //| CopyTrader_Pendings.mqh                                          |
-//| Pending orders tracking + PENDING_OPEN signals (v1.09 style)     |
+//| Pending orders tracking + PENDING_OPEN signals (MT5 safe)        |
 //+------------------------------------------------------------------+
 #ifndef __COPYTRADER_PENDINGS_MQH__
 #define __COPYTRADER_PENDINGS_MQH__
 
-// Expects these globals/inputs from your project:
-// input string MagicNumberFilter;
-// PendingInfo g_lastPendings[]; int g_lastPendingCount;
-// long g_sentPendingTickets[]; int g_sentPendingCount;
-//
-// Expects these functions from your other modules:
-// string JsonEscape(const string s);
-// bool GetSymbolTradeMeta(const string symbol, double &contract_size, double &vol_min, double &vol_max, double &vol_step);
-// void SendToServer(string jsonData);
+// NOTE:
+// Requires CopyTrader_State.mqh to be included BEFORE this file,
+// providing: PendingInfo, g_lastPendings, g_lastPendingCount,
+// g_sentPendingTickets, g_sentPendingCount. [page:680]
 
+//======================================================
+// Helpers
+//======================================================
 bool PendingAlreadySent(const long ticket)
 {
    for(int i = 0; i < g_sentPendingCount; i++)
@@ -43,6 +41,9 @@ bool IsPendingOrderType(const int ord_type)
            ord_type == ORDER_TYPE_SELL_STOP_LIMIT);
 }
 
+//======================================================
+// Snapshot current pendings
+//======================================================
 void UpdatePendingList()
 {
    int totalOrders = OrdersTotal();
@@ -86,6 +87,9 @@ void UpdatePendingList()
    ArrayResize(g_lastPendings, g_lastPendingCount);
 }
 
+//======================================================
+// Send pending OPEN signal
+//======================================================
 void SendPendingOpenSignal(const ulong ticket)
 {
    if(!OrderSelect(ticket))
@@ -94,15 +98,14 @@ void SendPendingOpenSignal(const ulong ticket)
       return;
    }
 
-   string symbol     = OrderGetString(ORDER_SYMBOL);
-   int    ord_type   = (int)OrderGetInteger(ORDER_TYPE);
-   double volume     = OrderGetDouble(ORDER_VOLUME_CURRENT);
+   string symbol = OrderGetString(ORDER_SYMBOL);
+   int    ord_type = (int)OrderGetInteger(ORDER_TYPE);
+   double volume = OrderGetDouble(ORDER_VOLUME_CURRENT);
    double price_open = OrderGetDouble(ORDER_PRICE_OPEN);
    double price_stoplimit = OrderGetDouble(ORDER_PRICE_STOPLIMIT);
-
    double sl = OrderGetDouble(ORDER_SL);
    double tp = OrderGetDouble(ORDER_TP);
-   long magic = (long)OrderGetInteger(ORDER_MAGIC);
+   long   magic = (long)OrderGetInteger(ORDER_MAGIC);
    datetime exp = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
 
    double contract_size, vol_min, vol_max, vol_step;
@@ -119,51 +122,48 @@ void SendPendingOpenSignal(const ulong ticket)
    if(ord_type == ORDER_TYPE_SELL_STOP_LIMIT) { side = "SELL"; pending_type = "stop_limit"; }
 
    long exp_ms = 0;
-   if(exp > 0) exp_ms = (long)exp * 1000;
+   if(exp > 0)
+      exp_ms = (long)exp * 1000;
 
-   string jsonData =
-      "{"
-      "\"event_type\":\"PENDING_OPEN\","
-      "\"ticket\":" + (string)ticket + ","
-      "\"symbol\":\"" + JsonEscape(symbol) + "\","
-      "\"side\":\"" + side + "\","
-      "\"volume\":" + DoubleToString(volume, 2) + ","
-      "\"pending_type\":\"" + pending_type + "\",";
+   string json = "{";
+   json += "\"event_type\":\"PENDING_OPEN\",";
+   json += "\"ticket\":" + (string)ticket + ",";
+   json += "\"symbol\":\"" + JsonEscape(symbol) + "\",";
+   json += "\"side\":\"" + side + "\",";
+   json += "\"volume\":" + DoubleToString(volume, 2) + ",";
+   json += "\"pending_type\":\"" + pending_type + "\",";
 
    if(pending_type == "limit")
-      jsonData += "\"limit_price\":" + DoubleToString(price_open, 5) + ",";
+      json += "\"limit_price\":" + DoubleToString(price_open, 5) + ",";
    else if(pending_type == "stop")
-      jsonData += "\"stop_price\":" + DoubleToString(price_open, 5) + ",";
+      json += "\"stop_price\":" + DoubleToString(price_open, 5) + ",";
    else
    {
-      jsonData += "\"stop_price\":" + DoubleToString(price_open, 5) + ",";
-      jsonData += "\"limit_price\":" + DoubleToString(price_stoplimit, 5) + ",";
+      json += "\"stop_price\":" + DoubleToString(price_open, 5) + ",";
+      json += "\"limit_price\":" + DoubleToString(price_stoplimit, 5) + ",";
    }
 
-   jsonData +=
-      "\"sl\":" + DoubleToString(sl, 5) + ","
-      "\"tp\":" + DoubleToString(tp, 5) + ","
-      "\"magic\":" + (string)magic + ","
-      "\"expiration_ms\":" + (string)exp_ms + ","
-      "\"mt5_contract_size\":" + DoubleToString(contract_size, 2) + ","
-      "\"mt5_volume_min\":" + DoubleToString(vol_min, 2) + ","
-      "\"mt5_volume_max\":" + DoubleToString(vol_max, 2) + ","
-      "\"mt5_volume_step\":" + DoubleToString(vol_step, 2) +
-      "}";
+   json += "\"sl\":" + DoubleToString(sl, 5) + ",";
+   json += "\"tp\":" + DoubleToString(tp, 5) + ",";
+   json += "\"magic\":" + (string)magic + ",";
+   json += "\"expiration_ms\":" + (string)exp_ms + ",";
+   json += "\"mt5_contract_size\":" + DoubleToString(contract_size, 2) + ",";
+   json += "\"mt5_volume_min\":" + DoubleToString(vol_min, 2) + ",";
+   json += "\"mt5_volume_max\":" + DoubleToString(vol_max, 2) + ",";
+   json += "\"mt5_volume_step\":" + DoubleToString(vol_step, 2);
+   json += "}";
 
-   SendToServer(jsonData);
+   SendToServer(json);
 }
 
+//======================================================
+// Detect new pending orders
+//======================================================
 void CheckPendingChanges()
 {
-   int currentOrders = OrdersTotal();
-   if(currentOrders <= 0)
-   {
-      UpdatePendingList();
-      return;
-   }
+   int totalOrders = OrdersTotal();
 
-   for(int i = 0; i < currentOrders; i++)
+   for(int i = 0; i < totalOrders; i++)
    {
       ulong ticket = OrderGetTicket(i);
       if(ticket == 0)
