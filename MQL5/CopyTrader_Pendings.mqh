@@ -5,10 +5,9 @@
 #ifndef __COPYTRADER_PENDINGS_MQH__
 #define __COPYTRADER_PENDINGS_MQH__
 
-// NOTE:
-// Requires CopyTrader_State.mqh to be included BEFORE this file,
-// providing: PendingInfo, g_lastPendings, g_lastPendingCount,
-// g_sentPendingTickets, g_sentPendingCount. [page:680]
+// Requires CopyTrader_State.mqh included BEFORE this file:
+// PendingInfo g_lastPendings[]; int g_lastPendingCount;
+// long g_sentPendingTickets[];  int g_sentPendingCount; [page:680]
 
 //======================================================
 // Helpers
@@ -98,15 +97,15 @@ void SendPendingOpenSignal(const ulong ticket)
       return;
    }
 
-   string symbol = OrderGetString(ORDER_SYMBOL);
-   int    ord_type = (int)OrderGetInteger(ORDER_TYPE);
-   double volume = OrderGetDouble(ORDER_VOLUME_CURRENT);
-   double price_open = OrderGetDouble(ORDER_PRICE_OPEN);
-   double price_stoplimit = OrderGetDouble(ORDER_PRICE_STOPLIMIT);
-   double sl = OrderGetDouble(ORDER_SL);
-   double tp = OrderGetDouble(ORDER_TP);
-   long   magic = (long)OrderGetInteger(ORDER_MAGIC);
-   datetime exp = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
+   string   symbol         = OrderGetString(ORDER_SYMBOL);
+   int      ord_type       = (int)OrderGetInteger(ORDER_TYPE);
+   double   volume         = OrderGetDouble(ORDER_VOLUME_CURRENT);
+   double   price_open     = OrderGetDouble(ORDER_PRICE_OPEN);
+   double   price_stoplimit= OrderGetDouble(ORDER_PRICE_STOPLIMIT);
+   double   sl             = OrderGetDouble(ORDER_SL);
+   double   tp             = OrderGetDouble(ORDER_TP);
+   long     magic          = (long)OrderGetInteger(ORDER_MAGIC);
+   datetime exp            = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
 
    double contract_size, vol_min, vol_max, vol_step;
    GetSymbolTradeMeta(symbol, contract_size, vol_min, vol_max, vol_step);
