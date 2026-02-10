@@ -1,4 +1,5 @@
-#pragma once
+#ifndef COPYTRADER_TRADES_MQH
+#define COPYTRADER_TRADES_MQH
 
 void UpdateTradeList()
 {
@@ -114,3 +115,5 @@ void CheckTradeChanges()
 
    UpdateTradeList();
 }
+
+#endif // COPYTRADER_TRADES_MQH
