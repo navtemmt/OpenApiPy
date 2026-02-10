@@ -28,28 +28,6 @@ TradeInfo g_lastTrades[];
 int       g_lastTradeCount = 0;
 
 //+------------------------------------------------------------------+
-//| Helper: get symbol trade metadata                                |
-//+------------------------------------------------------------------+
-bool GetSymbolTradeMeta(const string symbol,
-                        double &contract_size,
-                        double &vol_min,
-                        double &vol_max,
-                        double &vol_step)
-{
-   contract_size = SymbolInfoDouble(symbol, SYMBOL_TRADE_CONTRACT_SIZE);
-   vol_min       = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
-   vol_max       = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
-   vol_step      = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
-
-   if(contract_size <= 0.0)
-   {
-      Print("GetSymbolTradeMeta: invalid contract_size for ", symbol, " = ", contract_size);
-      return false;
-   }
-   return true;
-}
-
-//+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
 int OnInit()
@@ -227,8 +205,10 @@ void SendOpenSignal(ulong ticket)
    double tp        = PositionGetDouble(POSITION_TP);
    long   magic     = PositionGetInteger(POSITION_MAGIC);
 
-   double contract_size, vol_min, vol_max, vol_step;
-   GetSymbolTradeMeta(symbol, contract_size, vol_min, vol_max, vol_step);
+   double contract_size = SymbolInfoDouble(symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+   double vol_min       = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+   double vol_max       = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+   double vol_step      = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
 
    string tradeType = (type == POSITION_TYPE_BUY) ? "BUY" : "SELL";
 
@@ -257,11 +237,6 @@ void SendOpenSignal(ulong ticket)
 //+------------------------------------------------------------------+
 void SendCloseSignal(long ticket, string symbol, double closedVolume)
 {
-   // Include trade meta so bridge can convert lots->cTrader cents for partial closes
-   double contract_size = 0.0, vol_min = 0.0, vol_max = 0.0, vol_step = 0.0;
-   if(symbol != "")
-      GetSymbolTradeMeta(symbol, contract_size, vol_min, vol_max, vol_step);
-
    string jsonData = "{"
       "\"action\":\"CLOSE\","
       "\"ticket\":" + (string)ticket + ",";
@@ -269,19 +244,9 @@ void SendCloseSignal(long ticket, string symbol, double closedVolume)
    if(symbol != "")
       jsonData += "\"symbol\":\"" + symbol + "\",";
 
-   // Keep more precision for partial-close lots
-   jsonData += "\"volume\":" + DoubleToString(closedVolume, 8);
-
-   // Attach contract/volume info when symbol is known
-   if(symbol != "" && contract_size > 0.0)
-   {
-      jsonData += ",\"mt5_contract_size\":" + DoubleToString(contract_size, 2);
-      jsonData += ",\"mt5_volume_min\":" + DoubleToString(vol_min, 2);
-      jsonData += ",\"mt5_volume_max\":" + DoubleToString(vol_max, 2);
-      jsonData += ",\"mt5_volume_step\":" + DoubleToString(vol_step, 2);
-   }
-
-   jsonData += "}";
+   jsonData +=
+      "\"volume\":" + DoubleToString(closedVolume, 2) +
+      "}";
 
    SendToServer(jsonData);
    Print("Sent CLOSE signal for ticket #", ticket,
