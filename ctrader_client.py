@@ -10,10 +10,11 @@ import logging
 from typing import Optional, Callable, Dict, Any
 
 from dotenv import load_dotenv
-from twisted.internet import reactor, task
+from twisted.internet import reactor
 
 from ctrader_utils import convert_mt5_lots_to_ctrader_cents  # kept for compatibility
 import ctrader_symbols_impl as symbols_impl
+import ctrader_monitor_impl as monitor_impl
 
 from ctrader_open_api import Client, Protobuf, TcpProtocol, EndPoints
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
@@ -116,39 +117,23 @@ class CTraderClient:
                 logger.exception("User message callback crashed")
 
     # ------------------------------------------------------------------
-    # Heartbeat / health
+    # Heartbeat / health (delegated to ctrader_monitor_impl.py)
     # ------------------------------------------------------------------
 
     def _start_heartbeat(self):
-        if self.heartbeat_task is None or not self.heartbeat_task.running:
-            self.heartbeat_task = task.LoopingCall(self._send_heartbeat)
-            self.heartbeat_task.start(self.heartbeat_interval, now=False)
-            logger.info("Heartbeat started")
+        return monitor_impl.start_heartbeat(self)
 
     def _send_heartbeat(self):
-        if self.is_connected and self.is_app_authed:
-            logger.debug("Heartbeat OK")
-        else:
-            logger.debug("Heartbeat: not ready")
+        return monitor_impl.send_heartbeat(self)
 
     def _start_health_check(self):
-        if self.health_check_task is None or not self.health_check_task.running:
-            self.health_check_task = task.LoopingCall(self._check_connection_health)
-            self.health_check_task.start(30, now=False)
-            logger.info("Health check started")
+        return monitor_impl.start_health_check(self)
 
     def _check_connection_health(self):
-        idle = time.time() - self.last_message_time
-        if idle > self.max_idle_time:
-            logger.warning("Connection idle for %.0fs", idle)
+        return monitor_impl.check_connection_health(self)
 
     def _stop_periodic_tasks(self):
-        if self.heartbeat_task and self.heartbeat_task.running:
-            self.heartbeat_task.stop()
-            logger.info("Heartbeat stopped")
-        if self.health_check_task and self.health_check_task.running:
-            self.health_check_task.stop()
-            logger.info("Health check stopped")
+        return monitor_impl.stop_periodic_tasks(self)
 
     # ------------------------------------------------------------------
     # Authentication
@@ -258,7 +243,6 @@ class CTraderClient:
         sl: Optional[float] = None,
         tp: Optional[float] = None,
         symbol_id: Optional[int] = None,
-        # compatibility keywords used by app_state:
         stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None,
     ):
