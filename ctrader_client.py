@@ -7,7 +7,7 @@ Provides high-level trading methods wrapping the low-level OpenApiPy SDK.
 import os
 import time
 import logging
-from typing import Optional, Callable, Dict, Any
+from typing import Optional, Callable, Dict, Any, Iterable
 
 from dotenv import load_dotenv
 from twisted.internet import reactor
@@ -19,6 +19,11 @@ import ctrader_auth_impl as auth_impl
 import ctrader_trading_impl as trading_impl
 
 from ctrader_open_api import Client, Protobuf, TcpProtocol, EndPoints
+from ctrader_open_api.messages.OpenApiMessages_pb2 import (
+    ProtoOASubscribeSpotsReq,
+    ProtoOAUnsubscribeSpotsReq,
+    ProtoOASpotEvent,
+)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -52,6 +57,10 @@ class CTraderClient:
         self.symbol_name_to_id: Dict[str, int] = {}
         self.symbol_details: Dict[int, object] = {}
 
+        # Spot quote cache: symbolId -> {"bid": float, "ask": float, "ts": int}
+        # Filled only if you subscribe to spots.
+        self.spot_quotes: Dict[int, Dict[str, Any]] = {}
+
         # Health monitoring
         self.heartbeat_task = None
         self.health_check_task = None
@@ -84,6 +93,14 @@ class CTraderClient:
         reactor.callLater(5, self._start_heartbeat)
         reactor.callLater(5, self._start_health_check)
 
+        # If the user provided a connect callback, call it.
+        # (AccountManager uses this to immediately reconcile.)
+        if self._on_connect_callback:
+            try:
+                self._on_connect_callback()
+            except Exception:
+                logger.exception("on_connect callback crashed")
+
     def _handle_disconnected(self, client, reason):
         logger.warning("Disconnected from cTrader: %s", reason)
         self.is_connected = False
@@ -91,21 +108,50 @@ class CTraderClient:
         self.is_account_authed = False
         self.symbol_name_to_id.clear()
         self.symbol_details.clear()
+        self.spot_quotes.clear()
         self._stop_periodic_tasks()
 
     def _handle_message(self, client, message):
         self.last_message_time = time.time()
+
+        extracted = None
         try:
-            msg = Protobuf.extract(message)
-            logger.debug("Received message type: %s", getattr(msg, "payloadType", None))
+            extracted = Protobuf.extract(message)
+            logger.debug("Received message type: %s", getattr(extracted, "payloadType", None))
         except Exception:
             logger.debug("Received raw message: %r", message)
 
+        # Internal handling: cache spots if we receive them
+        try:
+            if extracted is not None and isinstance(extracted, ProtoOASpotEvent):
+                self._on_spot_event(extracted)
+        except Exception:
+            logger.debug("Failed to process spot event", exc_info=True)
+
+        # Forward raw message to user callback (AccountManager parses it)
         if self._on_message_callback:
             try:
                 self._on_message_callback(message)
             except Exception:
                 logger.exception("User message callback crashed")
+
+    def _on_spot_event(self, spot_event: ProtoOASpotEvent):
+        """
+        Cache latest bid/ask per symbolId.
+        ProtoOASpotEvent carries repeated 'spot' items (one per symbol).
+        """
+        try:
+            for s in getattr(spot_event, "spot", []):
+                symbol_id = int(getattr(s, "symbolId", 0) or 0)
+                if not symbol_id:
+                    continue
+                bid = float(getattr(s, "bid", 0.0) or 0.0)
+                ask = float(getattr(s, "ask", 0.0) or 0.0)
+                ts = int(getattr(s, "timestamp", 0) or 0)
+                self.spot_quotes[symbol_id] = {"bid": bid, "ask": ask, "ts": ts}
+        except Exception:
+            # Spot events are optional; never let them crash the app
+            logger.debug("spot event parse error", exc_info=True)
 
     # ------------------------------------------------------------------
     # Heartbeat / health (delegated to ctrader_monitor_impl.py)
@@ -164,6 +210,30 @@ class CTraderClient:
 
     def snap_volume_for_symbol(self, symbol_id: int, volume_cents: int) -> int:
         return symbols_impl.snap_volume_for_symbol(self, symbol_id, volume_cents)
+
+    # ------------------------------------------------------------------
+    # Quotes (spot subscriptions)
+    # ------------------------------------------------------------------
+
+    def subscribe_spots(self, account_id: int, symbol_ids: Iterable[int]):
+        """
+        Subscribe to spot prices for given symbolIds.
+        After this, you'll receive ProtoOASpotEvent updates and self.spot_quotes will fill.
+        """
+        req = ProtoOASubscribeSpotsReq()
+        req.ctidTraderAccountId = int(account_id)
+        req.symbolId.extend([int(x) for x in symbol_ids if int(x) > 0])
+        return self.send(req)
+
+    def unsubscribe_spots(self, account_id: int, symbol_ids: Iterable[int]):
+        req = ProtoOAUnsubscribeSpotsReq()
+        req.ctidTraderAccountId = int(account_id)
+        req.symbolId.extend([int(x) for x in symbol_ids if int(x) > 0])
+        return self.send(req)
+
+    def get_last_quote(self, symbol_id: int) -> Optional[Dict[str, Any]]:
+        """Returns {'bid': float, 'ask': float, 'ts': int} if available."""
+        return self.spot_quotes.get(int(symbol_id))
 
     # ------------------------------------------------------------------
     # Error handling
@@ -232,6 +302,13 @@ class CTraderClient:
         tp: Optional[float] = None,
         label: str = "MT5_Copy",
     ):
+        """
+        Market order sender.
+
+        Note: The "market order fail -> quote + adjust -> retry" logic should be added
+        inside ctrader_trading_impl.send_market_order (recommended), because that's
+        where the actual request is built and error responses are handled.
+        """
         return trading_impl.send_market_order(
             self,
             account_id=account_id,
