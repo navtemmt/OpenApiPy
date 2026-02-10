@@ -32,6 +32,9 @@ class AccountManager:
         # Per-account mapping: cTrader positionId -> volume (cents of units)
         self.position_volumes: Dict[str, Dict[int, int]] = {}
 
+        # NEW: Per-account mapping: MT5 ticket -> cTrader orderId (pending orders)
+        self.order_maps: Dict[str, Dict[int, int]] = {}
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -40,6 +43,17 @@ class AccountManager:
     def _extract_position_label(pos) -> str:
         try:
             td = getattr(pos, "tradeData", None)
+            if td is None:
+                return ""
+            lbl = getattr(td, "label", "")
+            return lbl if isinstance(lbl, str) else ""
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _extract_order_label(order) -> str:
+        try:
+            td = getattr(order, "tradeData", None)
             if td is None:
                 return ""
             lbl = getattr(td, "label", "")
@@ -87,6 +101,8 @@ class AccountManager:
             self.position_maps[acc_name] = {}
         if acc_name not in self.position_volumes:
             self.position_volumes[acc_name] = {}
+        if acc_name not in self.order_maps:
+            self.order_maps[acc_name] = {}
 
     # ------------------------------------------------------------------
     # Account lifecycle
@@ -128,8 +144,21 @@ class AccountManager:
                     logger.info(f"[{acc_name}] RAW EXECUTION: {extracted}")
 
                     exec_type = getattr(extracted, "executionType", None)
-                    pos = getattr(extracted, "position", None)
 
+                    # NEW: capture pending orderId mapping from extracted.order
+                    order = getattr(extracted, "order", None)
+                    if order is not None:
+                        order_id = int(getattr(order, "orderId", 0) or 0)
+                        olabel = self._extract_order_label(order)
+                        oticket = self._label_to_ticket(olabel)
+                        if order_id and oticket is not None:
+                            self.order_maps[acc_name][int(oticket)] = int(order_id)
+                            logger.info(
+                                f"[{acc_name}] (exec order) MT5 ticket {int(oticket)} -> "
+                                f"cTrader orderId {int(order_id)}"
+                            )
+
+                    pos = getattr(extracted, "position", None)
                     if pos is not None:
                         position_id = int(getattr(pos, "positionId", 0) or 0)
                         label = self._extract_position_label(pos)
@@ -137,17 +166,14 @@ class AccountManager:
 
                         if position_id and ticket is not None:
                             self.position_maps[acc_name][int(ticket)] = position_id
-                            # Try apply pending SL/TP immediately after mapping is known
                             notify_position_update(acc_name, int(ticket), self)
 
                         # Only trust volume on FILLED / PARTIALLY_FILLED events
-                        # ORDER_FILLED = 4, ORDER_PARTIALLY_FILLED = 5 (as observed in your logs)
                         vol = self._extract_position_volume(pos)
                         if position_id and vol > 0 and exec_type in (4, 5):
                             self.position_volumes[acc_name][position_id] = int(vol)
                             logger.info(f"[{acc_name}] (exec fill) positionId {position_id} volume={vol}")
 
-                    # Important: do not fall through to "single-position updates"
                     return
 
                 # 2) Reconcile response: preload ALL positions
@@ -170,11 +196,23 @@ class AccountManager:
                             notify_position_update(acc_name, int(ticket), self)
                             count += 1
 
+                    # NEW (optional but recommended): also load pending orders from reconcile if available
+                    # Many Open API reconcile responses include extracted.order as well.
+                    try:
+                        for o in getattr(extracted, "order", []):
+                            order_id = int(getattr(o, "orderId", 0) or 0)
+                            olabel = self._extract_order_label(o)
+                            oticket = self._label_to_ticket(olabel)
+                            if order_id and oticket is not None:
+                                self.order_maps[acc_name][int(oticket)] = int(order_id)
+                    except Exception:
+                        pass
+
                     logger.info(
                         f"[{acc_name}] Reconcile complete: {count} MT5 positions "
                         f"({len(self.position_volumes[acc_name])} with volume)"
                     )
-                    return  # done handling reconcile
+                    return
 
                 # 3) Single-position updates with a .position field
                 if not hasattr(extracted, "position"):
@@ -190,11 +228,9 @@ class AccountManager:
                 if ticket is None:
                     return
 
-                # Update mapping: MT5 ticket -> cTrader positionId
                 self.position_maps[acc_name][int(ticket)] = position_id
                 notify_position_update(acc_name, int(ticket), self)
 
-                # Update current volume
                 vol = self._extract_position_volume(pos)
                 if vol > 0:
                     self.position_volumes[acc_name][position_id] = int(vol)
@@ -213,12 +249,11 @@ class AccountManager:
         def on_connected():
             logger.info("✓ Account %s connected and authenticated", account.name)
 
-            # Immediately reconcile open positions once account is authorized
             try:
                 req = ProtoOAReconcileReq()
                 req.ctidTraderAccountId = int(account.account_id)
                 logger.info("[%s] Sending reconcile request...", account.name)
-                d = client.send(req)  # low-level client inside CTraderClient
+                d = client.send(req)
 
                 def _on_reconcile(result):
                     try:
@@ -248,6 +283,11 @@ class AccountManager:
         pos_map = self.position_maps.get(account_name) or {}
         return pos_map.get(int(mt5_ticket))
 
+    def get_order_id(self, account_name: str, mt5_ticket: int) -> Optional[int]:
+        """NEW: get cTrader orderId for a pending order by MT5 ticket."""
+        omap = self.order_maps.get(account_name) or {}
+        return omap.get(int(mt5_ticket))
+
     def get_position_volume(self, account_name: str, position_id: int) -> Optional[int]:
         vol_map = self.position_volumes.get(account_name) or {}
         return vol_map.get(int(position_id))
@@ -263,6 +303,7 @@ class AccountManager:
         """Remove ticket->positionId mapping."""
         try:
             self.position_maps.get(account_name, {}).pop(int(mt5_ticket), None)
+            self.order_maps.get(account_name, {}).pop(int(mt5_ticket), None)
         except Exception:
             pass
 
