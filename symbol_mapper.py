@@ -1,4 +1,5 @@
-"""Symbol Mapping Utilities for MT5 to cTrader
+"""
+Symbol Mapping Utilities for MT5 to cTrader
 
 Handles symbol name transformation and mapping between platforms.
 """
@@ -9,41 +10,14 @@ logger = logging.getLogger(__name__)
 
 
 class SymbolMapper:
-    """Maps MT5 symbols to cTrader symbols with support for prefixes, suffixes, and custom mappings."""
+    """
+    Maps MT5 symbols to cTrader symbols with support for prefixes, suffixes,
+    and custom mappings.
 
-    # Hardcoded common forex symbol to cTrader symbol ID mapping
-    # These are fallback IDs; dynamic broker_symbol_map should be preferred
-    COMMON_SYMBOL_IDS = {
-        "EURUSD": 1,
-        "GBPUSD": 2,
-        "USDJPY": 3,
-        "USDCHF": 4,
-        "AUDUSD": 5,
-        "USDCAD": 6,
-        "NZDUSD": 7,
-        "EURGBP": 8,
-        "EURJPY": 9,
-        "GBPJPY": 10,
-        "EURCHF": 11,
-        "AUDJPY": 12,
-        "EURAUD": 13,
-        "EURCAD": 14,
-        "GBPCHF": 15,
-        "GBPAUD": 16,
-        "GBPCAD": 17,
-        "AUDCAD": 18,
-        "AUDCHF": 19,
-        "AUDNZD": 20,
-        "CADCHF": 21,
-        "CADJPY": 22,
-        "CHFJPY": 23,
-        "NZDCAD": 24,
-        "NZDCHF": 25,
-        "NZDJPY": 26,
-        "XAUUSD": 27,  # Gold
-        "XAGUSD": 28,  # Silver
-        # Add more as needed
-    }
+    IMPORTANT:
+    cTrader symbolId values are broker/account specific.
+    Do not hardcode symbolId fallbacks for live trading.
+    """
 
     def __init__(
         self,
@@ -51,42 +25,47 @@ class SymbolMapper:
         suffix: str = "",
         custom_map: Optional[Dict[str, str]] = None,
         broker_symbol_map: Optional[Dict[str, int]] = None,
+        strict: bool = True,
     ):
-        """Initialize symbol mapper.
-
+        """
         Args:
             prefix: Prefix to strip from MT5 symbols (when normalizing).
             suffix: Suffix to strip from MT5 symbols (when normalizing).
             custom_map: Custom symbol name mappings, e.g. {"XAUUSD": "GOLD", "XAUUSD.m": "XAUUSD"}.
             broker_symbol_map: Dynamic cTrader symbol name -> symbolId map from CTraderClient.
+            strict: If True, return None when symbol is missing in broker_symbol_map (recommended).
         """
         self.prefix = prefix or ""
         self.suffix = suffix or ""
+        self.strict = bool(strict)
+
         # normalize custom_map keys/values to upper-case
         self.custom_map: Dict[str, str] = {
             k.upper(): v.upper() for k, v in (custom_map or {}).items()
         }
+
         # normalize broker symbol map to upper-case keys
         self.broker_symbol_map: Dict[str, int] = {
-            k.upper(): v for k, v in (broker_symbol_map or {}).items()
+            k.upper(): int(v) for k, v in (broker_symbol_map or {}).items()
         }
 
         logger.info(
-            "Symbol mapper initialized: prefix='%s', suffix='%s', custom_map=%s, "
-            "broker_symbol_map_size=%d",
+            "Symbol mapper initialized: prefix='%s', suffix='%s', custom_map=%s, broker_symbol_map_size=%d, strict=%s",
             self.prefix,
             self.suffix,
             self.custom_map,
             len(self.broker_symbol_map),
+            self.strict,
         )
 
     def mt5_to_ctrader_name(self, mt5_symbol: str) -> str:
-        """Convert MT5 symbol name to cTrader symbol name (name only).
+        """
+        Convert MT5 symbol name to cTrader symbol name (name only).
 
         Process:
-        1. Check custom mapping first (e.g. XAUUSD -> GOLD, XAUUSD.m -> XAUUSD).
-        2. Strip prefix/suffix if configured.
-        3. Return normalized symbol name (upper-case).
+        1) Custom mapping override (e.g. XAUUSD -> GOLD, XAUUSD.m -> XAUUSD).
+        2) Strip prefix/suffix if configured.
+        3) Return normalized symbol name (upper-case).
         """
         raw = (mt5_symbol or "").upper()
 
@@ -109,66 +88,61 @@ class SymbolMapper:
         return ctrader_symbol
 
     def get_symbol_id(self, mt5_symbol: str) -> Optional[int]:
-        """Get cTrader symbol ID for an MT5 symbol.
+        """
+        Get cTrader symbol ID for an MT5 symbol.
 
         Resolution order:
-        1. Normalize name via mt5_to_ctrader_name().
-        2. Look up in dynamic broker_symbol_map if available.
-        3. Fallback to COMMON_SYMBOL_IDS if not found in broker_symbol_map.
+        1) Normalize name via mt5_to_ctrader_name().
+        2) Look up in dynamic broker_symbol_map.
+        3) If missing: return None (strict mode) and log a warning.
         """
         ctrader_symbol = self.mt5_to_ctrader_name(mt5_symbol)
         key = ctrader_symbol.upper()
 
-        symbol_id = None
-
-        # 1) dynamic broker map first
-        if self.broker_symbol_map:
-            symbol_id = self.broker_symbol_map.get(key)
-            if symbol_id is not None:
-                logger.debug(
-                    "Symbol ID resolved via broker map: %s -> %s -> %s",
-                    mt5_symbol,
-                    ctrader_symbol,
-                    symbol_id,
-                )
-                return symbol_id
-
-        # 2) fallback to hardcoded common map
-        symbol_id = self.COMMON_SYMBOL_IDS.get(key)
-
-        if symbol_id is None:
+        if not self.broker_symbol_map:
             logger.warning(
-                "No symbol ID mapping found for %s (normalized: %s)",
+                "broker_symbol_map is empty; cannot resolve symbolId for %s (normalized: %s). "
+                "Ensure CTraderClient loaded symbols first.",
                 mt5_symbol,
                 ctrader_symbol,
             )
-            logger.warning(
-                "Add to custom_symbols in accounts_config.ini, ensure broker_symbol_map "
-                "is populated, or update COMMON_SYMBOL_IDS"
-            )
-        else:
+            return None
+
+        symbol_id = self.broker_symbol_map.get(key)
+        if symbol_id is not None:
             logger.debug(
-                "Symbol ID resolved via COMMON_SYMBOL_IDS: %s -> %s -> %s",
+                "Symbol ID resolved via broker map: %s -> %s -> %s",
                 mt5_symbol,
                 ctrader_symbol,
                 symbol_id,
             )
+            return int(symbol_id)
 
-        return symbol_id
+        logger.warning(
+            "No symbolId found in broker map for %s (normalized: %s). "
+            "Add mapping in custom_symbols (accounts_config.ini) or ensure the symbol exists on the cTrader account.",
+            mt5_symbol,
+            ctrader_symbol,
+        )
+
+        if self.strict:
+            return None
+
+        # Non-strict mode: still return None (no unsafe fallbacks).
+        return None
 
     def lots_to_units(self, lots: float, symbol: str = None) -> int:
-        """Convert MT5 lot size to cTrader volume units.
-
-        For forex: 1 lot = 100,000 units.
-        For metals (gold/silver): 1 lot = 100 units (typically).
         """
-        if symbol and any(
-            metal in symbol.upper() for metal in ["XAU", "XAG", "GOLD", "SILVER"]
-        ):
-            units = int(lots * 100)  # Metals: 1 lot = 100 units
+        Convert MT5 lot size to cTrader volume units (simple heuristic).
+
+        Note: This is not reliable for all instruments/brokers; prefer using
+        symbol metadata and your dedicated cTrader volume conversion functions.
+        """
+        if symbol and any(metal in symbol.upper() for metal in ["XAU", "XAG", "GOLD", "SILVER"]):
+            units = int(lots * 100)  # Metals: 1 lot = 100 units (common, but broker dependent)
             logger.debug("Metal volume conversion: %s lots -> %s units", lots, units)
         else:
-            units = int(lots * 100000)  # Forex: 1 lot = 100,000 units
+            units = int(lots * 100000)  # Forex: 1 lot = 100,000 units (common)
             logger.debug("Forex volume conversion: %s lots -> %s units", lots, units)
 
         return units
