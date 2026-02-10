@@ -211,7 +211,7 @@ class AccountManager:
                 req = ProtoOAReconcileReq()
                 req.ctidTraderAccountId = int(account.account_id)
                 logger.info("[%s] Sending reconcile request...", account.name)
-                d = client.client.send(req)  # low-level client inside CTraderClient
+                d = client.send(req)  # low-level client inside CTraderClient
 
                 def _on_reconcile(result):
                     try:
