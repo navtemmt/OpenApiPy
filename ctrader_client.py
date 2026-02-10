@@ -7,11 +7,13 @@ Provides high-level trading methods wrapping the low-level OpenApiPy SDK.
 import os
 import time
 import logging
-from ctrader_utils import convert_mt5_lots_to_ctrader_cents
 from typing import Optional, Callable, Dict, Any
 
 from dotenv import load_dotenv
 from twisted.internet import reactor, task
+
+from ctrader_utils import convert_mt5_lots_to_ctrader_cents  # kept for compatibility
+import ctrader_symbols_impl as symbols_impl
 
 from ctrader_open_api import Client, Protobuf, TcpProtocol, EndPoints
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
@@ -20,7 +22,6 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOANewOrderReq,
     ProtoOAAmendPositionSLTPReq,
     ProtoOAClosePositionReq,
-    ProtoOASymbolsListReq,
 )
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
     ProtoOAOrderType,
@@ -41,13 +42,9 @@ class CTraderClient:
         self.client_secret = os.getenv("CTRADER_CLIENT_SECRET")
 
         if not self.client_id or not self.client_secret:
-            raise ValueError(
-                "CTRADER_CLIENT_ID and CTRADER_CLIENT_SECRET must be set in .env"
-            )
+            raise ValueError("CTRADER_CLIENT_ID and CTRADER_CLIENT_SECRET must be set in .env")
 
-        self.host = (
-            EndPoints.PROTOBUF_LIVE_HOST if env == "live" else EndPoints.PROTOBUF_DEMO_HOST
-        )
+        self.host = EndPoints.PROTOBUF_LIVE_HOST if env == "live" else EndPoints.PROTOBUF_DEMO_HOST
         self.port = EndPoints.PROTOBUF_PORT
 
         self.client = Client(self.host, self.port, TcpProtocol)
@@ -108,7 +105,7 @@ class CTraderClient:
         self.last_message_time = time.time()
         try:
             msg = Protobuf.extract(message)
-            logger.debug("Received message type: %s", msg.payloadType)
+            logger.debug("Received message type: %s", getattr(msg, "payloadType", None))
         except Exception:
             logger.debug("Received raw message: %r", message)
 
@@ -200,82 +197,27 @@ class CTraderClient:
         self._load_symbol_map()
 
     # ------------------------------------------------------------------
-    # Symbols
+    # Symbols (delegated to ctrader_symbols_impl.py)
     # ------------------------------------------------------------------
 
     def _load_symbol_map(self):
-        if not self.account_id:
-            return
-
-        logger.info("Loading symbols for account %s...", self.account_id)
-        req = ProtoOASymbolsListReq()
-        req.ctidTraderAccountId = int(self.account_id)
-
-        d = self.client.send(req)
-        d.addCallback(self._on_symbols_list)
-        d.addErrback(self._on_error)
+        return symbols_impl.load_symbol_map(self)
 
     def _on_symbols_list(self, result):
-        try:
-            msg = Protobuf.extract(result)
-            symbols = getattr(msg, "symbol", None)
-            if not symbols:
-                logger.error("SymbolsList response has no symbols field: %r", msg)
-                return
-
-            self.symbol_name_to_id.clear()
-            self.symbol_details.clear()
-
-            for s in symbols:
-                name = s.symbolName.upper()
-                self.symbol_name_to_id[name] = s.symbolId
-                self.symbol_details[s.symbolId] = s
-
-            logger.info("Loaded %d symbols", len(self.symbol_name_to_id))
-
-        except Exception:
-            logger.exception("Failed parsing symbols list")
+        return symbols_impl.on_symbols_list(self, result)
 
     # ------------------------------------------------------------------
-    # Public helpers
+    # Public helpers (delegated to ctrader_symbols_impl.py)
     # ------------------------------------------------------------------
 
     def get_symbol_id_by_name(self, name: str) -> Optional[int]:
-        return self.symbol_name_to_id.get(name.upper())
+        return symbols_impl.get_symbol_id_by_name(self, name)
 
     def round_price_for_symbol(self, symbol_id: int, price: float) -> float:
-        symbol = self.symbol_details.get(symbol_id)
-        digits = 4
-        if symbol and hasattr(symbol, "digits"):
-            try:
-                digits = int(symbol.digits)  # do not cap
-            except Exception:
-                pass
-        factor = 10 ** digits
-        return round(float(price) * factor) / factor
+        return symbols_impl.round_price_for_symbol(self, symbol_id, price)
 
     def snap_volume_for_symbol(self, symbol_id: int, volume_cents: int) -> int:
-        v = int(volume_cents or 0)
-        symbol = self.symbol_details.get(symbol_id)
-        if not symbol:
-            return v
-
-        min_v = int(getattr(symbol, "minVolume", 0) or 0)
-        max_v = int(getattr(symbol, "maxVolume", 0) or 0)
-        step_v = int(getattr(symbol, "stepVolume", 0) or 0)
-
-        if min_v > 0:
-            v = max(v, min_v)
-        if max_v > 0:
-            v = min(v, max_v)
-        if step_v > 0:
-            base = min_v if min_v > 0 else 0
-            steps = round((v - base) / float(step_v))
-            v = base + int(steps) * step_v
-        if min_v > 0:
-            v = max(v, min_v)
-
-        return int(v)
+        return symbols_impl.snap_volume_for_symbol(self, symbol_id, volume_cents)
 
     # ------------------------------------------------------------------
     # Error handling
@@ -409,7 +351,14 @@ class CTraderClient:
         if tp is not None:
             req.takeProfit = float(tp)
 
-        logger.info("Modifying position %s: SL %s→%s, TP %s→%s", position_id, orig_sl, sl, orig_tp, tp)
+        logger.info(
+            "Modifying position %s: SL %s→%s, TP %s→%s",
+            position_id,
+            orig_sl,
+            sl,
+            orig_tp,
+            tp,
+        )
 
         d = self.client.send(req)
 
@@ -485,4 +434,3 @@ class CTraderClient:
         self._stop_periodic_tasks()
         if reactor.running:
             reactor.stop()
-
