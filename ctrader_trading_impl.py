@@ -18,6 +18,7 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOANewOrderReq,
     ProtoOAAmendPositionSLTPReq,
     ProtoOAClosePositionReq,
+    ProtoOACancelOrderReq,   # <-- ADDED
 )
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
     ProtoOAOrderType,
@@ -26,6 +27,25 @@ from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_mt5_ticket_from_label(label: str) -> Optional[int]:
+    """
+    Expected label format: 'MT5_<ticket>' (e.g., MT5_1468550799).
+    Returns int ticket if parsable, else None.
+    """
+    if not label:
+        return None
+    s = str(label).strip()
+    if not s.startswith("MT5_"):
+        return None
+    tail = s[4:]
+    if not tail.isdigit():
+        return None
+    try:
+        return int(tail)
+    except Exception:
+        return None
 
 
 def amend_position(
@@ -114,15 +134,6 @@ def send_pending_order(
 ):
     """
     Create pending order (LIMIT / STOP / STOP_LIMIT) via ProtoOANewOrderReq.
-
-    pending_type:
-      - 'limit'
-      - 'stop'
-      - 'stop_limit'
-
-    expiration_ms:
-      Unix time in milliseconds. If >0, sets timeInForce=GOOD_TILL_DATE and expirationTimestamp.
-      (Field is documented in Open API messages reference and proto.) [web:17][web:303]
     """
     if not self.is_account_authed:
         raise RuntimeError("Account not authenticated yet")
@@ -133,7 +144,7 @@ def send_pending_order(
 
     volume = self.snap_volume_for_symbol(symbol_id, int(volume))
 
-    # Round all prices to symbol precision (avoids 'too many digits' rejects)
+    # Round all prices to symbol precision
     stop_price = float(stop_price or 0.0)
     limit_price = float(limit_price or 0.0)
     if stop_price > 0:
@@ -152,7 +163,6 @@ def send_pending_order(
     req.volume = int(volume)
     req.label = str(label)
 
-    # Type + price fields
     if ptype == "limit":
         if not (limit_price and float(limit_price) > 0.0):
             raise ValueError("LIMIT pending order requires limit_price > 0")
@@ -163,7 +173,7 @@ def send_pending_order(
             raise ValueError("STOP pending order requires stop_price > 0")
         req.orderType = ProtoOAOrderType.STOP
         req.stopPrice = float(stop_price)
-    else:  # stop_limit
+    else:
         if not (stop_price and float(stop_price) > 0.0):
             raise ValueError("STOP_LIMIT pending order requires stop_price > 0")
         if not (limit_price and float(limit_price) > 0.0):
@@ -172,13 +182,11 @@ def send_pending_order(
         req.stopPrice = float(stop_price)
         req.limitPrice = float(limit_price)
 
-    # Optional: SL/TP (absolute prices)
     if sl is not None and float(sl) > 0.0:
         req.stopLoss = float(sl)
     if tp is not None and float(tp) > 0.0:
         req.takeProfit = float(tp)
 
-    # Optional: Expiration (Good Till Date)
     if expiration_ms and int(expiration_ms) > 0:
         req.timeInForce = ProtoOATimeInForce.GOOD_TILL_DATE
         req.expirationTimestamp = int(expiration_ms)
@@ -201,9 +209,44 @@ def send_pending_order(
 
     def _on_resp(result):
         try:
-            logger.info("Pending order response: %r", Protobuf.extract(result))
+            extracted = Protobuf.extract(result)
+            logger.info("Pending order response: %r", extracted)
+
+            # OPTIONAL: if you want to update a map here, you can:
+            # label = getattr(getattr(getattr(extracted, "order", None), "tradeData", None), "label", None)
+            # order_id = getattr(getattr(extracted, "order", None), "orderId", None)
+            # ticket = _parse_mt5_ticket_from_label(label or "")
+            # if ticket and order_id:
+            #     self.pending_order_ids_by_ticket[ticket] = int(order_id)
+
         except Exception:
             logger.warning("Pending order response (raw): %r", result)
+
+    d.addCallback(_on_resp)
+    d.addErrback(self._on_error)
+    return d
+
+
+def cancel_pending_order(self, account_id: int, order_id: int):
+    """
+    Cancel an existing pending order by cTrader orderId.
+    """
+    if not self.is_account_authed:
+        raise RuntimeError("Account not authenticated yet")
+
+    req = ProtoOACancelOrderReq()
+    req.ctidTraderAccountId = int(account_id)
+    req.orderId = int(order_id)
+
+    logger.info("Cancelling pending orderId=%s on account %s", order_id, account_id)
+
+    d = self.send(req)
+
+    def _on_resp(result):
+        try:
+            logger.info("Cancel order response: %r", Protobuf.extract(result))
+        except Exception:
+            logger.warning("Cancel order response (raw): %r", result)
 
     d.addCallback(_on_resp)
     d.addErrback(self._on_error)
