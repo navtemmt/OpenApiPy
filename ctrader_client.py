@@ -304,10 +304,6 @@ class CTraderClient:
     ):
         """
         Market order sender.
-
-        Note: The "market order fail -> quote + adjust -> retry" logic should be added
-        inside ctrader_trading_impl.send_market_order (recommended), because that's
-        where the actual request is built and error responses are handled.
         """
         return trading_impl.send_market_order(
             self,
@@ -319,6 +315,13 @@ class CTraderClient:
             tp=tp,
             label=label,
         )
+
+    def send_pending_order(self, *args: Any, **kwargs: Any):
+        """
+        Passthrough for pending orders (LIMIT/STOP/STOP_LIMIT).
+        Required by trade_executor.copy_pending_to_account().
+        """
+        return trading_impl.send_pending_order(self, *args, **kwargs)
 
     def modify_position(
         self,
