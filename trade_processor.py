@@ -7,6 +7,9 @@ from app_state import logger, PENDING_SLTP
 from trade_executor import copy_open_to_account, copy_pending_to_account
 from symbol_mapper import SymbolMapper
 
+# NEW: ticket(int) -> cTrader orderId(int) for pending orders
+PENDING_ORDER_IDS = {}
+
 
 def _build_account_symbol_mapper(client, config) -> SymbolMapper:
     return SymbolMapper(
@@ -34,6 +37,45 @@ def _lots_to_ctrader_cents(lots: float, mt5_contract_size: float) -> int:
     """
     units = float(lots) * float(mt5_contract_size or 0.0)
     return int(round(units * 100.0))
+
+
+def _parse_mt5_ticket_from_label(label: str):
+    """
+    Expected: 'MT5_<ticket>' (e.g., 'MT5_1468550799')
+    """
+    if not label:
+        return None
+    s = str(label).strip()
+    if not s.startswith("MT5_"):
+        return None
+    tail = s[4:]
+    if not tail.isdigit():
+        return None
+    try:
+        return int(tail)
+    except Exception:
+        return None
+
+
+def register_pending_order_id_from_execution(extracted_execution_event):
+    """
+    Call this from your Open API message handler when you receive ORDER_ACCEPTED
+    for a pending order. Your extracted event already contains:
+      extracted.order.orderId
+      extracted.order.tradeData.label  (MT5_<ticket>)
+    """
+    try:
+        order = getattr(extracted_execution_event, "order", None)
+        if not order:
+            return
+        order_id = getattr(order, "orderId", None)
+        label = getattr(getattr(order, "tradeData", None), "label", None)
+        ticket = _parse_mt5_ticket_from_label(label or "")
+        if ticket and order_id:
+            PENDING_ORDER_IDS[int(ticket)] = int(order_id)
+            logger.info(f"Registered pending mapping: ticket {ticket} -> orderId {int(order_id)}")
+    except Exception as e:
+        logger.debug(f"register_pending_order_id_from_execution failed: {e}")
 
 
 def try_apply_pending_sltp(account_name, client, config, ticket, account_manager):
@@ -102,6 +144,8 @@ def process_trade_event(data, account_manager):
             handle_open_event(data, account_manager)
         elif event_type == "PENDING_OPEN":
             handle_pending_open_event(data, account_manager)
+        elif event_type == "PENDING_CANCEL":
+            handle_pending_cancel_event(data, account_manager)
         elif event_type == "MODIFY":
             handle_modify_event(data, account_manager)
         elif event_type == "CLOSE":
@@ -128,7 +172,6 @@ def handle_open_event(data, account_manager):
         f"Side: {side}, Volume: {volume}, SL: {sl}, TP: {tp}"
     )
 
-    # Store pending SL/TP immediately so it can be applied as soon as positionId is known
     if (sl and sl > 0) or (tp and tp > 0):
         PENDING_SLTP[int(ticket)] = {"symbol": mt5_symbol, "sl": float(sl), "tp": float(tp)}
 
@@ -151,19 +194,6 @@ def handle_open_event(data, account_manager):
 
 
 def handle_pending_open_event(data, account_manager):
-    """
-    Pending order open (LIMIT / STOP / STOP_LIMIT).
-
-    Expected MT5 payload keys (recommended):
-      pending_type: 'limit' | 'stop' | 'stop_limit'
-      For LIMIT: entry_price (or limit_price)
-      For STOP: entry_price (or stop_price)
-      For STOP_LIMIT: stop_price + limit_price (preferred)
-
-    Also uses:
-      ticket, symbol, side/type, volume, sl, tp, magic
-      expiration_ms (optional): ms since epoch
-    """
     ticket = int(data.get("ticket"))
     mt5_symbol = data.get("symbol")
     side = data.get("side") or data.get("type")
@@ -174,15 +204,12 @@ def handle_pending_open_event(data, account_manager):
 
     pending_type = (data.get("pending_type") or data.get("order_type") or "").strip().lower()
 
-    # Accept either "entry_price" or explicit stop/limit prices
     entry_price = float(data.get("entry_price", 0) or 0)
     stop_price = float(data.get("stop_price", 0) or 0)
     limit_price = float(data.get("limit_price", 0) or 0)
 
     expiration_ms = int(data.get("expiration_ms", 0) or 0)
 
-    # Backward-compatible defaults:
-    # - For LIMIT/STOP, if explicit field not provided, use entry_price
     if pending_type in ("limit", "stop"):
         if pending_type == "limit" and limit_price <= 0:
             limit_price = entry_price
@@ -216,6 +243,29 @@ def handle_pending_open_event(data, account_manager):
             )
         except Exception as e:
             logger.error(f"[{account_name}] Failed to copy PENDING_OPEN event: {e}")
+
+
+def handle_pending_cancel_event(data, account_manager):
+    """
+    Cancel pending order by MT5 ticket.
+    Requires ticket->orderId mapping (PENDING_ORDER_IDS).
+    """
+    ticket = int(data.get("ticket"))
+    mt5_symbol = data.get("symbol")
+
+    logger.info(f"PENDING_CANCEL event - Ticket: {ticket}, Symbol: {mt5_symbol}")
+
+    order_id = PENDING_ORDER_IDS.get(int(ticket))
+    if not order_id:
+        logger.warning(f"PENDING_CANCEL: No orderId mapping for ticket {ticket}. Cannot cancel.")
+        return
+
+    for account_name, (client, config) in account_manager.get_all_accounts().items():
+        try:
+            client.cancel_pending_order(account_id=config.account_id, order_id=int(order_id))
+            logger.info(f"[{account_name}] Cancel sent: ticket {ticket} -> orderId {int(order_id)}")
+        except Exception as e:
+            logger.error(f"[{account_name}] Failed to cancel pending for ticket {ticket}: {e}")
 
 
 def handle_modify_event(data, account_manager):
