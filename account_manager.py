@@ -3,9 +3,11 @@ Account Manager for Multiple cTrader Connections
 
 Manages multiple cTrader client connections for different accounts.
 """
+
 import logging
 from typing import Dict, Optional, Tuple
 
+from trade_processor import notify_position_update
 from ctrader_client import CTraderClient
 from config_loader import AccountConfig
 from ctrader_open_api import Protobuf
@@ -135,15 +137,18 @@ class AccountManager:
 
                         if position_id and ticket is not None:
                             self.position_maps[acc_name][int(ticket)] = position_id
+                            # Try apply pending SL/TP immediately after mapping is known
+                            notify_position_update(acc_name, int(ticket), self)
 
                         # Only trust volume on FILLED / PARTIALLY_FILLED events
                         # ORDER_FILLED = 4, ORDER_PARTIALLY_FILLED = 5 (as observed in your logs)
                         vol = self._extract_position_volume(pos)
                         if position_id and vol > 0 and exec_type in (4, 5):
                             self.position_volumes[acc_name][position_id] = int(vol)
-                            logger.info(
-                                f"[{acc_name}] (exec fill) positionId {position_id} volume={vol}"
-                            )
+                            logger.info(f"[{acc_name}] (exec fill) positionId {position_id} volume={vol}")
+
+                    # Important: do not fall through to "single-position updates"
+                    return
 
                 # 2) Reconcile response: preload ALL positions
                 if isinstance(extracted, ProtoOAReconcileRes):
@@ -162,6 +167,7 @@ class AccountManager:
 
                         if ticket is not None:
                             self.position_maps[acc_name][int(ticket)] = position_id
+                            notify_position_update(acc_name, int(ticket), self)
                             count += 1
 
                     logger.info(
@@ -186,6 +192,7 @@ class AccountManager:
 
                 # Update mapping: MT5 ticket -> cTrader positionId
                 self.position_maps[acc_name][int(ticket)] = position_id
+                notify_position_update(acc_name, int(ticket), self)
 
                 # Update current volume
                 vol = self._extract_position_volume(pos)
@@ -218,9 +225,7 @@ class AccountManager:
                         Protobuf.extract(result)
                         logger.info("[%s] Reconcile response processed", account.name)
                     except Exception as e:
-                        logger.warning(
-                            "[%s] Failed to process reconcile response: %s", account.name, e
-                        )
+                        logger.warning("[%s] Failed to process reconcile response: %s", account.name, e)
 
                 d.addCallback(_on_reconcile)
                 d.addErrback(client._on_error)
@@ -262,10 +267,7 @@ class AccountManager:
             pass
 
     def get_all_accounts(self) -> Dict[str, Tuple[CTraderClient, AccountConfig]]:
-        return {
-            name: (self.clients[name], self.configs[name])
-            for name in self.clients.keys()
-        }
+        return {name: (self.clients[name], self.configs[name]) for name in self.clients.keys()}
 
 
 # Global instance
