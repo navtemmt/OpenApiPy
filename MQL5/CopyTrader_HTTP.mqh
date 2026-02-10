@@ -1,4 +1,5 @@
-#pragma once
+#ifndef COPYTRADER_HTTP_MQH
+#define COPYTRADER_HTTP_MQH
 
 void SendToServer(string jsonData)
 {
@@ -37,3 +38,5 @@ void SendToServer(string jsonData)
    else
       Print("Bridge server returned status code: ", res);
 }
+
+#endif // COPYTRADER_HTTP_MQH
