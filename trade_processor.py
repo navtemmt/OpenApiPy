@@ -4,7 +4,7 @@ Processes incoming MT5 trade events and routes them to appropriate handlers.
 """
 
 from app_state import logger, PENDING_SLTP
-from trade_executor import copy_open_to_account
+from trade_executor import copy_open_to_account, copy_pending_to_account
 from symbol_mapper import SymbolMapper
 
 
@@ -100,6 +100,8 @@ def process_trade_event(data, account_manager):
 
         if event_type == "OPEN":
             handle_open_event(data, account_manager)
+        elif event_type == "PENDING_OPEN":
+            handle_pending_open_event(data, account_manager)
         elif event_type == "MODIFY":
             handle_modify_event(data, account_manager)
         elif event_type == "CLOSE":
@@ -146,6 +148,74 @@ def handle_open_event(data, account_manager):
             )
         except Exception as e:
             logger.error(f"[{account_name}] Failed to copy OPEN event: {e}")
+
+
+def handle_pending_open_event(data, account_manager):
+    """
+    Pending order open (LIMIT / STOP / STOP_LIMIT).
+
+    Expected MT5 payload keys (recommended):
+      pending_type: 'limit' | 'stop' | 'stop_limit'
+      For LIMIT: entry_price (or limit_price)
+      For STOP: entry_price (or stop_price)
+      For STOP_LIMIT: stop_price + limit_price (preferred)
+
+    Also uses:
+      ticket, symbol, side/type, volume, sl, tp, magic
+      expiration_ms (optional): ms since epoch
+    """
+    ticket = int(data.get("ticket"))
+    mt5_symbol = data.get("symbol")
+    side = data.get("side") or data.get("type")
+    volume = float(data.get("volume", 0))
+    sl = float(data.get("sl", 0))
+    tp = float(data.get("tp", 0))
+    magic = int(data.get("magic", 0))
+
+    pending_type = (data.get("pending_type") or data.get("order_type") or "").strip().lower()
+
+    # Accept either "entry_price" or explicit stop/limit prices
+    entry_price = float(data.get("entry_price", 0) or 0)
+    stop_price = float(data.get("stop_price", 0) or 0)
+    limit_price = float(data.get("limit_price", 0) or 0)
+
+    expiration_ms = int(data.get("expiration_ms", 0) or 0)
+
+    # Backward-compatible defaults:
+    # - For LIMIT/STOP, if explicit field not provided, use entry_price
+    if pending_type in ("limit", "stop"):
+        if pending_type == "limit" and limit_price <= 0:
+            limit_price = entry_price
+        if pending_type == "stop" and stop_price <= 0:
+            stop_price = entry_price
+
+    logger.info(
+        f"PENDING_OPEN event - Ticket: {ticket}, Symbol: {mt5_symbol}, Side: {side}, "
+        f"Volume: {volume}, pending_type={pending_type}, "
+        f"stop_price={stop_price}, limit_price={limit_price}, SL={sl}, TP={tp}, "
+        f"expiration_ms={expiration_ms}"
+    )
+
+    for account_name, (client, config) in account_manager.get_all_accounts().items():
+        try:
+            copy_pending_to_account(
+                account_name=account_name,
+                client=client,
+                config=config,
+                ticket=ticket,
+                mt5_symbol=mt5_symbol,
+                side=side,
+                volume=volume,
+                sl=sl,
+                tp=tp,
+                magic=magic,
+                pending_type=pending_type,
+                stop_price=stop_price,
+                limit_price=limit_price,
+                expiration_ms=expiration_ms,
+            )
+        except Exception as e:
+            logger.error(f"[{account_name}] Failed to copy PENDING_OPEN event: {e}")
 
 
 def handle_modify_event(data, account_manager):
