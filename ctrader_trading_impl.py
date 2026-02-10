@@ -22,6 +22,7 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
     ProtoOAOrderType,
     ProtoOATradeSide,
+    ProtoOATimeInForce,
 )
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,118 @@ def send_market_order(
             logger.info("Order response: %r", Protobuf.extract(result))
         except Exception:
             logger.warning("Order response (raw): %r", result)
+
+    d.addCallback(_on_resp)
+    d.addErrback(self._on_error)
+    return d
+
+
+def send_pending_order(
+    self,
+    account_id: int,
+    symbol_id: int,
+    side: str,
+    volume: int,
+    pending_type: str,
+    stop_price: float = 0.0,
+    limit_price: float = 0.0,
+    sl: Optional[float] = None,
+    tp: Optional[float] = None,
+    label: str = "MT5_Pending",
+    expiration_ms: int = 0,
+):
+    """
+    Create pending order (LIMIT / STOP / STOP_LIMIT) via ProtoOANewOrderReq.
+
+    pending_type:
+      - 'limit'
+      - 'stop'
+      - 'stop_limit'
+
+    expiration_ms:
+      Unix time in milliseconds. If >0, sets timeInForce=GOOD_TILL_DATE and expirationTimestamp.
+      (Field is documented in Open API messages reference and proto.) [web:17][web:303]
+    """
+    if not self.is_account_authed:
+        raise RuntimeError("Account not authenticated yet")
+
+    ptype = (pending_type or "").strip().lower()
+    if ptype not in ("limit", "stop", "stop_limit"):
+        raise ValueError(f"Unsupported pending_type: {pending_type}")
+
+    volume = self.snap_volume_for_symbol(symbol_id, int(volume))
+
+    # Round all prices to symbol precision (avoids 'too many digits' rejects)
+    stop_price = float(stop_price or 0.0)
+    limit_price = float(limit_price or 0.0)
+    if stop_price > 0:
+        stop_price = self.round_price_for_symbol(symbol_id, stop_price)
+    if limit_price > 0:
+        limit_price = self.round_price_for_symbol(symbol_id, limit_price)
+    if sl is not None and float(sl) > 0:
+        sl = self.round_price_for_symbol(symbol_id, float(sl))
+    if tp is not None and float(tp) > 0:
+        tp = self.round_price_for_symbol(symbol_id, float(tp))
+
+    req = ProtoOANewOrderReq()
+    req.ctidTraderAccountId = int(account_id)
+    req.symbolId = int(symbol_id)
+    req.tradeSide = ProtoOATradeSide.BUY if side.lower() == "buy" else ProtoOATradeSide.SELL
+    req.volume = int(volume)
+    req.label = str(label)
+
+    # Type + price fields
+    if ptype == "limit":
+        if not (limit_price and float(limit_price) > 0.0):
+            raise ValueError("LIMIT pending order requires limit_price > 0")
+        req.orderType = ProtoOAOrderType.LIMIT
+        req.limitPrice = float(limit_price)
+    elif ptype == "stop":
+        if not (stop_price and float(stop_price) > 0.0):
+            raise ValueError("STOP pending order requires stop_price > 0")
+        req.orderType = ProtoOAOrderType.STOP
+        req.stopPrice = float(stop_price)
+    else:  # stop_limit
+        if not (stop_price and float(stop_price) > 0.0):
+            raise ValueError("STOP_LIMIT pending order requires stop_price > 0")
+        if not (limit_price and float(limit_price) > 0.0):
+            raise ValueError("STOP_LIMIT pending order requires limit_price > 0")
+        req.orderType = ProtoOAOrderType.STOP_LIMIT
+        req.stopPrice = float(stop_price)
+        req.limitPrice = float(limit_price)
+
+    # Optional: SL/TP (absolute prices)
+    if sl is not None and float(sl) > 0.0:
+        req.stopLoss = float(sl)
+    if tp is not None and float(tp) > 0.0:
+        req.takeProfit = float(tp)
+
+    # Optional: Expiration (Good Till Date)
+    if expiration_ms and int(expiration_ms) > 0:
+        req.timeInForce = ProtoOATimeInForce.GOOD_TILL_DATE
+        req.expirationTimestamp = int(expiration_ms)
+
+    logger.info(
+        "Sending pending order: type=%s side=%s vol=%s symbol=%s stop=%s limit=%s SL=%s TP=%s exp=%s label=%s",
+        ptype,
+        side,
+        volume,
+        symbol_id,
+        stop_price,
+        limit_price,
+        sl,
+        tp,
+        int(expiration_ms or 0),
+        label,
+    )
+
+    d = self.send(req)
+
+    def _on_resp(result):
+        try:
+            logger.info("Pending order response: %r", Protobuf.extract(result))
+        except Exception:
+            logger.warning("Pending order response (raw): %r", result)
 
     d.addCallback(_on_resp)
     d.addErrback(self._on_error)
