@@ -352,4 +352,38 @@ class CTraderClient:
             raise TypeError("close_position requires (account_id, position_id, volume[, symbol_id])")
 
         if not self.is_account_authed:
-            raise RuntimeError("Account not authenticated y
+            raise RuntimeError("Account not authenticated yet")
+
+        account_id = int(account_id)
+        position_id = int(position_id)
+        volume = int(volume)
+
+        if symbol_id is not None:
+            symbol_id = int(symbol_id)
+            volume = self.snap_volume_for_symbol(symbol_id, volume)
+
+        req = ProtoOAClosePositionReq()
+        req.ctidTraderAccountId = account_id
+        req.positionId = position_id
+        req.volume = volume
+
+        logger.info("Closing position %s: %s units", position_id, volume)
+
+        d = self.client.send(req)
+        d.addErrback(self._on_error)
+        return d
+
+    # ------------------------------------------------------------------
+    # Reactor control
+    # ------------------------------------------------------------------
+
+    def run(self):
+        logger.info("Starting reactor...")
+        if not reactor.running:
+            reactor.run()
+
+    def stop(self):
+        logger.info("Stopping reactor...")
+        self._stop_periodic_tasks()
+        if reactor.running:
+            reactor.stop()
