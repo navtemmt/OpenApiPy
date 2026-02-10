@@ -323,6 +323,12 @@ class CTraderClient:
         """
         return trading_impl.send_pending_order(self, *args, **kwargs)
 
+    def cancel_pending_order(self, account_id: int, order_id: int):
+        """
+        Cancel an existing pending order by cTrader orderId.
+        """
+        return trading_impl.cancel_pending_order(self, account_id=account_id, order_id=order_id)
+
     def modify_position(
         self,
         account_id: int,
