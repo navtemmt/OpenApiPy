@@ -1,4 +1,5 @@
-#pragma once
+#ifndef COPYTRADER_STATE_MQH
+#define COPYTRADER_STATE_MQH
 
 struct TradeInfo {
    long   ticket;
@@ -13,3 +14,5 @@ struct TradeInfo {
 
 TradeInfo g_lastTrades[];
 int       g_lastTradeCount = 0;
+
+#endif // COPYTRADER_STATE_MQH
