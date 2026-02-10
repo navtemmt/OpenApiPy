@@ -7,11 +7,8 @@
 
 // Requires CopyTrader_State.mqh included BEFORE this file:
 // PendingInfo g_lastPendings[]; int g_lastPendingCount;
-// long g_sentPendingTickets[];  int g_sentPendingCount. [page:679]
+// long g_sentPendingTickets[];  int g_sentPendingCount.
 
-//======================================================
-// Helpers
-//======================================================
 bool PendingAlreadySent(const long ticket)
 {
    for(int i = 0; i < g_sentPendingCount; i++)
@@ -41,7 +38,7 @@ bool IsPendingOrderType(const int ord_type)
 }
 
 //======================================================
-// Snapshot current pendings
+// Snapshot current pendings (kept for logging/mapping)
 //======================================================
 void UpdatePendingList()
 {
@@ -86,9 +83,6 @@ void UpdatePendingList()
    ArrayResize(g_lastPendings, g_lastPendingCount);
 }
 
-//======================================================
-// Send pending OPEN signal
-//======================================================
 void SendPendingOpenSignal(const ulong ticket)
 {
    if(!OrderSelect(ticket))
@@ -121,8 +115,7 @@ void SendPendingOpenSignal(const ulong ticket)
    if(ord_type == ORDER_TYPE_SELL_STOP_LIMIT) { side = "SELL"; pending_type = "stop_limit"; }
 
    long exp_ms = 0;
-   if(exp > 0)
-      exp_ms = (long)exp * 1000;
+   if(exp > 0) exp_ms = (long)exp * 1000;
 
    string json = "{";
    json += "\"event_type\":\"PENDING_OPEN\",";
@@ -155,9 +148,6 @@ void SendPendingOpenSignal(const ulong ticket)
    SendToServer(json);
 }
 
-//======================================================
-// Send pending CLOSE signal (removed from MT5 order pool)
-//======================================================
 void SendPendingCloseSignal(const long ticket,
                             const string symbol,
                             const long magic)
@@ -173,21 +163,22 @@ void SendPendingCloseSignal(const long ticket,
    json += "}";
 
    SendToServer(json);
-   PrintFormat("Sent PENDING_CLOSE signal for ticket #%I64d symbol=%s magic=%I64d",
-               ticket, symbol, magic);
 }
 
 //======================================================
-// Detect new + removed pending orders
+// Detect new + removed pending orders (robust snapshot)
 //======================================================
 void CheckPendingChanges()
 {
+   static long prevTickets[];
+   static int  prevCount = -1; // -1 = not initialized
+
    int totalOrders = OrdersTotal();
 
-   // Build list of current pending tickets (filtered)
-   long currentTickets[];
-   int  currentCount = 0;
+   long currTickets[];
+   int  currCount = 0;
 
+   // Build current (filtered) ticket list + send OPEN for new ones
    for(int i = 0; i < totalOrders; i++)
    {
       ulong ticket_u = OrderGetTicket(i);
@@ -205,12 +196,10 @@ void CheckPendingChanges()
       if(MagicNumberFilter != "" && magic != StringToInteger(MagicNumberFilter))
          continue;
 
-      // Track current pending ticket
-      ArrayResize(currentTickets, currentCount + 1);
-      currentTickets[currentCount] = (long)ticket_u;
-      currentCount++;
+      ArrayResize(currTickets, currCount + 1);
+      currTickets[currCount] = (long)ticket_u;
+      currCount++;
 
-      // New pending -> send once
       if(!PendingAlreadySent((long)ticket_u))
       {
          SendPendingOpenSignal(ticket_u);
@@ -218,28 +207,50 @@ void CheckPendingChanges()
       }
    }
 
-   // Removed pendings: existed in last snapshot, not present now
-   for(int i = 0; i < g_lastPendingCount; i++)
+   // First run: initialize snapshot, don’t emit CLOSE
+   if(prevCount < 0)
    {
-      long lastTicket = g_lastPendings[i].ticket;
+      prevTickets = currTickets;
+      prevCount   = currCount;
+      UpdatePendingList();
+      return;
+   }
 
+   // Removals: in prevTickets but not in currTickets
+   for(int i = 0; i < prevCount; i++)
+   {
+      long t = prevTickets[i];
       bool existsNow = false;
-      for(int j = 0; j < currentCount; j++)
+
+      for(int j = 0; j < currCount; j++)
       {
-         if(currentTickets[j] == lastTicket)
-         {
-            existsNow = true;
-            break;
-         }
+         if(currTickets[j] == t) { existsNow = true; break; }
       }
 
       if(!existsNow)
       {
-         SendPendingCloseSignal(lastTicket,
-                                g_lastPendings[i].symbol,
-                                g_lastPendings[i].magicNumber);
+         // Best-effort: get last-known symbol/magic from previous snapshot list
+         // (may be empty/0 if it was never captured; ticket still sufficient for Python mapping)
+         string sym = "";
+         long   mg  = 0;
+
+         for(int k = 0; k < g_lastPendingCount; k++)
+         {
+            if(g_lastPendings[k].ticket == t)
+            {
+               sym = g_lastPendings[k].symbol;
+               mg  = g_lastPendings[k].magicNumber;
+               break;
+            }
+         }
+
+         SendPendingCloseSignal(t, sym, mg);
       }
    }
+
+   // Update snapshots
+   prevTickets = currTickets;
+   prevCount   = currCount;
 
    UpdatePendingList();
 }
