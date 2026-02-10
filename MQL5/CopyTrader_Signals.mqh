@@ -1,4 +1,5 @@
-#pragma once
+#ifndef COPYTRADER_SIGNALS_MQH
+#define COPYTRADER_SIGNALS_MQH
 
 bool GetSymbolTradeMeta(const string symbol,
                         double &contract_size,
@@ -117,3 +118,5 @@ void SendModifySignal(ulong ticket, double sl, double tp)
    SendToServer(jsonData);
    Print("Sent MODIFY signal for ticket #", ticket, ": ", symbol, " SL=", sl, " TP=", tp);
 }
+
+#endif // COPYTRADER_SIGNALS_MQH
