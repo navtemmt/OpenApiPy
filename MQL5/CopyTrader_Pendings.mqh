@@ -1,13 +1,13 @@
 //+------------------------------------------------------------------+
 //| CopyTrader_Pendings.mqh                                          |
-//| Pending orders tracking + PENDING_OPEN signals (MT5 safe)        |
+//| Pending orders tracking + PENDING_OPEN + PENDING_CLOSE (MT5 safe)|
 //+------------------------------------------------------------------+
 #ifndef __COPYTRADER_PENDINGS_MQH__
 #define __COPYTRADER_PENDINGS_MQH__
 
 // Requires CopyTrader_State.mqh included BEFORE this file:
 // PendingInfo g_lastPendings[]; int g_lastPendingCount;
-// long g_sentPendingTickets[];  int g_sentPendingCount; [page:680]
+// long g_sentPendingTickets[];  int g_sentPendingCount. [page:679]
 
 //======================================================
 // Helpers
@@ -97,15 +97,15 @@ void SendPendingOpenSignal(const ulong ticket)
       return;
    }
 
-   string   symbol         = OrderGetString(ORDER_SYMBOL);
-   int      ord_type       = (int)OrderGetInteger(ORDER_TYPE);
-   double   volume         = OrderGetDouble(ORDER_VOLUME_CURRENT);
-   double   price_open     = OrderGetDouble(ORDER_PRICE_OPEN);
-   double   price_stoplimit= OrderGetDouble(ORDER_PRICE_STOPLIMIT);
-   double   sl             = OrderGetDouble(ORDER_SL);
-   double   tp             = OrderGetDouble(ORDER_TP);
-   long     magic          = (long)OrderGetInteger(ORDER_MAGIC);
-   datetime exp            = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
+   string   symbol          = OrderGetString(ORDER_SYMBOL);
+   int      ord_type        = (int)OrderGetInteger(ORDER_TYPE);
+   double   volume          = OrderGetDouble(ORDER_VOLUME_CURRENT);
+   double   price_open      = OrderGetDouble(ORDER_PRICE_OPEN);
+   double   price_stoplimit = OrderGetDouble(ORDER_PRICE_STOPLIMIT);
+   double   sl              = OrderGetDouble(ORDER_SL);
+   double   tp              = OrderGetDouble(ORDER_TP);
+   long     magic           = (long)OrderGetInteger(ORDER_MAGIC);
+   datetime exp             = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
 
    double contract_size, vol_min, vol_max, vol_step;
    GetSymbolTradeMeta(symbol, contract_size, vol_min, vol_max, vol_step);
@@ -156,19 +156,45 @@ void SendPendingOpenSignal(const ulong ticket)
 }
 
 //======================================================
-// Detect new pending orders
+// Send pending CLOSE signal (removed from MT5 order pool)
+//======================================================
+void SendPendingCloseSignal(const long ticket,
+                            const string symbol,
+                            const long magic)
+{
+   string json = "{";
+   json += "\"event_type\":\"PENDING_CLOSE\",";
+   json += "\"ticket\":" + (string)ticket;
+
+   if(symbol != "")
+      json += ",\"symbol\":\"" + JsonEscape(symbol) + "\"";
+
+   json += ",\"magic\":" + (string)magic;
+   json += "}";
+
+   SendToServer(json);
+   PrintFormat("Sent PENDING_CLOSE signal for ticket #%I64d symbol=%s magic=%I64d",
+               ticket, symbol, magic);
+}
+
+//======================================================
+// Detect new + removed pending orders
 //======================================================
 void CheckPendingChanges()
 {
    int totalOrders = OrdersTotal();
 
+   // Build list of current pending tickets (filtered)
+   long currentTickets[];
+   int  currentCount = 0;
+
    for(int i = 0; i < totalOrders; i++)
    {
-      ulong ticket = OrderGetTicket(i);
-      if(ticket == 0)
+      ulong ticket_u = OrderGetTicket(i);
+      if(ticket_u == 0)
          continue;
 
-      if(!OrderSelect(ticket))
+      if(!OrderSelect(ticket_u))
          continue;
 
       int ord_type = (int)OrderGetInteger(ORDER_TYPE);
@@ -179,11 +205,40 @@ void CheckPendingChanges()
       if(MagicNumberFilter != "" && magic != StringToInteger(MagicNumberFilter))
          continue;
 
-      if(PendingAlreadySent((long)ticket))
-         continue;
+      // Track current pending ticket
+      ArrayResize(currentTickets, currentCount + 1);
+      currentTickets[currentCount] = (long)ticket_u;
+      currentCount++;
 
-      SendPendingOpenSignal(ticket);
-      MarkPendingSent((long)ticket);
+      // New pending -> send once
+      if(!PendingAlreadySent((long)ticket_u))
+      {
+         SendPendingOpenSignal(ticket_u);
+         MarkPendingSent((long)ticket_u);
+      }
+   }
+
+   // Removed pendings: existed in last snapshot, not present now
+   for(int i = 0; i < g_lastPendingCount; i++)
+   {
+      long lastTicket = g_lastPendings[i].ticket;
+
+      bool existsNow = false;
+      for(int j = 0; j < currentCount; j++)
+      {
+         if(currentTickets[j] == lastTicket)
+         {
+            existsNow = true;
+            break;
+         }
+      }
+
+      if(!existsNow)
+      {
+         SendPendingCloseSignal(lastTicket,
+                                g_lastPendings[i].symbol,
+                                g_lastPendings[i].magicNumber);
+      }
    }
 
    UpdatePendingList();
