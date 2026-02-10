@@ -3,16 +3,18 @@
 //|                                  MT5 to cTrader Copy Trading EA  |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025"
-#property version   "1.04"
+#property version   "1.09"
 #property strict
 
 // Input parameters
 input string BridgeServerURL   = "http://127.0.0.1:3140";  // Python bridge server URL
 input int    RequestTimeout    = 5000;                     // HTTP request timeout in ms
 input string MagicNumberFilter = "";                       // Filter by magic number (empty = all trades)
-input bool   CopyPendingOrders = true;                     // Copy pending orders (NOT IMPLEMENTED)
+input bool   CopyPendingOrders = true;                     // Copy pending orders (LIMIT/STOP/STOP_LIMIT)
 
-// Global variables
+//+------------------------------------------------------------------+
+//| Structs                                                          |
+//+------------------------------------------------------------------+
 struct TradeInfo {
    long   ticket;
    string symbol;
@@ -24,8 +26,28 @@ struct TradeInfo {
    long   magicNumber;
 };
 
-TradeInfo g_lastTrades[];
-int       g_lastTradeCount = 0;
+struct PendingInfo {
+   long     ticket;
+   string   symbol;
+   int      type;
+   double   volume;
+   double   price_open;
+   double   price_stoplimit;
+   double   stopLoss;
+   double   takeProfit;
+   long     magicNumber;
+   datetime expiration;
+};
+
+TradeInfo   g_lastTrades[];
+int         g_lastTradeCount = 0;
+
+PendingInfo g_lastPendings[];
+int         g_lastPendingCount = 0;
+
+// Track which pending tickets we've already sent (avoid duplicates)
+long g_sentPendingTickets[];
+int  g_sentPendingCount = 0;
 
 //+------------------------------------------------------------------+
 //| Helper: get symbol trade metadata                                |
@@ -50,13 +72,50 @@ bool GetSymbolTradeMeta(const string symbol,
 }
 
 //+------------------------------------------------------------------+
+//| Helper: escape string for JSON                                   |
+//+------------------------------------------------------------------+
+string JsonEscape(const string s)
+{
+   string out = s;
+   StringReplace(out, "\\", "\\\\");
+   StringReplace(out, "\"", "\\\"");
+   return out;
+}
+
+//+------------------------------------------------------------------+
+//| Helper: pending already sent?                                    |
+//+------------------------------------------------------------------+
+bool PendingAlreadySent(const long ticket)
+{
+   for(int i=0;i<g_sentPendingCount;i++)
+      if(g_sentPendingTickets[i] == ticket)
+         return true;
+   return false;
+}
+
+void MarkPendingSent(const long ticket)
+{
+   if(PendingAlreadySent(ticket))
+      return;
+   ArrayResize(g_sentPendingTickets, g_sentPendingCount+1);
+   g_sentPendingTickets[g_sentPendingCount] = ticket;
+   g_sentPendingCount++;
+}
+
+//+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
 int OnInit()
 {
    Print("MT5 CopyTrader EA initialized. Bridge server: ", BridgeServerURL);
    UpdateTradeList();
-   Print("Initial positions tracked: ", g_lastTradeCount);
+   UpdatePendingList();
+   Print("Initial positions tracked: ", g_lastTradeCount, ", pending tracked: ", g_lastPendingCount);
+
+   // Send existing pending once at startup (optional but useful)
+   if(CopyPendingOrders)
+      CheckPendingChanges();
+
    return(INIT_SUCCEEDED);
 }
 
@@ -74,6 +133,9 @@ void OnDeinit(const int reason)
 void OnTick()
 {
    CheckTradeChanges();
+
+   if(CopyPendingOrders)
+      CheckPendingChanges();
 }
 
 //+------------------------------------------------------------------+
@@ -92,8 +154,6 @@ void UpdateTradeList()
          continue;
 
       long magic = PositionGetInteger(POSITION_MAGIC);
-
-      // Filter by magic number if specified
       if(MagicNumberFilter != "" && magic != StringToInteger(MagicNumberFilter))
          continue;
 
@@ -116,13 +176,65 @@ void UpdateTradeList()
 }
 
 //+------------------------------------------------------------------+
+//| Update current pending orders list (dense indexing)              |
+//+------------------------------------------------------------------+
+void UpdatePendingList()
+{
+   int totalOrders = OrdersTotal();
+   ArrayResize(g_lastPendings, totalOrders);
+
+   int idx = 0;
+   for(int i = 0; i < totalOrders; i++)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket == 0)
+         continue;
+
+      if(!OrderSelect(ticket))
+         continue;
+
+      int ord_type = (int)OrderGetInteger(ORDER_TYPE);
+      if(ord_type != ORDER_TYPE_BUY_LIMIT &&
+         ord_type != ORDER_TYPE_SELL_LIMIT &&
+         ord_type != ORDER_TYPE_BUY_STOP  &&
+         ord_type != ORDER_TYPE_SELL_STOP &&
+         ord_type != ORDER_TYPE_BUY_STOP_LIMIT &&
+         ord_type != ORDER_TYPE_SELL_STOP_LIMIT)
+      {
+         continue;
+      }
+
+      long magic = (long)OrderGetInteger(ORDER_MAGIC);
+      if(MagicNumberFilter != "" && magic != StringToInteger(MagicNumberFilter))
+         continue;
+
+      string sym = OrderGetString(ORDER_SYMBOL);
+
+      g_lastPendings[idx].ticket          = (long)ticket;
+      g_lastPendings[idx].symbol          = sym;
+      g_lastPendings[idx].type            = ord_type;
+      g_lastPendings[idx].volume          = OrderGetDouble(ORDER_VOLUME_CURRENT);
+      g_lastPendings[idx].price_open      = OrderGetDouble(ORDER_PRICE_OPEN);
+      g_lastPendings[idx].price_stoplimit = OrderGetDouble(ORDER_PRICE_STOPLIMIT);
+      g_lastPendings[idx].stopLoss        = OrderGetDouble(ORDER_SL);
+      g_lastPendings[idx].takeProfit      = OrderGetDouble(ORDER_TP);
+      g_lastPendings[idx].magicNumber     = magic;
+      g_lastPendings[idx].expiration      = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
+
+      idx++;
+   }
+
+   g_lastPendingCount = idx;
+   ArrayResize(g_lastPendings, g_lastPendingCount);
+}
+
+//+------------------------------------------------------------------+
 //| Check for trade changes and send to bridge                       |
 //+------------------------------------------------------------------+
 void CheckTradeChanges()
 {
    int currentPositions = PositionsTotal();
 
-   // New positions / modifications / partial closes
    for(int i = 0; i < currentPositions; i++)
    {
       ulong ticket = PositionGetTicket(i);
@@ -132,7 +244,6 @@ void CheckTradeChanges()
       string symbol = PositionGetString(POSITION_SYMBOL);
       long   magic  = PositionGetInteger(POSITION_MAGIC);
 
-      // Filter by magic number if specified
       if(MagicNumberFilter != "" && magic != StringToInteger(MagicNumberFilter))
          continue;
 
@@ -147,19 +258,16 @@ void CheckTradeChanges()
          {
             isNew = false;
 
-            // Detect partial close: volume reduced while ticket still exists
             if(currentVol < g_lastTrades[j].volume)
             {
                double closedPart = g_lastTrades[j].volume - currentVol;
                PrintFormat("Partial close detected: ticket=%I64u symbol=%s oldVol=%.2f newVol=%.2f closedPart=%.2f",
                            ticket, symbol, g_lastTrades[j].volume, currentVol, closedPart);
 
-               // Send CLOSE with *closed lots* (closedPart)
                SendCloseSignal((long)ticket, symbol, closedPart);
                g_lastTrades[j].volume = currentVol;
             }
 
-            // Detect SL/TP modification
             if(currentSL != g_lastTrades[j].stopLoss || currentTP != g_lastTrades[j].takeProfit)
             {
                SendModifySignal(ticket, currentSL, currentTP);
@@ -176,7 +284,6 @@ void CheckTradeChanges()
       }
    }
 
-   // Detect fully closed positions (ticket disappeared)
    for(int i = 0; i < g_lastTradeCount; i++)
    {
       bool exists = false;
@@ -185,14 +292,13 @@ void CheckTradeChanges()
          ulong ticket = PositionGetTicket(j);
          if((long)ticket == g_lastTrades[i].ticket)
          {
-           exists = true;
-           break;
+            exists = true;
+            break;
          }
       }
 
       if(!exists)
       {
-         // Use last known symbol & volume from g_lastTrades as "closed part"
          long   ticket  = g_lastTrades[i].ticket;
          string symbol  = g_lastTrades[i].symbol;
          double volume  = g_lastTrades[i].volume;
@@ -200,12 +306,57 @@ void CheckTradeChanges()
          PrintFormat("Full close detected: ticket=%I64d symbol=%s lastVol=%.2f",
                      ticket, symbol, volume);
 
-         // Here the closed part == last remaining volume
          SendCloseSignal(ticket, symbol, volume);
       }
    }
 
    UpdateTradeList();
+}
+
+//+------------------------------------------------------------------+
+//| Check for pending order changes and send to bridge               |
+//+------------------------------------------------------------------+
+void CheckPendingChanges()
+{
+   int currentOrders = OrdersTotal();
+   if(currentOrders <= 0)
+   {
+      UpdatePendingList();
+      return;
+   }
+
+   for(int i = 0; i < currentOrders; i++)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket == 0)
+         continue;
+
+      if(!OrderSelect(ticket))
+         continue;
+
+      int ord_type = (int)OrderGetInteger(ORDER_TYPE);
+      if(ord_type != ORDER_TYPE_BUY_LIMIT &&
+         ord_type != ORDER_TYPE_SELL_LIMIT &&
+         ord_type != ORDER_TYPE_BUY_STOP  &&
+         ord_type != ORDER_TYPE_SELL_STOP &&
+         ord_type != ORDER_TYPE_BUY_STOP_LIMIT &&
+         ord_type != ORDER_TYPE_SELL_STOP_LIMIT)
+      {
+         continue;
+      }
+
+      long magic = (long)OrderGetInteger(ORDER_MAGIC);
+      if(MagicNumberFilter != "" && magic != StringToInteger(MagicNumberFilter))
+         continue;
+
+      if(PendingAlreadySent((long)ticket))
+         continue;
+
+      SendPendingOpenSignal(ticket);
+      MarkPendingSent((long)ticket);
+   }
+
+   UpdatePendingList();
 }
 
 //+------------------------------------------------------------------+
@@ -235,7 +386,7 @@ void SendOpenSignal(ulong ticket)
    string jsonData = "{"
       "\"action\":\"OPEN\","
       "\"ticket\":" + (string)ticket + ","
-      "\"symbol\":\"" + symbol + "\","
+      "\"symbol\":\"" + JsonEscape(symbol) + "\","
       "\"type\":\"" + tradeType + "\","
       "\"volume\":" + DoubleToString(volume, 2) + ","
       "\"price\":" + DoubleToString(openPrice, 5) + ","
@@ -253,11 +404,84 @@ void SendOpenSignal(ulong ticket)
 }
 
 //+------------------------------------------------------------------+
+//| Send pending order OPEN signal to bridge server                  |
+//+------------------------------------------------------------------+
+void SendPendingOpenSignal(ulong ticket)
+{
+   // OrderSelect(ticket) already done in caller, but keep safe:
+   if(!OrderSelect(ticket))
+   {
+      Print("SendPendingOpenSignal: OrderSelect failed for ", ticket, " err=", GetLastError());
+      return;
+   }
+
+   string symbol = OrderGetString(ORDER_SYMBOL);
+   int ord_type  = (int)OrderGetInteger(ORDER_TYPE);
+   double volume = OrderGetDouble(ORDER_VOLUME_CURRENT);
+
+   double price_open      = OrderGetDouble(ORDER_PRICE_OPEN);
+   double price_stoplimit = OrderGetDouble(ORDER_PRICE_STOPLIMIT);
+
+   double sl = OrderGetDouble(ORDER_SL);
+   double tp = OrderGetDouble(ORDER_TP);
+   long magic = (long)OrderGetInteger(ORDER_MAGIC);
+   datetime exp = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
+
+   double contract_size, vol_min, vol_max, vol_step;
+   GetSymbolTradeMeta(symbol, contract_size, vol_min, vol_max, vol_step);
+
+   string side = "BUY";
+   string pending_type = "limit";
+
+   if(ord_type == ORDER_TYPE_BUY_LIMIT)       { side = "BUY";  pending_type = "limit"; }
+   if(ord_type == ORDER_TYPE_SELL_LIMIT)      { side = "SELL"; pending_type = "limit"; }
+   if(ord_type == ORDER_TYPE_BUY_STOP)        { side = "BUY";  pending_type = "stop"; }
+   if(ord_type == ORDER_TYPE_SELL_STOP)       { side = "SELL"; pending_type = "stop"; }
+   if(ord_type == ORDER_TYPE_BUY_STOP_LIMIT)  { side = "BUY";  pending_type = "stop_limit"; }
+   if(ord_type == ORDER_TYPE_SELL_STOP_LIMIT) { side = "SELL"; pending_type = "stop_limit"; }
+
+   long exp_ms = 0;
+   if(exp > 0) exp_ms = (long)exp * 1000;
+
+   string jsonData = "{"
+      "\"event_type\":\"PENDING_OPEN\","
+      "\"ticket\":" + (string)ticket + ","
+      "\"symbol\":\"" + JsonEscape(symbol) + "\","
+      "\"side\":\"" + side + "\","
+      "\"volume\":" + DoubleToString(volume, 2) + ","
+      "\"pending_type\":\"" + pending_type + "\",";
+
+   if(pending_type == "limit")
+      jsonData += "\"limit_price\":" + DoubleToString(price_open, 5) + ",";
+   else if(pending_type == "stop")
+      jsonData += "\"stop_price\":" + DoubleToString(price_open, 5) + ",";
+   else
+   {
+      jsonData += "\"stop_price\":" + DoubleToString(price_open, 5) + ",";
+      jsonData += "\"limit_price\":" + DoubleToString(price_stoplimit, 5) + ",";
+   }
+
+   jsonData +=
+      "\"sl\":" + DoubleToString(sl, 5) + ","
+      "\"tp\":" + DoubleToString(tp, 5) + ","
+      "\"magic\":" + (string)magic + ","
+      "\"expiration_ms\":" + (string)exp_ms + ","
+      "\"mt5_contract_size\":" + DoubleToString(contract_size, 2) + ","
+      "\"mt5_volume_min\":" + DoubleToString(vol_min, 2) + ","
+      "\"mt5_volume_max\":" + DoubleToString(vol_max, 2) + ","
+      "\"mt5_volume_step\":" + DoubleToString(vol_step, 2) +
+      "}";
+
+   SendToServer(jsonData);
+   PrintFormat("Sent PENDING_OPEN signal for order #%I64u: %s %s vol=%.2f",
+               ticket, symbol, pending_type, volume);
+}
+
+//+------------------------------------------------------------------+
 //| Send close trade signal to bridge server (full or partial)       |
 //+------------------------------------------------------------------+
 void SendCloseSignal(long ticket, string symbol, double closedVolume)
 {
-   // Include trade meta so bridge can convert lots->cTrader cents for partial closes
    double contract_size = 0.0, vol_min = 0.0, vol_max = 0.0, vol_step = 0.0;
    if(symbol != "")
       GetSymbolTradeMeta(symbol, contract_size, vol_min, vol_max, vol_step);
@@ -267,12 +491,10 @@ void SendCloseSignal(long ticket, string symbol, double closedVolume)
       "\"ticket\":" + (string)ticket + ",";
 
    if(symbol != "")
-      jsonData += "\"symbol\":\"" + symbol + "\",";
+      jsonData += "\"symbol\":\"" + JsonEscape(symbol) + "\",";
 
-   // Keep more precision for partial-close lots
    jsonData += "\"volume\":" + DoubleToString(closedVolume, 8);
 
-   // Attach contract/volume info when symbol is known
    if(symbol != "" && contract_size > 0.0)
    {
       jsonData += ",\"mt5_contract_size\":" + DoubleToString(contract_size, 2);
@@ -308,7 +530,7 @@ void SendModifySignal(ulong ticket, double sl, double tp)
       "\"ticket\":" + (string)ticket + ",";
 
    if(symbol != "")
-      jsonData += "\"symbol\":\"" + symbol + "\",";
+      jsonData += "\"symbol\":\"" + JsonEscape(symbol) + "\",";
 
    jsonData +=
       "\"sl\":" + DoubleToString(sl, 5) + ","
