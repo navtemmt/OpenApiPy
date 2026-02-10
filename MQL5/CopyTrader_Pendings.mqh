@@ -38,7 +38,7 @@ bool IsPendingOrderType(const int ord_type)
 }
 
 //======================================================
-// Snapshot current pendings (kept for logging/mapping)
+// Snapshot current pendings (kept for last-known meta)
 //======================================================
 void UpdatePendingList()
 {
@@ -171,14 +171,14 @@ void SendPendingCloseSignal(const long ticket,
 void CheckPendingChanges()
 {
    static long prevTickets[];
-   static int  prevCount = -1; // -1 = not initialized
+   static int  prevCount = -1;
 
    int totalOrders = OrdersTotal();
 
    long currTickets[];
    int  currCount = 0;
 
-   // Build current (filtered) ticket list + send OPEN for new ones
+   // Build current tickets (filtered) + OPEN for new
    for(int i = 0; i < totalOrders; i++)
    {
       ulong ticket_u = OrderGetTicket(i);
@@ -207,11 +207,13 @@ void CheckPendingChanges()
       }
    }
 
-   // First run: initialize snapshot, don’t emit CLOSE
+   // Initialize snapshot (no CLOSE on first run)
    if(prevCount < 0)
    {
-      prevTickets = currTickets;
-      prevCount   = currCount;
+      ArrayFree(prevTickets);
+      ArrayCopy(prevTickets, currTickets, 0, 0, WHOLE_ARRAY);
+      prevCount = ArraySize(prevTickets);
+
       UpdatePendingList();
       return;
    }
@@ -229,11 +231,9 @@ void CheckPendingChanges()
 
       if(!existsNow)
       {
-         // Best-effort: get last-known symbol/magic from previous snapshot list
-         // (may be empty/0 if it was never captured; ticket still sufficient for Python mapping)
+         // best-effort meta from last-known snapshot
          string sym = "";
          long   mg  = 0;
-
          for(int k = 0; k < g_lastPendingCount; k++)
          {
             if(g_lastPendings[k].ticket == t)
@@ -243,14 +243,14 @@ void CheckPendingChanges()
                break;
             }
          }
-
          SendPendingCloseSignal(t, sym, mg);
       }
    }
 
-   // Update snapshots
-   prevTickets = currTickets;
-   prevCount   = currCount;
+   // Update snapshot
+   ArrayFree(prevTickets);
+   ArrayCopy(prevTickets, currTickets, 0, 0, WHOLE_ARRAY);
+   prevCount = ArraySize(prevTickets);
 
    UpdatePendingList();
 }
