@@ -54,12 +54,11 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest &request,
                         const MqlTradeResult &result)
 {
-   // You said "any removal" should behave like cancel, so we just rescan
+   PrintFormat("DEBUG OnTradeTransaction: type=%d order=%I64d deal=%I64d",
+               (int)trans.type, (long)trans.order, (long)trans.deal);
+
    if(CopyPendingOrders)
       CheckPendingChanges();
-
-   // Optional: if you want position changes to react instantly too, uncomment:
-   // CheckTradeChanges();
 }
 
 //+------------------------------------------------------------------+
