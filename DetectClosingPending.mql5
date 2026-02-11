@@ -1,0 +1,47 @@
+//+------------------------------------------------------------------+
+//|                                             DetectPendingClose.mq5|
+//|  Logs when a pending order is manually (or programmatically)      |
+//|  canceled/removed from active orders.                             |
+//+------------------------------------------------------------------+
+#property strict
+
+// Optional: also log when it expires
+input bool LogExpiredToo = true;
+
+void OnInit()
+{
+   Print("DetectPendingClose EA started. Waiting for pending-order cancels...");
+}
+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest      &request,
+                        const MqlTradeResult       &result)
+{
+   // "Close pending order" == pending order removed from open orders list.
+   // Detect the transaction: ORDER_DELETE. [web:14]
+   if(trans.type != TRADE_TRANSACTION_ORDER_DELETE)
+      return;
+
+   // Filter: only pending orders (not market orders).
+   // In MQL5, pending order types are BUY_LIMIT/SELL_LIMIT/BUY_STOP/SELL_STOP/BUY_STOP_LIMIT/SELL_STOP_LIMIT. [web:6]
+   if(trans.order_type == ORDER_TYPE_BUY || trans.order_type == ORDER_TYPE_SELL)
+      return;
+
+   // Now classify why it disappeared.
+   if(trans.order_state == ORDER_STATE_CANCELED) // canceled by client (manual/EA). [web:6]
+   {
+      PrintFormat("PENDING ORDER CANCELED: ticket=%I64u symbol=%s type=%d state=%d price=%.5f",
+                  trans.order, trans.symbol, (int)trans.order_type, (int)trans.order_state, trans.price);
+   }
+   else if(LogExpiredToo && trans.order_state == ORDER_STATE_EXPIRED) // expired. [web:6]
+   {
+      PrintFormat("PENDING ORDER EXPIRED: ticket=%I64u symbol=%s type=%d state=%d price=%.5f",
+                  trans.order, trans.symbol, (int)trans.order_type, (int)trans.order_state, trans.price);
+   }
+   else
+   {
+      // Other possibilities: filled/partial/rejected, etc. [web:6]
+      PrintFormat("PENDING ORDER REMOVED (other): ticket=%I64u symbol=%s type=%d state=%d price=%.5f",
+                  trans.order, trans.symbol, (int)trans.order_type, (int)trans.order_state, trans.price);
+   }
+}
