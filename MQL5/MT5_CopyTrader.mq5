@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
-//|                                           MT5_CopyTrader.mq5     |
-//|                                  MT5 to cTrader Copy Trading EA  |
+//| MT5_CopyTrader.mq5                                               |
+//| MT5 to cTrader Copy Trading EA                                   |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025"
 #property version   "1.13"
@@ -40,21 +40,25 @@ void OnDeinit(const int reason)
    Print("MT5 CopyTrader EA stopped. Reason: ", reason);
 }
 
-// Article-style: transaction-driven lifecycle tracking
 void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest &request,
                         const MqlTradeResult &result)
 {
-   // Keep the debug (you need to see ORDER_DELETE)
+   // TradeTransaction event handler for EAs. [web:17]
    PrintFormat("DEBUG OnTradeTransaction: type=%d order=%I64u deal=%I64u symbol=%s order_type=%d order_state=%d",
                (int)trans.type, (ulong)trans.order, (ulong)trans.deal,
                trans.symbol, (int)trans.order_type, (int)trans.order_state);
 
    if(CopyPendingOrders)
-      Pendings_OnTradeTransaction(trans); // ADD/UPDATE snapshot, DELETE => PENDING_CLOSE from snapshot
+   {
+      Pendings_OnTradeTransaction(trans);
+
+      // Backstop: after any trade transaction, reconcile pendings immediately
+      // (helps when some delete events are missed or arrive oddly).
+      CheckPendingChanges();
+   }
 }
 
-// Backstop reconciliation after any trade state change
 void OnTrade()
 {
    if(CopyPendingOrders)
@@ -65,7 +69,7 @@ void OnTick()
 {
    CheckTradeChanges();
 
-   // Optional fallback (fine to keep)
+   // Optional backstop
    if(CopyPendingOrders)
       CheckPendingChanges();
 }
