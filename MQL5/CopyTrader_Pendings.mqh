@@ -145,6 +145,7 @@ void SendPendingOpenSignal(const ulong ticket)
    json += "\"mt5_volume_step\":" + DoubleToString(vol_step, 2);
    json += "}";
 
+   PrintFormat("DEBUG SEND PENDING_OPEN ticket=%I64u symbol=%s magic=%I64d", ticket, symbol, magic);
    SendToServer(json);
 }
 
@@ -152,6 +153,9 @@ void SendPendingCloseSignal(const long ticket,
                             const string symbol,
                             const long magic)
 {
+   PrintFormat("DEBUG SEND PENDING_CLOSE ticket=%I64d symbol=%s magic=%I64d",
+               ticket, symbol, magic);
+
    string json = "{";
    json += "\"event_type\":\"PENDING_CLOSE\",";
    json += "\"ticket\":" + (string)ticket;
@@ -174,6 +178,8 @@ void CheckPendingChanges()
    static int  prevCount = -1;
 
    int totalOrders = OrdersTotal();
+   PrintFormat("DEBUG CheckPendingChanges: OrdersTotal=%d lastPending=%d filter='%s'",
+               totalOrders, g_lastPendingCount, MagicNumberFilter);
 
    long currTickets[];
    int  currCount = 0;
@@ -196,12 +202,17 @@ void CheckPendingChanges()
       if(MagicNumberFilter != "" && magic != StringToInteger(MagicNumberFilter))
          continue;
 
+      string sym = OrderGetString(ORDER_SYMBOL);
+      PrintFormat("DEBUG pending seen: ticket=%I64u type=%d magic=%I64d symbol=%s",
+                  ticket_u, ord_type, magic, sym);
+
       ArrayResize(currTickets, currCount + 1);
       currTickets[currCount] = (long)ticket_u;
       currCount++;
 
       if(!PendingAlreadySent((long)ticket_u))
       {
+         PrintFormat("DEBUG pending new -> OPEN ticket=%I64u", ticket_u);
          SendPendingOpenSignal(ticket_u);
          MarkPendingSent((long)ticket_u);
       }
@@ -214,6 +225,7 @@ void CheckPendingChanges()
       ArrayCopy(prevTickets, currTickets, 0, 0, WHOLE_ARRAY);
       prevCount = ArraySize(prevTickets);
 
+      PrintFormat("DEBUG pending init snapshot prevCount=%d", prevCount);
       UpdatePendingList();
       return;
    }
@@ -231,9 +243,9 @@ void CheckPendingChanges()
 
       if(!existsNow)
       {
-         // best-effort meta from last-known snapshot
          string sym = "";
          long   mg  = 0;
+
          for(int k = 0; k < g_lastPendingCount; k++)
          {
             if(g_lastPendings[k].ticket == t)
@@ -243,6 +255,10 @@ void CheckPendingChanges()
                break;
             }
          }
+
+         PrintFormat("DEBUG pending removed -> CLOSE ticket=%I64d symbol=%s magic=%I64d",
+                     t, sym, mg);
+
          SendPendingCloseSignal(t, sym, mg);
       }
    }
@@ -251,6 +267,8 @@ void CheckPendingChanges()
    ArrayFree(prevTickets);
    ArrayCopy(prevTickets, currTickets, 0, 0, WHOLE_ARRAY);
    prevCount = ArraySize(prevTickets);
+
+   PrintFormat("DEBUG pending snapshot updated prevCount=%d currCount=%d", prevCount, currCount);
 
    UpdatePendingList();
 }
