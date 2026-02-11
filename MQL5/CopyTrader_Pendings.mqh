@@ -44,6 +44,76 @@ bool IsPendingOrderType(const int ord_type)
 }
 
 //======================================================
+// CLOSE de-dupe: TT delete vs polling removal
+//======================================================
+#define CLOSE_DEDUPE_WINDOW_MS 3000
+
+struct RecentClose
+{
+   long ticket;
+   long ts_ms;
+};
+static RecentClose g_recentClose[];
+static int g_recentCloseCount = 0;
+
+long NowMs()
+{
+   // stable enough for short de-dupe windows; avoids GetTickCount wrap/reset issues
+   return (long)TimeLocal() * 1000;
+}
+
+void RememberClosedTicket(const long ticket)
+{
+   long now = NowMs();
+
+   // prune + update existing
+   for(int i = g_recentCloseCount - 1; i >= 0; i--)
+   {
+      if(now - g_recentClose[i].ts_ms > CLOSE_DEDUPE_WINDOW_MS)
+      {
+         for(int k = i; k < g_recentCloseCount - 1; k++)
+            g_recentClose[k] = g_recentClose[k + 1];
+         g_recentCloseCount--;
+         ArrayResize(g_recentClose, g_recentCloseCount);
+         continue;
+      }
+
+      if(g_recentClose[i].ticket == ticket)
+      {
+         g_recentClose[i].ts_ms = now;
+         return;
+      }
+   }
+
+   ArrayResize(g_recentClose, g_recentCloseCount + 1);
+   g_recentClose[g_recentCloseCount].ticket = ticket;
+   g_recentClose[g_recentCloseCount].ts_ms  = now;
+   g_recentCloseCount++;
+}
+
+bool WasRecentlyClosed(const long ticket)
+{
+   long now = NowMs();
+
+   for(int i = g_recentCloseCount - 1; i >= 0; i--)
+   {
+      if(now - g_recentClose[i].ts_ms > CLOSE_DEDUPE_WINDOW_MS)
+      {
+         for(int k = i; k < g_recentCloseCount - 1; k++)
+            g_recentClose[k] = g_recentClose[k + 1];
+         g_recentCloseCount--;
+         ArrayResize(g_recentClose, g_recentCloseCount);
+         continue;
+      }
+
+      if(g_recentClose[i].ticket == ticket)
+         return true;
+   }
+
+   return false;
+}
+
+//======================================================
 // Snapshot store (kept; NOT used for CLOSE anymore)
 //======================================================
 struct PendingSnap
@@ -160,6 +230,8 @@ void UpdatePendingList()
 
 //======================================================
 // JSON builders (NO MAGIC)
+// NOTE: removed PrintFormat("DEBUG JSON -> %s", json) to avoid double logging,
+// because CopyTrader_HTTP.mqh already prints JSON in SendToServer(). [page:670]
 //======================================================
 void SendPendingOpenSignal(const ulong ticket)
 {
@@ -222,7 +294,6 @@ void SendPendingOpenSignal(const ulong ticket)
    json += "\"mt5_volume_step\":" + DoubleToString(vol_step, 2);
    json += "}";
 
-   PrintFormat("DEBUG JSON -> %s", json);
    SendToServer(json);
 }
 
@@ -237,7 +308,6 @@ void SendPendingCloseSignal(const long ticket, const string symbol)
 
    json += "}";
 
-   PrintFormat("DEBUG JSON -> %s", json);
    SendToServer(json);
 }
 
@@ -277,9 +347,8 @@ void Pendings_OnTradeTransaction(const MqlTradeTransaction &trans)
                trans.price,
                trans.volume);
 
-   // Always send close; bridge is authoritative/idempotent.
    SendPendingCloseSignal(t, sym);
-
+   RememberClosedTicket(t);
    RemovePendSnap(t);
 }
 
@@ -343,9 +412,17 @@ void CheckPendingChanges()
 
       if(!existsNow)
       {
-         // Polling can't reliably know symbol at this point; send ticket-only close.
-         PrintFormat("DEBUG PENDING_CLOSE (polling): ticket=%I64d", t);
-         SendPendingCloseSignal(t, "");
+         if(WasRecentlyClosed(t))
+         {
+            PrintFormat("DEBUG PENDING_CLOSE (polling) SKIP recent TT: ticket=%I64d", t);
+         }
+         else
+         {
+            PrintFormat("DEBUG PENDING_CLOSE (polling): ticket=%I64d", t);
+            SendPendingCloseSignal(t, "");
+            RememberClosedTicket(t);
+         }
+
          RemovePendSnap(t);
       }
    }
