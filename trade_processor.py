@@ -102,8 +102,11 @@ def process_trade_event(data, account_manager):
             handle_open_event(data, account_manager)
         elif event_type == "PENDING_OPEN":
             handle_pending_open_event(data, account_manager)
-        elif event_type == "PENDING_CANCEL":
+
+        # --- PATCH: accept MT5 "PENDING_CLOSE" as alias of "PENDING_CANCEL" ---
+        elif event_type in ("PENDING_CANCEL", "PENDING_CLOSE"):
             handle_pending_cancel_event(data, account_manager)
+
         elif event_type == "MODIFY":
             handle_modify_event(data, account_manager)
         elif event_type == "CLOSE":
@@ -230,6 +233,7 @@ def handle_pending_cancel_event(data, account_manager):
     ticket = int(data.get("ticket", 0))
     mt5_symbol = data.get("symbol")
 
+    # Keep log message as-is for backward compatibility
     logger.info(f"PENDING_CANCEL event - Ticket: {ticket}, Symbol: {mt5_symbol}")
 
     for account_name, (client, config) in account_manager.get_all_accounts().items():
