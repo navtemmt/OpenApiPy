@@ -3,10 +3,9 @@
 //|                                  MT5 to cTrader Copy Trading EA  |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025"
-#property version   "1.09"
+#property version   "1.13"
 #property strict
 
-// Inputs
 input string BridgeServerURL   = "http://127.0.0.1:3140";
 input int    RequestTimeout    = 5000;
 input string MagicNumberFilter = "";
@@ -19,9 +18,6 @@ input bool   CopyPendingOrders = true;
 #include <CopyTrader/CopyTrader_Trades.mqh>
 #include <CopyTrader/CopyTrader_Pendings.mqh>
 
-//+------------------------------------------------------------------+
-//| Expert initialization function                                   |
-//+------------------------------------------------------------------+
 int OnInit()
 {
    Print("MT5 CopyTrader EA initialized. Bridge server: ", BridgeServerURL);
@@ -32,42 +28,44 @@ int OnInit()
    Print("Initial positions tracked: ", g_lastTradeCount,
          ", pending tracked: ", g_lastPendingCount);
 
-   // Catch existing pending orders immediately (no need to wait for tick)
+   // Startup sync: discover any existing pendings and send PENDING_OPEN once
    if(CopyPendingOrders)
       CheckPendingChanges();
 
    return(INIT_SUCCEEDED);
 }
 
-//+------------------------------------------------------------------+
-//| Expert deinitialization function                                 |
-//+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
    Print("MT5 CopyTrader EA stopped. Reason: ", reason);
 }
 
-//+------------------------------------------------------------------+
-//| Trade transaction handler (fires on delete/fill/expire too)       |
-//+------------------------------------------------------------------+
+// Article-style: transaction-driven lifecycle tracking
 void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest &request,
                         const MqlTradeResult &result)
 {
-   PrintFormat("DEBUG OnTradeTransaction: type=%d order=%I64d deal=%I64d",
-               (int)trans.type, (long)trans.order, (long)trans.deal);
+   // Keep the debug (you need to see ORDER_DELETE)
+   PrintFormat("DEBUG OnTradeTransaction: type=%d order=%I64u deal=%I64u symbol=%s order_type=%d order_state=%d",
+               (int)trans.type, (ulong)trans.order, (ulong)trans.deal,
+               trans.symbol, (int)trans.order_type, (int)trans.order_state);
 
+   if(CopyPendingOrders)
+      Pendings_OnTradeTransaction(trans); // ADD/UPDATE snapshot, DELETE => PENDING_CLOSE from snapshot
+}
+
+// Backstop reconciliation after any trade state change
+void OnTrade()
+{
    if(CopyPendingOrders)
       CheckPendingChanges();
 }
 
-//+------------------------------------------------------------------+
-//| Expert tick function                                             |
-//+------------------------------------------------------------------+
 void OnTick()
 {
    CheckTradeChanges();
 
+   // Optional fallback (fine to keep)
    if(CopyPendingOrders)
       CheckPendingChanges();
 }
