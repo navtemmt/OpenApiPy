@@ -9,10 +9,9 @@ from app_state import logger
 from trade_processor import process_trade_event
 
 
-# --- PATCH: lightweight HTTP-layer de-dupe ---
-# Protects against accidental duplicate POSTs (e.g., TT + polling, retries, multi-chart).
-DEDUPE_WINDOW_MS = 1500
-_event_dedupe = {}  # key -> last_seen_ms
+# Lightweight HTTP-layer de-dupe
+DEDUPE_WINDOW_MS = 2000
+_event_dedupe = {}  # (event_type, ticket) -> last_seen_ms
 
 
 def _now_ms() -> int:
@@ -22,16 +21,14 @@ def _now_ms() -> int:
 def _dedupe_key(data: dict):
     event_type = (data.get("event_type") or data.get("action") or data.get("event") or "").upper()
     ticket = int(data.get("ticket", 0) or 0)
-    # Include symbol when present to avoid rare collisions on ticket=0 / malformed payloads
-    symbol = str(data.get("symbol") or "")
-    return event_type, ticket, symbol
+    return event_type, ticket
 
 
 def _should_drop_duplicate(data: dict) -> bool:
     now = _now_ms()
     key = _dedupe_key(data)
 
-    # prune occasionally (cheap)
+    # prune occasionally
     if len(_event_dedupe) > 2000:
         cutoff = now - (DEDUPE_WINDOW_MS * 4)
         for k, ts in list(_event_dedupe.items()):
@@ -78,7 +75,6 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                 f"for ticket {data.get('ticket')}"
             )
 
-            # Drop duplicates fast (still return 200 so MT5 won't retry)
             if _should_drop_duplicate(data):
                 logger.info(
                     f"Dropped duplicate trade event: {data.get('event_type')} "
