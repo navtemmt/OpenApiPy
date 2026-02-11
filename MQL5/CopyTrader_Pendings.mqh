@@ -1,18 +1,18 @@
 //+------------------------------------------------------------------+
 //| CopyTrader_Pendings.mqh                                          |
-//| Pending orders tracking + PENDING_OPEN + PENDING_CLOSE (MT5 safe)|
+//| Pending orders tracking + PENDING_OPEN + PENDING_CLOSE (MT5 safe) |
 //+------------------------------------------------------------------+
 #ifndef __COPYTRADER_PENDINGS_MQH__
 #define __COPYTRADER_PENDINGS_MQH__
 
 // Requires CopyTrader_State.mqh included BEFORE this file:
 // PendingInfo g_lastPendings[]; int g_lastPendingCount;
-// long g_sentPendingTickets[];  int g_sentPendingCount.
+// long g_sentPendingTickets[]; int g_sentPendingCount.
 //
 // Also requires these helpers somewhere in your project:
 // - string JsonEscape(const string s);
-// - void   SendToServer(const string json);
-// - void   GetSymbolTradeMeta(const string symbol, double &contract_size, double &vol_min, double &vol_max, double &vol_step);
+// - void SendToServer(const string json);
+// - void GetSymbolTradeMeta(const string symbol, double &contract_size, double &vol_min, double &vol_max, double &vol_step);
 // - extern string MagicNumberFilter;
 
 bool PendingAlreadySent(const long ticket)
@@ -44,7 +44,7 @@ bool IsPendingOrderType(const int ord_type)
 }
 
 //======================================================
-// Snapshot store for robustness (ticket -> metadata)
+// Snapshot store (kept; NOT used for CLOSE anymore)
 //======================================================
 struct PendingSnap
 {
@@ -59,9 +59,8 @@ struct PendingSnap
    long     magicNumber;
    datetime expiration;
 };
-
 static PendingSnap g_pendSnap[];
-static int         g_pendSnapCount = 0;
+static int g_pendSnapCount = 0;
 
 int FindPendSnapIndex(const long ticket)
 {
@@ -97,15 +96,14 @@ bool UpsertPendSnap_FromLiveOrder(const ulong ticket_u)
       return false;
 
    long ticket = (long)ticket_u;
-
    int idx = FindPendSnapIndex(ticket);
    if(idx < 0)
    {
       ArrayResize(g_pendSnap, g_pendSnapCount + 1);
       idx = g_pendSnapCount++;
-      g_pendSnap[idx].ticket = ticket;
    }
 
+   g_pendSnap[idx].ticket          = ticket;
    g_pendSnap[idx].symbol          = OrderGetString(ORDER_SYMBOL);
    g_pendSnap[idx].type            = ord_type;
    g_pendSnap[idx].volume          = OrderGetDouble(ORDER_VOLUME_CURRENT);
@@ -115,7 +113,6 @@ bool UpsertPendSnap_FromLiveOrder(const ulong ticket_u)
    g_pendSnap[idx].takeProfit      = OrderGetDouble(ORDER_TP);
    g_pendSnap[idx].magicNumber     = magic;
    g_pendSnap[idx].expiration      = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
-
    return true;
 }
 
@@ -131,15 +128,11 @@ void UpdatePendingList()
    for(int i = 0; i < totalOrders; i++)
    {
       ulong ticket = OrderGetTicket(i);
-      if(ticket == 0)
-         continue;
-
-      if(!OrderSelect(ticket))
-         continue;
+      if(ticket == 0) continue;
+      if(!OrderSelect(ticket)) continue;
 
       int ord_type = (int)OrderGetInteger(ORDER_TYPE);
-      if(!IsPendingOrderType(ord_type))
-         continue;
+      if(!IsPendingOrderType(ord_type)) continue;
 
       long magic = (long)OrderGetInteger(ORDER_MAGIC);
       if(MagicNumberFilter != "" && magic != StringToInteger(MagicNumberFilter))
@@ -166,7 +159,7 @@ void UpdatePendingList()
 }
 
 //======================================================
-// JSON builders
+// JSON builders (NO MAGIC)
 //======================================================
 void SendPendingOpenSignal(const ulong ticket)
 {
@@ -176,15 +169,15 @@ void SendPendingOpenSignal(const ulong ticket)
       return;
    }
 
-   string   symbol          = OrderGetString(ORDER_SYMBOL);
-   int      ord_type        = (int)OrderGetInteger(ORDER_TYPE);
-   double   volume          = OrderGetDouble(ORDER_VOLUME_CURRENT);
-   double   price_open      = OrderGetDouble(ORDER_PRICE_OPEN);
-   double   price_stoplimit = OrderGetDouble(ORDER_PRICE_STOPLIMIT);
-   double   sl              = OrderGetDouble(ORDER_SL);
-   double   tp              = OrderGetDouble(ORDER_TP);
-   long     magic           = (long)OrderGetInteger(ORDER_MAGIC);
-   datetime exp             = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
+   string symbol = OrderGetString(ORDER_SYMBOL);
+   int ord_type  = (int)OrderGetInteger(ORDER_TYPE);
+
+   double volume          = OrderGetDouble(ORDER_VOLUME_CURRENT);
+   double price_open      = OrderGetDouble(ORDER_PRICE_OPEN);
+   double price_stoplimit = OrderGetDouble(ORDER_PRICE_STOPLIMIT);
+   double sl              = OrderGetDouble(ORDER_SL);
+   double tp              = OrderGetDouble(ORDER_TP);
+   datetime exp           = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
 
    double contract_size, vol_min, vol_max, vol_step;
    GetSymbolTradeMeta(symbol, contract_size, vol_min, vol_max, vol_step);
@@ -222,7 +215,6 @@ void SendPendingOpenSignal(const ulong ticket)
 
    json += "\"sl\":" + DoubleToString(sl, 5) + ",";
    json += "\"tp\":" + DoubleToString(tp, 5) + ",";
-   json += "\"magic\":" + (string)magic + ",";
    json += "\"expiration_ms\":" + (string)exp_ms + ",";
    json += "\"mt5_contract_size\":" + DoubleToString(contract_size, 2) + ",";
    json += "\"mt5_volume_min\":" + DoubleToString(vol_min, 2) + ",";
@@ -234,78 +226,61 @@ void SendPendingOpenSignal(const ulong ticket)
    SendToServer(json);
 }
 
-void SendPendingCloseSignal(const long ticket, const string symbol, const long magic)
+void SendPendingCloseSignal(const long ticket, const string symbol)
 {
    string json = "{";
    json += "\"event_type\":\"PENDING_CLOSE\",";
    json += "\"ticket\":" + (string)ticket;
+
    if(symbol != "")
       json += ",\"symbol\":\"" + JsonEscape(symbol) + "\"";
-   json += ",\"magic\":" + (string)magic;
+
    json += "}";
 
    PrintFormat("DEBUG JSON -> %s", json);
    SendToServer(json);
 }
 
-void SendPendingCloseFromSnapshot(const long ticket)
-{
-   // Use snapshot first; fallback to g_lastPendings; final fallback empty fields.
-   string sym = "";
-   long   mg  = 0;
-
-   int si = FindPendSnapIndex(ticket);
-   if(si >= 0)
-   {
-      sym = g_pendSnap[si].symbol;
-      mg  = g_pendSnap[si].magicNumber;
-   }
-   else
-   {
-      for(int k = 0; k < g_lastPendingCount; k++)
-      {
-         if(g_lastPendings[k].ticket == ticket)
-         {
-            sym = g_lastPendings[k].symbol;
-            mg  = g_lastPendings[k].magicNumber;
-            break;
-         }
-      }
-   }
-
-   PrintFormat("DEBUG pending removed -> CLOSE ticket=%I64d symbol=%s magic=%I64d", ticket, sym, mg);
-   SendPendingCloseSignal(ticket, sym, mg);
-}
-
 //======================================================
-// Public hook for OnTradeTransaction
+// Public hook for OnTradeTransaction (CLOSE via trans)
 //======================================================
-// MT5 trade events can arrive after the order is already removed from the active pool,
-// so for ORDER_DELETE we must rely on our snapshots rather than OrderSelect(). [web:628]
 void Pendings_OnTradeTransaction(const MqlTradeTransaction &trans)
 {
-   if(trans.order == 0)
-      return;
+   if(trans.order == 0) return;
 
+   // Optional: keep snapshots for other purposes
    if(trans.type == TRADE_TRANSACTION_ORDER_ADD || trans.type == TRADE_TRANSACTION_ORDER_UPDATE)
    {
-      // Keep snapshot up to date while order still selectable
       UpsertPendSnap_FromLiveOrder((ulong)trans.order);
       return;
    }
 
-   if(trans.type == TRADE_TRANSACTION_ORDER_DELETE)
-   {
-      // Order likely not selectable anymore; emit close from snapshot
-      long t = (long)trans.order;
-
-      // Optional: only send close if we previously saw it (prevents noise on restart)
-      if(FindPendSnapIndex(t) >= 0 || PendingAlreadySent(t))
-         SendPendingCloseFromSnapshot(t);
-
-      RemovePendSnap(t);
+   if(trans.type != TRADE_TRANSACTION_ORDER_DELETE)
       return;
-   }
+
+   if(!IsPendingOrderType((int)trans.order_type))
+      return;
+
+   // Only treat as pending "close" when canceled/expired (ORDER_DELETE also happens on fill)
+   ENUM_ORDER_STATE os = (ENUM_ORDER_STATE)trans.order_state;
+   if(os != ORDER_STATE_CANCELED && os != ORDER_STATE_EXPIRED)
+      return;
+
+   long t = (long)trans.order;
+   string sym = trans.symbol;
+
+   PrintFormat("DEBUG PENDING_CLOSE (trans): ticket=%I64d symbol=%s order_type=%s order_state=%s price=%.5f volume=%.2f",
+               t,
+               sym,
+               EnumToString((ENUM_ORDER_TYPE)trans.order_type),
+               EnumToString(os),
+               trans.price,
+               trans.volume);
+
+   // Always send close; bridge is authoritative/idempotent.
+   SendPendingCloseSignal(t, sym);
+
+   RemovePendSnap(t);
 }
 
 //======================================================
@@ -314,30 +289,25 @@ void Pendings_OnTradeTransaction(const MqlTradeTransaction &trans)
 void CheckPendingChanges()
 {
    static long prevTickets[];
-   static int  prevCount = -1;
+   static int prevCount = -1;
 
    int totalOrders = OrdersTotal();
    long currTickets[];
-   int  currCount = 0;
+   int currCount = 0;
 
    for(int i = 0; i < totalOrders; i++)
    {
       ulong ticket_u = OrderGetTicket(i);
-      if(ticket_u == 0)
-         continue;
-
-      if(!OrderSelect(ticket_u))
-         continue;
+      if(ticket_u == 0) continue;
+      if(!OrderSelect(ticket_u)) continue;
 
       int ord_type = (int)OrderGetInteger(ORDER_TYPE);
-      if(!IsPendingOrderType(ord_type))
-         continue;
+      if(!IsPendingOrderType(ord_type)) continue;
 
       long magic = (long)OrderGetInteger(ORDER_MAGIC);
       if(MagicNumberFilter != "" && magic != StringToInteger(MagicNumberFilter))
          continue;
 
-      // Refresh snapshot from live pool (so later deletes have metadata)
       UpsertPendSnap_FromLiveOrder(ticket_u);
 
       ArrayResize(currTickets, currCount + 1);
@@ -356,11 +326,11 @@ void CheckPendingChanges()
       ArrayFree(prevTickets);
       ArrayCopy(prevTickets, currTickets, 0, 0, WHOLE_ARRAY);
       prevCount = ArraySize(prevTickets);
-
       UpdatePendingList();
       return;
    }
 
+   // detect removed
    for(int i = 0; i < prevCount; i++)
    {
       long t = prevTickets[i];
@@ -373,10 +343,9 @@ void CheckPendingChanges()
 
       if(!existsNow)
       {
-         // Use snapshot-based close (works even if order is no longer selectable)
-         if(FindPendSnapIndex(t) >= 0 || PendingAlreadySent(t))
-            SendPendingCloseFromSnapshot(t);
-
+         // Polling can't reliably know symbol at this point; send ticket-only close.
+         PrintFormat("DEBUG PENDING_CLOSE (polling): ticket=%I64d", t);
+         SendPendingCloseSignal(t, "");
          RemovePendSnap(t);
       }
    }
@@ -384,7 +353,6 @@ void CheckPendingChanges()
    ArrayFree(prevTickets);
    ArrayCopy(prevTickets, currTickets, 0, 0, WHOLE_ARRAY);
    prevCount = ArraySize(prevTickets);
-
    UpdatePendingList();
 }
 
