@@ -36,6 +36,54 @@ def _lots_to_ctrader_cents(lots: float, mt5_contract_size: float) -> int:
     return int(round(units * 100.0))
 
 
+def _has_valid_sl(sl_value) -> bool:
+    try:
+        return float(sl_value or 0) > 0
+    except Exception:
+        return False
+
+
+def _resolve_open_volume_for_account(data: dict, config):
+    """
+    Decide which lots to use for OPEN based on per-account risk settings.
+
+    Priority rules:
+      1) FIXED_LOT: always take with fixed_lot (ignores reject_if_no_sl)
+      2) If no SL:
+         - reject_if_no_sl True -> reject
+         - else -> fallback to source volume (if source_volume_fallback True), otherwise reject
+      3) If SL exists:
+         - for now: SOURCE_VOLUME behavior (you can later implement FIXED_USD / PERCENT_EQUITY sizing here)
+
+    Returns:
+      (lots: float | None, decision: str)
+    """
+    src_lots = float(data.get("volume", 0) or 0)
+    sl = float(data.get("sl", 0) or 0)
+
+    risk_mode = str(getattr(config, "risk_mode", "SOURCE_VOLUME") or "SOURCE_VOLUME").strip().upper()
+    reject_if_no_sl = bool(getattr(config, "reject_if_no_sl", False))
+    source_volume_fallback = bool(getattr(config, "source_volume_fallback", True))
+
+    if risk_mode == "FIXED_LOT":
+        fixed_lot = float(getattr(config, "fixed_lot", 0) or 0)
+        if fixed_lot > 0:
+            return fixed_lot, "FIXED_LOT"
+        return src_lots, "FIXED_LOT invalid -> SOURCE_VOLUME"
+
+    if not _has_valid_sl(sl):
+        if reject_if_no_sl:
+            return None, "REJECT_NO_SL"
+        if not source_volume_fallback:
+            return None, "REJECT_NO_SL_FALLBACK_DISABLED"
+        return src_lots, "NO_SL_FALLBACK_SOURCE_VOLUME"
+
+    # SL exists:
+    # NOTE: FIXED_USD / PERCENT_EQUITY not implemented yet (needs pip/tick value calc + account equity/balance).
+    # For now we keep the previous behavior: use source volume.
+    return src_lots, f"{risk_mode}_USING_SOURCE_VOLUME_FOR_NOW"
+
+
 def try_apply_pending_sltp(account_name, client, config, ticket, account_manager):
     pending = PENDING_SLTP.get(int(ticket))
     if not pending:
@@ -103,7 +151,7 @@ def process_trade_event(data, account_manager):
         elif event_type == "PENDING_OPEN":
             handle_pending_open_event(data, account_manager)
 
-        # --- PATCH: accept MT5 "PENDING_CLOSE" as alias of "PENDING_CANCEL" ---
+        # accept MT5 "PENDING_CLOSE" as alias of "PENDING_CANCEL"
         elif event_type in ("PENDING_CANCEL", "PENDING_CLOSE"):
             handle_pending_cancel_event(data, account_manager)
 
@@ -123,14 +171,14 @@ def handle_open_event(data, account_manager):
     ticket = int(data.get("ticket"))
     mt5_symbol = data.get("symbol")
     side = data.get("side") or data.get("type")
-    volume = float(data.get("volume", 0))
+    src_volume = float(data.get("volume", 0))
     sl = float(data.get("sl", 0))
     tp = float(data.get("tp", 0))
     magic = int(data.get("magic", 0))
 
     logger.info(
         f"OPEN event - Ticket: {ticket}, Symbol: {mt5_symbol}, "
-        f"Side: {side}, Volume: {volume}, SL: {sl}, TP: {tp}"
+        f"Side: {side}, Volume: {src_volume}, SL: {sl}, TP: {tp}"
     )
 
     # Store pending SL/TP immediately so it can be applied as soon as positionId is known
@@ -139,6 +187,15 @@ def handle_open_event(data, account_manager):
 
     for account_name, (client, config) in account_manager.get_all_accounts().items():
         try:
+            lots, decision = _resolve_open_volume_for_account(data, config)
+            if lots is None or float(lots) <= 0:
+                logger.warning(f"[{account_name}] OPEN rejected for ticket {ticket}: {decision}")
+                continue
+
+            # Apply existing multiplier + min/max clamps here if you want it centralized.
+            # If your copy_open_to_account already applies it, keep it there.
+            logger.info(f"[{account_name}] OPEN sizing: {decision}, lots={float(lots):.4f}")
+
             copy_open_to_account(
                 account_name=account_name,
                 client=client,
@@ -146,7 +203,7 @@ def handle_open_event(data, account_manager):
                 ticket=ticket,
                 mt5_symbol=mt5_symbol,
                 side=side,
-                volume=volume,
+                volume=float(lots),
                 sl=sl,
                 tp=tp,
                 magic=magic,
@@ -233,7 +290,6 @@ def handle_pending_cancel_event(data, account_manager):
     ticket = int(data.get("ticket", 0))
     mt5_symbol = data.get("symbol")
 
-    # Keep log message as-is for backward compatibility
     logger.info(f"PENDING_CANCEL event - Ticket: {ticket}, Symbol: {mt5_symbol}")
 
     for account_name, (client, config) in account_manager.get_all_accounts().items():
