@@ -73,7 +73,11 @@ class MultiAccountConfig:
         load_dotenv()
 
         self.accounts: Dict[str, AccountConfig] = {}
-        self.config = configparser.ConfigParser()
+
+        # IMPORTANT: allow inline comments like:
+        # reject_if_no_sl = true ; comment
+        # so getboolean/getfloat/getint work.
+        self.config = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
 
         if not os.path.exists(config_file):
             logger.error(f"Config file not found: {config_file}")
