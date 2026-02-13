@@ -32,7 +32,7 @@ class AccountManager:
         # Per-account mapping: cTrader positionId -> volume (cents of units)
         self.position_volumes: Dict[str, Dict[int, int]] = {}
 
-        # NEW: Per-account mapping: MT5 ticket -> cTrader orderId (pending orders)
+        # Per-account mapping: MT5 ticket -> cTrader orderId (pending orders)
         self.order_maps: Dict[str, Dict[int, int]] = {}
 
     # ------------------------------------------------------------------
@@ -137,6 +137,8 @@ class AccountManager:
         # Hook message callback (handles execution events + reconcile + position updates)
         def on_message(message, acc_name=account.name):
             try:
+                self._ensure_account_maps(acc_name)
+
                 extracted = Protobuf.extract(message)
 
                 # 1) Execution events: fills / partial fills / accepts etc.
@@ -145,7 +147,7 @@ class AccountManager:
 
                     exec_type = getattr(extracted, "executionType", None)
 
-                    # NEW: capture pending orderId mapping from extracted.order
+                    # capture pending orderId mapping from extracted.order
                     order = getattr(extracted, "order", None)
                     if order is not None:
                         order_id = int(getattr(order, "orderId", 0) or 0)
@@ -168,11 +170,13 @@ class AccountManager:
                             self.position_maps[acc_name][int(ticket)] = position_id
                             notify_position_update(acc_name, int(ticket), self)
 
-                        # Only trust volume on FILLED / PARTIALLY_FILLED events
+                        # PATCH: store volume whenever available (do not restrict to exec_type 4/5)
                         vol = self._extract_position_volume(pos)
-                        if position_id and vol > 0 and exec_type in (4, 5):
+                        if position_id and vol > 0:
                             self.position_volumes[acc_name][position_id] = int(vol)
-                            logger.info(f"[{acc_name}] (exec fill) positionId {position_id} volume={vol}")
+                            logger.info(
+                                f"[{acc_name}] (exec vol) positionId {position_id} volume={vol} (exec_type={exec_type})"
+                            )
 
                     return
 
@@ -196,8 +200,7 @@ class AccountManager:
                             notify_position_update(acc_name, int(ticket), self)
                             count += 1
 
-                    # NEW (optional but recommended): also load pending orders from reconcile if available
-                    # Many Open API reconcile responses include extracted.order as well.
+                    # also load pending orders from reconcile if available
                     try:
                         for o in getattr(extracted, "order", []):
                             order_id = int(getattr(o, "orderId", 0) or 0)
@@ -284,7 +287,7 @@ class AccountManager:
         return pos_map.get(int(mt5_ticket))
 
     def get_order_id(self, account_name: str, mt5_ticket: int) -> Optional[int]:
-        """NEW: get cTrader orderId for a pending order by MT5 ticket."""
+        """get cTrader orderId for a pending order by MT5 ticket."""
         omap = self.order_maps.get(account_name) or {}
         return omap.get(int(mt5_ticket))
 
