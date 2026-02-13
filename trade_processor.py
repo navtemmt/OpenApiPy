@@ -157,6 +157,7 @@ def process_trade_event(data, account_manager):
         elif event_type == "PENDING_OPEN":
             handle_pending_open_event(data, account_manager)
 
+        # accept MT5 "PENDING_CLOSE" as alias of "PENDING_CANCEL"
         elif event_type in ("PENDING_CANCEL", "PENDING_CLOSE"):
             handle_pending_cancel_event(data, account_manager)
 
@@ -201,6 +202,8 @@ def handle_open_event(data, account_manager):
                 logger.warning(f"[{account_name}] OPEN rejected for ticket {ticket}: {decision}")
                 continue
 
+            # Apply existing multiplier + min/max clamps here if you want it centralized.
+            # If your copy_open_to_account already applies it, keep it there.
             logger.info(f"[{account_name}] OPEN sizing: {decision}, lots={float(lots):.4f}")
 
             copy_open_to_account(
@@ -220,6 +223,19 @@ def handle_open_event(data, account_manager):
 
 
 def handle_pending_open_event(data, account_manager):
+    """
+    Pending order open (LIMIT / STOP / STOP_LIMIT).
+
+    Expected MT5 payload keys (recommended):
+      pending_type: 'limit' | 'stop' | 'stop_limit'
+      For LIMIT: entry_price (or limit_price)
+      For STOP: entry_price (or stop_price)
+      For STOP_LIMIT: stop_price + limit_price (preferred)
+
+    Also uses:
+      ticket, symbol, side/type, volume, sl, tp, magic
+      expiration_ms (optional): ms since epoch
+    """
     ticket = int(data.get("ticket"))
     mt5_symbol = data.get("symbol")
     side = data.get("side") or data.get("type")
@@ -230,12 +246,15 @@ def handle_pending_open_event(data, account_manager):
 
     pending_type = (data.get("pending_type") or data.get("order_type") or "").strip().lower()
 
+    # Accept either "entry_price" or explicit stop/limit prices
     entry_price = float(data.get("entry_price", 0) or 0)
     stop_price = float(data.get("stop_price", 0) or 0)
     limit_price = float(data.get("limit_price", 0) or 0)
 
     expiration_ms = int(data.get("expiration_ms", 0) or 0)
 
+    # Backward-compatible defaults:
+    # - For LIMIT/STOP, if explicit field not provided, use entry_price
     if pending_type in ("limit", "stop"):
         if pending_type == "limit" and limit_price <= 0:
             limit_price = entry_price
@@ -272,6 +291,12 @@ def handle_pending_open_event(data, account_manager):
 
 
 def handle_pending_cancel_event(data, account_manager):
+    """
+    Cancel pending order by MT5 ticket.
+
+    Uses AccountManager mapping: per-account ticket -> cTrader orderId.
+    (orderId is learned from ProtoOAExecutionEvent.order where label == MT5_<ticket>.)
+    """
     ticket = int(data.get("ticket", 0))
     mt5_symbol = data.get("symbol")
 
