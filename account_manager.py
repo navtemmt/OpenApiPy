@@ -27,13 +27,17 @@ class AccountManager:
         """Initialize account manager."""
         self.clients: Dict[str, CTraderClient] = {}
         self.configs: Dict[str, AccountConfig] = {}
+
         # Per-account mapping: MT5 ticket -> cTrader positionId
         self.position_maps: Dict[str, Dict[int, int]] = {}
         # Per-account mapping: cTrader positionId -> volume (cents of units)
         self.position_volumes: Dict[str, Dict[int, int]] = {}
-
         # Per-account mapping: MT5 ticket -> cTrader orderId (pending orders)
         self.order_maps: Dict[str, Dict[int, int]] = {}
+
+        # Per-account cached funds (deposit currency)
+        self.account_equity: Dict[str, float] = {}
+        self.account_balance: Dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Helpers
@@ -95,6 +99,41 @@ class AccountManager:
             return int(v) if int(v) > 0 else 0
         except Exception:
             return 0
+
+    @staticmethod
+    def _extract_account_equity_balance(reconcile_res) -> Tuple[Optional[float], Optional[float]]:
+        """
+        Best-effort extraction from ProtoOAReconcileRes.
+
+        Different Open API versions/wrappers may expose:
+          - reconcile_res.account (single) OR reconcile_res.account[] (list)
+          - fields like equity, balance
+        """
+        try:
+            acc_obj = getattr(reconcile_res, "account", None)
+            if acc_obj is None:
+                return None, None
+
+            # Could be a repeated field (iterable) or a single object
+            if hasattr(acc_obj, "__iter__") and not isinstance(acc_obj, (bytes, str)):
+                # pick first matching account entry
+                acc0 = None
+                for a in acc_obj:
+                    acc0 = a
+                    break
+                acc_obj = acc0
+
+            if acc_obj is None:
+                return None, None
+
+            eq = getattr(acc_obj, "equity", None)
+            bal = getattr(acc_obj, "balance", None)
+
+            eq_f = float(eq) if eq is not None else None
+            bal_f = float(bal) if bal is not None else None
+            return eq_f, bal_f
+        except Exception:
+            return None, None
 
     def _ensure_account_maps(self, acc_name: str):
         if acc_name not in self.position_maps:
@@ -170,7 +209,7 @@ class AccountManager:
                             self.position_maps[acc_name][int(ticket)] = position_id
                             notify_position_update(acc_name, int(ticket), self)
 
-                        # PATCH: store volume whenever available (do not restrict to exec_type 4/5)
+                        # store volume whenever available
                         vol = self._extract_position_volume(pos)
                         if position_id and vol > 0:
                             self.position_volumes[acc_name][position_id] = int(vol)
@@ -180,8 +219,21 @@ class AccountManager:
 
                     return
 
-                # 2) Reconcile response: preload ALL positions
+                # 2) Reconcile response: preload ALL positions + cache equity/balance if present
                 if isinstance(extracted, ProtoOAReconcileRes):
+                    # cache funds if available
+                    eq, bal = self._extract_account_equity_balance(extracted)
+                    if eq is not None:
+                        self.account_equity[acc_name] = float(eq)
+                    if bal is not None:
+                        self.account_balance[acc_name] = float(bal)
+
+                    if eq is not None or bal is not None:
+                        logger.info(
+                            f"[{acc_name}] Funds cached: equity={self.account_equity.get(acc_name)}, "
+                            f"balance={self.account_balance.get(acc_name)}"
+                        )
+
                     count = 0
                     for pos in extracted.position:
                         position_id = int(getattr(pos, "positionId", 0) or 0)
@@ -281,6 +333,12 @@ class AccountManager:
 
     def get_config(self, account_name: str) -> Optional[AccountConfig]:
         return self.configs.get(account_name)
+
+    def get_equity(self, account_name: str) -> Optional[float]:
+        return self.account_equity.get(account_name)
+
+    def get_balance(self, account_name: str) -> Optional[float]:
+        return self.account_balance.get(account_name)
 
     def get_position_id(self, account_name: str, mt5_ticket: int) -> Optional[int]:
         pos_map = self.position_maps.get(account_name) or {}
