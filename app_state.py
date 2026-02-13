@@ -21,3 +21,9 @@ PENDING_MAP = {}
 # (mt5_ticket, event_type) -> last_seen_epoch_ms
 EVENT_DEDUPE = {}
 DEDUPE_WINDOW_MS = 1500
+
+# --- PATCH: close-proportional support (for FIXED_LOT / FIXED_USD / PERCENT_EQUITY) ---
+# Store the master (MT5) original OPEN lots so we can compute partial-close percent later:
+# pct = close_lots / master_open_lots
+# mt5_ticket -> float lots
+MASTER_OPEN_LOTS = {}
