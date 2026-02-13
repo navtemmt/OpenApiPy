@@ -3,6 +3,8 @@ Trade event processing and handling logic.
 Processes incoming MT5 trade events and routes them to appropriate handlers.
 """
 
+import time
+
 from app_state import logger, PENDING_SLTP, MASTER_OPEN_LOTS
 from trade_executor import copy_open_to_account, copy_pending_to_account
 from symbol_mapper import SymbolMapper
@@ -24,6 +26,69 @@ def _get_symbol_id_for_account(client, config, mt5_symbol: str):
         return mapper.get_symbol_id(mt5_symbol)
     except Exception:
         return None
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _get_recent_entry_price_from_quote(client, config, symbol_id: int, side: str):
+    """
+    Market entry price from most recent cTrader spot quote.
+
+    Returns:
+      (entry_price: float | None, decision: str)
+
+    Rejects if:
+      - no quote,
+      - quote timestamp missing,
+      - quote is older than config.max_quote_age_ms,
+      - bid/ask invalid for the requested side.
+    """
+    max_age_ms = int(getattr(config, "max_quote_age_ms", 3000) or 3000)
+
+    try:
+        q = client.get_last_quote(int(symbol_id))
+    except Exception:
+        q = None
+
+    if not q:
+        return None, "REJECT_NO_QUOTE"
+
+    try:
+        ts = int(q.get("ts", 0) or 0)
+        bid = float(q.get("bid", 0) or 0.0)
+        ask = float(q.get("ask", 0) or 0.0)
+    except Exception:
+        return None, "REJECT_BAD_QUOTE"
+
+    if ts <= 0:
+        return None, "REJECT_BAD_QUOTE_TS"
+
+    age_ms = _now_ms() - ts
+    if age_ms > max_age_ms:
+        return None, f"REJECT_STALE_QUOTE age_ms={age_ms}"
+
+    s = str(side or "").strip().upper()
+    if s in ("BUY", "LONG"):
+        if ask <= 0:
+            return None, "REJECT_BAD_QUOTE_ASK"
+        return ask, f"QUOTE_OK_ASK age_ms={age_ms}"
+    else:
+        if bid <= 0:
+            return None, "REJECT_BAD_QUOTE_BID"
+        return bid, f"QUOTE_OK_BID age_ms={age_ms}"
+
+
+def _ensure_spot_subscribed(client, config, symbol_id: int):
+    """
+    Best-effort subscription so future market orders have quotes.
+    Safe to call often; server/client should ignore duplicates.
+    """
+    try:
+        client.subscribe_spots(account_id=config.account_id, symbol_ids=[int(symbol_id)])
+    except Exception:
+        pass
 
 
 def _lots_to_ctrader_cents(lots: float, mt5_contract_size: float) -> int:
@@ -52,17 +117,98 @@ def _risk_mode(config) -> str:
     return raw.strip().upper()
 
 
-def _resolve_open_volume_for_account(data: dict, config):
+def _risk_reference(config) -> str:
+    """
+    What to use as base for PERCENT_EQUITY:
+      - EQUITY (default)
+      - BALANCE
+    """
+    raw = str(getattr(config, "risk_reference", "EQUITY") or "EQUITY")
+    raw = raw.split(";", 1)[0].split("#", 1)[0]
+    return raw.strip().upper()
+
+
+def _get_account_equity_or_balance(account_manager, account_name: str, config) -> float:
+    ref = _risk_reference(config)
+
+    try:
+        if ref == "BALANCE" and hasattr(account_manager, "get_balance"):
+            v = account_manager.get_balance(account_name)
+        elif hasattr(account_manager, "get_equity"):
+            v = account_manager.get_equity(account_name)
+        else:
+            v = None
+    except Exception:
+        v = None
+
+    try:
+        return float(v or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _get_symbol_details(client, symbol_id: int):
+    try:
+        return client.symbol_details.get(int(symbol_id)) if hasattr(client, "symbol_details") else None
+    except Exception:
+        return None
+
+
+def _estimate_risk_ccy_per_1lot(symbol, entry_price: float, sl_price: float) -> float:
+    """
+    Estimate money risk (in deposit currency) for 1.0 lot given entry and SL.
+
+    Requires:
+      - tickValue (money per 1 lot per tick), and
+      - tick size inferred from pipPosition or digits.
+
+    Returns 0 if cannot compute.
+    """
+    try:
+        entry = float(entry_price or 0.0)
+        sl = float(sl_price or 0.0)
+        if entry <= 0 or sl <= 0:
+            return 0.0
+
+        dist = abs(entry - sl)
+        if dist <= 0:
+            return 0.0
+
+        pip_pos = getattr(symbol, "pipPosition", None)
+        digits = int(getattr(symbol, "digits", 0) or 0)
+
+        if pip_pos is not None:
+            tick_size = 10 ** (-int(pip_pos))
+        elif digits > 0:
+            tick_size = 10 ** (-digits)
+        else:
+            return 0.0
+
+        if tick_size <= 0:
+            return 0.0
+
+        ticks = dist / float(tick_size)
+        if ticks <= 0:
+            return 0.0
+
+        tick_value = float(getattr(symbol, "tickValue", 0) or 0.0)
+        if tick_value <= 0:
+            return 0.0
+
+        return float(ticks) * float(tick_value)
+    except Exception:
+        return 0.0
+
+
+def _resolve_open_volume_for_account(data: dict, config, *, account_name=None, client=None, account_manager=None):
     """
     Decide which lots to use for OPEN based on per-account risk settings.
 
-    Priority rules:
-      1) FIXED_LOT: always take with fixed_lot (ignores reject_if_no_sl)
-      2) If no SL:
-         - reject_if_no_sl True -> reject
-         - else -> fallback to source volume (if source_volume_fallback True), otherwise reject
-      3) If SL exists:
-         - for now: SOURCE_VOLUME behavior (you can later implement FIXED_USD / PERCENT_EQUITY sizing here)
+    risk_mode:
+      - SOURCE_VOLUME
+      - FIXED_LOT
+      - FIXED_USD
+      - PERCENT_EQUITY
 
     Returns:
       (lots: float | None, decision: str)
@@ -87,6 +233,62 @@ def _resolve_open_volume_for_account(data: dict, config):
             return None, "REJECT_NO_SL_FALLBACK_DISABLED"
         return src_lots, "NO_SL_FALLBACK_SOURCE_VOLUME"
 
+    if risk_mode in ("FIXED_USD", "PERCENT_EQUITY"):
+        # money-risk modes: NEVER fallback to source volume if missing inputs
+        if not (account_manager and client and account_name):
+            return None, f"REJECT_{risk_mode}_MISSING_CONTEXT"
+
+        mt5_symbol = data.get("symbol")
+        side = data.get("side") or data.get("type")
+
+        symbol_id = _get_symbol_id_for_account(client, config, mt5_symbol)
+        if symbol_id is None:
+            return None, f"REJECT_{risk_mode}_NO_SYMBOL_ID"
+
+        symbol = _get_symbol_details(client, int(symbol_id))
+        if symbol is None:
+            return None, f"REJECT_{risk_mode}_NO_SYMBOL_DETAILS"
+
+        # Determine entry price:
+        # - For market orders: use recent spot quote (ask/bid depending on side)
+        # - For pending orders: caller should pass entry_price in data["entry_price"] (or limit/stop)
+        entry_price = float(data.get("entry_price", 0) or 0.0)
+
+        if entry_price <= 0:
+            _ensure_spot_subscribed(client, config, int(symbol_id))
+            entry_price, q_decision = _get_recent_entry_price_from_quote(
+                client=client,
+                config=config,
+                symbol_id=int(symbol_id),
+                side=str(side or ""),
+            )
+            if entry_price is None or float(entry_price) <= 0:
+                return None, f"REJECT_{risk_mode}_{q_decision}"
+
+        risk_per_1lot = _estimate_risk_ccy_per_1lot(symbol, float(entry_price), float(sl))
+        if risk_per_1lot <= 0:
+            return None, f"REJECT_{risk_mode}_CANNOT_PRICE_RISK"
+
+        if risk_mode == "FIXED_USD":
+            usd_risk = float(getattr(config, "fixed_usd_risk", 0) or 0)
+            if usd_risk <= 0:
+                return None, "REJECT_FIXED_USD_INVALID"
+        else:
+            pct = float(getattr(config, "risk_percent", 0) or 0)
+            ref_amt = _get_account_equity_or_balance(account_manager, account_name, config)
+            if pct <= 0:
+                return None, "REJECT_PERCENT_EQUITY_INVALID_PCT"
+            if ref_amt <= 0:
+                return None, "REJECT_NO_EQUITY"
+            usd_risk = (pct / 100.0) * float(ref_amt)
+
+        lots = float(usd_risk) / float(risk_per_1lot)
+        if lots <= 0:
+            return None, f"REJECT_{risk_mode}_LOTS_NONPOSITIVE"
+
+        return lots, f"{risk_mode} usd={usd_risk:.2f} perLot={risk_per_1lot:.2f} entry={float(entry_price):.5f}"
+
+    # default behavior
     return src_lots, f"{risk_mode}_USING_SOURCE_VOLUME_FOR_NOW"
 
 
@@ -197,13 +399,17 @@ def handle_open_event(data, account_manager):
 
     for account_name, (client, config) in account_manager.get_all_accounts().items():
         try:
-            lots, decision = _resolve_open_volume_for_account(data, config)
+            lots, decision = _resolve_open_volume_for_account(
+                data,
+                config,
+                account_name=account_name,
+                client=client,
+                account_manager=account_manager,
+            )
             if lots is None or float(lots) <= 0:
                 logger.warning(f"[{account_name}] OPEN rejected for ticket {ticket}: {decision}")
                 continue
 
-            # Apply existing multiplier + min/max clamps here if you want it centralized.
-            # If your copy_open_to_account already applies it, keep it there.
             logger.info(f"[{account_name}] OPEN sizing: {decision}, lots={float(lots):.4f}")
 
             copy_open_to_account(
@@ -268,8 +474,40 @@ def handle_pending_open_event(data, account_manager):
         f"expiration_ms={expiration_ms}"
     )
 
+    # Determine pending order entry price for risk sizing
+    pending_entry_price = 0.0
+    if pending_type == "limit":
+        pending_entry_price = float(limit_price or 0.0)
+    elif pending_type == "stop":
+        pending_entry_price = float(stop_price or 0.0)
+    elif pending_type == "stop_limit":
+        # Prefer limit price as the actual fill target; if missing, use stop.
+        pending_entry_price = float(limit_price or 0.0) if float(limit_price or 0.0) > 0 else float(stop_price or 0.0)
+
     for account_name, (client, config) in account_manager.get_all_accounts().items():
         try:
+            # If money-risk modes are enabled, size volume here (override the source volume)
+            rm = _risk_mode(config)
+            sizing_volume = float(volume)
+
+            if rm in ("FIXED_USD", "PERCENT_EQUITY"):
+                # Provide entry_price so resolver doesn't use quotes for pending orders
+                sizing_data = dict(data)
+                sizing_data["entry_price"] = float(pending_entry_price or 0.0)
+
+                lots, decision = _resolve_open_volume_for_account(
+                    sizing_data,
+                    config,
+                    account_name=account_name,
+                    client=client,
+                    account_manager=account_manager,
+                )
+                if lots is None or float(lots) <= 0:
+                    logger.warning(f"[{account_name}] PENDING_OPEN rejected for ticket {ticket}: {decision}")
+                    continue
+                sizing_volume = float(lots)
+                logger.info(f"[{account_name}] PENDING_OPEN sizing: {decision}, lots={float(lots):.4f}")
+
             copy_pending_to_account(
                 account_name=account_name,
                 client=client,
@@ -277,7 +515,7 @@ def handle_pending_open_event(data, account_manager):
                 ticket=ticket,
                 mt5_symbol=mt5_symbol,
                 side=side,
-                volume=volume,
+                volume=float(sizing_volume),
                 sl=sl,
                 tp=tp,
                 magic=magic,
