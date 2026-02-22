@@ -150,27 +150,29 @@ class CTraderClient:
     
 
     def _on_spot_event(self, spot_event: ProtoOASpotEvent):
-        """
-        Cache latest bid/ask per symbolId.
-        ProtoOASpotEvent carries repeated 'spot' items (one per symbol).
-        """
         try:
             for s in getattr(spot_event, "spot", []):
                 symbol_id = int(getattr(s, "symbolId", 0) or 0)
+                bid_raw = getattr(s, "bid", 0)
+                ask_raw = getattr(s, "ask", 0)
+                ts = int(getattr(s, "timestamp", 0) or 0)
+    
+                # Always log raw ids first
+                logger.info(
+                    "SPOT RAW sid=%s bid_raw=%s ask_raw=%s ts=%s",
+                    symbol_id,
+                    bid_raw,
+                    ask_raw,
+                    ts,
+                )
+    
                 if not symbol_id:
                     continue
     
-                bid = float(getattr(s, "bid", 0.0) or 0.0)
-                ask = float(getattr(s, "ask", 0.0) or 0.0)
-                ts = int(getattr(s, "timestamp", 0) or 0)
+                bid = float(bid_raw or 0.0)
+                ask = float(ask_raw or 0.0)
+                self.spot_quotes[symbol_id] = {"bid": bid, "ask": ask, "ts": ts}
     
-                self.spot_quotes[symbol_id] = {
-                    "bid": bid,
-                    "ask": ask,
-                    "ts": ts,
-                }
-    
-                # ✅ NEW: clean quote logging
                 symbol_name = None
                 for name, sid in self.symbol_name_to_id.items():
                     if sid == symbol_id:
@@ -193,9 +195,9 @@ class CTraderClient:
                         ask,
                         ts,
                     )
-    
         except Exception:
             logger.debug("spot event parse error", exc_info=True)
+    
 
     # ------------------------------------------------------------------
     # Heartbeat / health (delegated to ctrader_monitor_impl.py)
