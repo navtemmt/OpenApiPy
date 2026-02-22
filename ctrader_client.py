@@ -117,14 +117,26 @@ class CTraderClient:
         extracted = None
         try:
             extracted = Protobuf.extract(message)
-            logger.debug("Received message type: %s", getattr(extracted, "payloadType", None))
+            logger.debug(
+                "Received message payloadType=%s type=%s",
+                getattr(extracted, "payloadType", None),
+                type(extracted),
+            )
         except Exception:
             logger.debug("Received raw message: %r", message)
 
         # Internal handling: cache spots if we receive them
         try:
-            if extracted is not None and isinstance(extracted, ProtoOASpotEvent):
+            # Direct spot event
+            if isinstance(extracted, ProtoOASpotEvent):
+                logger.info("Received ProtoOASpotEvent with %d spots", len(extracted.spot))
                 self._on_spot_event(extracted)
+            else:
+                # Some OpenApiPy builds wrap the payload; try common wrapper attr
+                inner = getattr(extracted, "payload", None)
+                if isinstance(inner, ProtoOASpotEvent):
+                    logger.info("Received wrapped ProtoOASpotEvent with %d spots", len(inner.spot))
+                    self._on_spot_event(inner)
         except Exception:
             logger.debug("Failed to process spot event", exc_info=True)
 
