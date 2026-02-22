@@ -148,22 +148,52 @@ class CTraderClient:
                 logger.exception("User message callback crashed")
 
     def _on_spot_event(self, spot_event: ProtoOASpotEvent):
-        """
-        Cache latest bid/ask per symbolId.
-        ProtoOASpotEvent carries repeated 'spot' items (one per symbol).
-        """
-        try:
-            for s in getattr(spot_event, "spot", []):
-                symbol_id = int(getattr(s, "symbolId", 0) or 0)
-                if not symbol_id:
-                    continue
-                bid = float(getattr(s, "bid", 0.0) or 0.0)
-                ask = float(getattr(s, "ask", 0.0) or 0.0)
-                ts = int(getattr(s, "timestamp", 0) or 0)
-                self.spot_quotes[symbol_id] = {"bid": bid, "ask": ask, "ts": ts}
-        except Exception:
-            # Spot events are optional; never let them crash the app
-            logger.debug("spot event parse error", exc_info=True)
+    """
+    Cache latest bid/ask per symbolId.
+    ProtoOASpotEvent carries repeated 'spot' items (one per symbol).
+    """
+    try:
+        for s in getattr(spot_event, "spot", []):
+            symbol_id = int(getattr(s, "symbolId", 0) or 0)
+            if not symbol_id:
+                continue
+
+            bid = float(getattr(s, "bid", 0.0) or 0.0)
+            ask = float(getattr(s, "ask", 0.0) or 0.0)
+            ts = int(getattr(s, "timestamp", 0) or 0)
+
+            self.spot_quotes[symbol_id] = {
+                "bid": bid,
+                "ask": ask,
+                "ts": ts,
+            }
+
+            # ✅ NEW: clean quote logging
+            symbol_name = None
+            for name, sid in self.symbol_name_to_id.items():
+                if sid == symbol_id:
+                    symbol_name = name
+                    break
+
+            if symbol_name:
+                logger.info(
+                    "QUOTE %s | bid=%.5f ask=%.5f ts=%s",
+                    symbol_name,
+                    bid,
+                    ask,
+                    ts,
+                )
+            else:
+                logger.info(
+                    "QUOTE symbolId=%s | bid=%.5f ask=%.5f ts=%s",
+                    symbol_id,
+                    bid,
+                    ask,
+                    ts,
+                )
+
+    except Exception:
+        logger.debug("spot event parse error", exc_info=True)
 
     # ------------------------------------------------------------------
     # Heartbeat / health (delegated to ctrader_monitor_impl.py)
