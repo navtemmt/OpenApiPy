@@ -23,6 +23,10 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
 
 logger = logging.getLogger(__name__)
 
+# Symbols to subscribe for spot quotes at startup (for FIXED_USD / PERCENT_EQUITY sizing).
+# These must be subscribed AFTER symbols are loaded (so symbol_name_to_id is populated).
+STARTUP_SPOT_SYMBOLS = ["XAUUSD", "BTCUSD"]
+
 
 def load_symbol_map(self, debug_dump: bool = False) -> None:
     """Request SymbolsList then request full specs by id."""
@@ -77,6 +81,11 @@ def on_symbols_list(self, result, debug_dump: bool = False) -> None:
                 continue
 
         logger.info("Loaded %d symbols (light)", len(self.symbol_name_to_id))
+
+        # Track total batches expected for deferred spot subscription
+        total_batches = (len(ids) + 199) // 200  # ceiling division matching batch_size=200
+        self._symbol_batch_total = int(total_batches)
+        self._symbol_batch_done = 0
 
         # Now request full symbol specs (lotSize/minVolume/stepVolume/etc.)
         # Batch it to avoid overly large protobuf messages.
@@ -172,6 +181,52 @@ def on_symbol_specs(self, result, debug_dump: bool = False) -> None:
 
     except Exception:
         logger.exception("Failed parsing symbol specs response")
+
+    # -----------------------------------------------------------------
+    # After ALL batches complete: subscribe to startup spot symbols
+    # so FIXED_USD / PERCENT_EQUITY sizing has quotes available.
+    # We track batch count to fire subscription only once on last batch.
+    # -----------------------------------------------------------------
+    try:
+        self._symbol_batch_done = int(getattr(self, "_symbol_batch_done", 0)) + 1
+        total = int(getattr(self, "_symbol_batch_total", 1))
+
+        if self._symbol_batch_done >= total:
+            _subscribe_startup_spots(self)
+    except Exception as e:
+        logger.warning("Failed to check batch completion for spot subscription: %s", e)
+
+
+def _subscribe_startup_spots(self) -> None:
+    """
+    Called once after ALL symbol spec batches have loaded.
+    Subscribes to STARTUP_SPOT_SYMBOLS for spot quotes.
+    """
+    account_id = getattr(self, "account_id", None)
+    if not account_id:
+        return
+
+    symbol_ids = []
+    for sym in STARTUP_SPOT_SYMBOLS:
+        sid = self.symbol_name_to_id.get(sym.upper())
+        if sid:
+            symbol_ids.append(int(sid))
+        else:
+            logger.warning("Startup spot subscription: symbol %s not found in symbol map", sym)
+
+    if not symbol_ids:
+        logger.warning("Startup spot subscription: no symbol IDs found for %s", STARTUP_SPOT_SYMBOLS)
+        return
+
+    try:
+        logger.info(
+            "Subscribing to startup spot symbols %s (IDs: %s) for account %s",
+            STARTUP_SPOT_SYMBOLS, symbol_ids, account_id
+        )
+        self.subscribe_spots(account_id=int(account_id), symbol_ids=symbol_ids)
+        logger.info("Spot subscription sent for %d symbols", len(symbol_ids))
+    except Exception as e:
+        logger.error("Failed to subscribe to startup spot symbols: %s", e)
 
 
 def get_symbol_id_by_name(self, name: str) -> Optional[int]:
