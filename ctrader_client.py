@@ -112,42 +112,42 @@ class CTraderClient:
         self._stop_periodic_tasks()
 
     def _handle_message(self, client, message):
-    self.last_message_time = time.time()
-
-    extracted = None
-    try:
-        extracted = Protobuf.extract(message)
-        logger.info(
-            "Received message payloadType=%s type=%s",
-            getattr(extracted, "payloadType", None),
-            type(extracted),
-        )
-    except Exception:
-        logger.info("Received raw message (extract failed): %r", message)
+        self.last_message_time = time.time()
+    
         extracted = None
-
-    # Internal handling: cache spots if we receive them
-    try:
-        # Direct spot event
-        if isinstance(extracted, ProtoOASpotEvent):
-            logger.info("Received ProtoOASpotEvent with %d spots", len(extracted.spot))
-            self._on_spot_event(extracted)
-        else:
-            # Some OpenApiPy builds wrap the payload; try common wrapper attr
-            inner = getattr(extracted, "payload", None)
-            if isinstance(inner, ProtoOASpotEvent):
-                logger.info("Received wrapped ProtoOASpotEvent with %d spots", len(inner.spot))
-                self._on_spot_event(inner)
-    except Exception:
-        logger.debug("Failed to process spot event", exc_info=True)
-
-    # Forward raw message to user callback (AccountManager parses it)
-    if self._on_message_callback:
         try:
-            self._on_message_callback(message)
+            extracted = Protobuf.extract(message)
+            logger.info(
+                "Received message payloadType=%s type=%s",
+                getattr(extracted, "payloadType", None),
+                type(extracted),
+            )
         except Exception:
-            logger.exception("User message callback crashed")
-
+            logger.info("Received raw message (extract failed): %r", message)
+            extracted = None
+    
+        # Internal handling: cache spots if we receive them
+        try:
+            # Direct spot event
+            if isinstance(extracted, ProtoOASpotEvent):
+                logger.info("Received ProtoOASpotEvent with %d spots", len(extracted.spot))
+                self._on_spot_event(extracted)
+            else:
+                # Some OpenApiPy builds wrap the payload; try common wrapper attr
+                inner = getattr(extracted, "payload", None)
+                if isinstance(inner, ProtoOASpotEvent):
+                    logger.info("Received wrapped ProtoOASpotEvent with %d spots", len(inner.spot))
+                    self._on_spot_event(inner)
+        except Exception:
+            logger.debug("Failed to process spot event", exc_info=True)
+    
+        # Forward raw message to user callback (AccountManager parses it)
+        if self._on_message_callback:
+            try:
+                self._on_message_callback(message)
+            except Exception:
+                logger.exception("User message callback crashed")
+    
 
     def _on_spot_event(self, spot_event: ProtoOASpotEvent):
         """
