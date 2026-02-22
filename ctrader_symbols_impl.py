@@ -24,16 +24,17 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
 logger = logging.getLogger(__name__)
 
 # Symbols to subscribe for spot quotes at startup (for FIXED_USD / PERCENT_EQUITY sizing).
-# These must be subscribed AFTER symbols are loaded (so symbol_name_to_id is populated).
 STARTUP_SPOT_SYMBOLS = ["XAUUSD", "BTCUSD"]
 
 
 def load_symbol_map(self, debug_dump: bool = False) -> None:
     """Request SymbolsList then request full specs by id."""
     if not getattr(self, "account_id", None):
+        logger.warning("Cannot load symbols: account_id not set")
         return
 
     logger.info("Loading symbols for account %s...", self.account_id)
+
     req = ProtoOASymbolsListReq()
     req.ctidTraderAccountId = int(self.account_id)
 
@@ -67,28 +68,15 @@ def on_symbols_list(self, result, debug_dump: bool = False) -> None:
                 self.symbol_details[sid] = s
                 ids.append(sid)
 
-                if debug_dump and name in ("EURAUD", "XAUUSD", "BTCUSD", "US500"):
-                    try:
-                        if hasattr(s, "ListFields"):
-                            fields = [(f.name, v) for f, v in s.ListFields()]
-                            logger.info("DBG LIGHT SYMBOL %s id=%s fields=%s", name, sid, fields)
-                        else:
-                            logger.info("DBG LIGHT SYMBOL %s id=%s repr=%r", name, sid, s)
-                    except Exception as e:
-                        logger.info("DBG LIGHT SYMBOL dump failed for %s: %s", name, e)
-
             except Exception:
                 continue
 
         logger.info("Loaded %d symbols (light)", len(self.symbol_name_to_id))
 
-        # Track total batches expected for deferred spot subscription
-        total_batches = (len(ids) + 199) // 200  # ceiling division matching batch_size=200
+        total_batches = (len(ids) + 199) // 200
         self._symbol_batch_total = int(total_batches)
         self._symbol_batch_done = 0
 
-        # Now request full symbol specs (lotSize/minVolume/stepVolume/etc.)
-        # Batch it to avoid overly large protobuf messages.
         request_symbol_specs(self, ids, batch_size=200, debug_dump=debug_dump)
 
     except Exception:
@@ -107,11 +95,6 @@ def _chunked(items: Iterable[int], n: int) -> Iterable[List[int]]:
 
 
 def request_symbol_specs(self, symbol_ids: List[int], batch_size: int = 200, debug_dump: bool = False) -> None:
-    """
-    Request full ProtoOASymbol entities for symbol_ids and merge into self.symbol_details.
-
-    Some OpenApiPy builds model req.symbolId as a repeated field; we use append/extend safely.
-    """
     if not getattr(self, "account_id", None):
         return
     if not symbol_ids:
@@ -122,11 +105,9 @@ def request_symbol_specs(self, symbol_ids: List[int], batch_size: int = 200, deb
         req = ProtoOASymbolByIdReq()
         req.ctidTraderAccountId = int(self.account_id)
 
-        # Common Python protobuf API: repeated field supports extend()
         try:
             req.symbolId.extend([int(s) for s in batch])
         except Exception:
-            # Fallback: append one-by-one
             for sid in batch:
                 try:
                     req.symbolId.append(int(sid))
@@ -142,7 +123,6 @@ def request_symbol_specs(self, symbol_ids: List[int], batch_size: int = 200, deb
 
 
 def on_symbol_specs(self, result, debug_dump: bool = False) -> None:
-    """Merge full ProtoOASymbol entities into symbol_details."""
     try:
         msg = Protobuf.extract(result)
         symbols = getattr(msg, "symbol", None)
@@ -157,22 +137,8 @@ def on_symbol_specs(self, result, debug_dump: bool = False) -> None:
                 if not sid:
                     continue
 
-                # Replace light symbol with full symbol
                 self.symbol_details[sid] = s
                 updated += 1
-
-                if debug_dump and sid in (self.symbol_name_to_id.get("EURAUD", -1),
-                                         self.symbol_name_to_id.get("XAUUSD", -1),
-                                         self.symbol_name_to_id.get("BTCUSD", -1),
-                                         self.symbol_name_to_id.get("US500", -1)):
-                    try:
-                        if hasattr(s, "ListFields"):
-                            fields = [(f.name, v) for f, v in s.ListFields()]
-                            logger.info("DBG FULL SYMBOL id=%s fields=%s", sid, fields)
-                        else:
-                            logger.info("DBG FULL SYMBOL id=%s repr=%r", sid, s)
-                    except Exception as e:
-                        logger.info("DBG FULL SYMBOL dump failed for %s: %s", sid, e)
 
             except Exception:
                 continue
@@ -182,28 +148,29 @@ def on_symbol_specs(self, result, debug_dump: bool = False) -> None:
     except Exception:
         logger.exception("Failed parsing symbol specs response")
 
-    # -----------------------------------------------------------------
-    # After ALL batches complete: subscribe to startup spot symbols
-    # so FIXED_USD / PERCENT_EQUITY sizing has quotes available.
-    # We track batch count to fire subscription only once on last batch.
-    # -----------------------------------------------------------------
+    # ----- Batch completion tracking -----
     try:
         self._symbol_batch_done = int(getattr(self, "_symbol_batch_done", 0)) + 1
         total = int(getattr(self, "_symbol_batch_total", 1))
 
+        logger.info(
+            "Symbol spec batch progress: %d / %d",
+            self._symbol_batch_done,
+            total,
+        )
+
         if self._symbol_batch_done >= total:
+            logger.info("All symbol spec batches completed.")
             _subscribe_startup_spots(self)
+
     except Exception as e:
-        logger.warning("Failed to check batch completion for spot subscription: %s", e)
+        logger.warning("Failed to check batch completion: %s", e)
 
 
 def _subscribe_startup_spots(self) -> None:
-    """
-    Called once after ALL symbol spec batches have loaded.
-    Subscribes to STARTUP_SPOT_SYMBOLS for spot quotes.
-    """
     account_id = getattr(self, "account_id", None)
     if not account_id:
+        logger.warning("Cannot subscribe to startup spots: account_id missing")
         return
 
     symbol_ids = []
@@ -212,33 +179,38 @@ def _subscribe_startup_spots(self) -> None:
         if sid:
             symbol_ids.append(int(sid))
         else:
-            logger.warning("Startup spot subscription: symbol %s not found in symbol map", sym)
+            logger.warning("Startup spot subscription: symbol %s not found", sym)
 
     if not symbol_ids:
-        logger.warning("Startup spot subscription: no symbol IDs found for %s", STARTUP_SPOT_SYMBOLS)
+        logger.warning("No valid symbol IDs found for startup spot subscription")
         return
 
+    logger.info(
+        "Subscribing to startup spot symbols %s (IDs: %s) for account %s",
+        STARTUP_SPOT_SYMBOLS,
+        symbol_ids,
+        account_id,
+    )
+
     try:
-        logger.info(
-            "Subscribing to startup spot symbols %s (IDs: %s) for account %s",
-            STARTUP_SPOT_SYMBOLS, symbol_ids, account_id
-        )
-        self.subscribe_spots(account_id=int(account_id), symbol_ids=symbol_ids)
-        logger.info("Spot subscription sent for %d symbols", len(symbol_ids))
+        if hasattr(self, "subscribe_spots"):
+            self.subscribe_spots(
+                account_id=int(account_id),
+                symbol_ids=symbol_ids,
+            )
+            logger.info("Spot subscription request sent successfully.")
+        else:
+            logger.error("subscribe_spots method not found on client instance!")
+
     except Exception as e:
         logger.error("Failed to subscribe to startup spot symbols: %s", e)
 
 
 def get_symbol_id_by_name(self, name: str) -> Optional[int]:
-    """Lookup symbolId by symbol name (case-insensitive)."""
     return self.symbol_name_to_id.get((name or "").upper())
 
 
 def round_price_for_symbol(self, symbol_id: int, price: float) -> float:
-    """
-    Round price using symbol digits if available on FULL symbol;
-    if not available, return as-is.
-    """
     symbol = self.symbol_details.get(int(symbol_id))
     if symbol is None:
         return float(price)
@@ -256,10 +228,6 @@ def round_price_for_symbol(self, symbol_id: int, price: float) -> float:
 
 
 def snap_volume_for_symbol(self, symbol_id: int, volume_units: int) -> int:
-    """
-    Clamp volume using FULL symbol specs (minVolume/maxVolume/stepVolume) if present.
-    If specs are missing/zero, returns the input volume_units unchanged.
-    """
     v = int(volume_units or 0)
     symbol = self.symbol_details.get(int(symbol_id))
     if symbol is None:
