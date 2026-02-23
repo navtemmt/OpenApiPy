@@ -83,6 +83,13 @@ def on_symbols_list(self, result, debug_dump: bool = False) -> None:
 
         logger.info("Loaded %d symbols (light)", len(self.symbol_name_to_id))
 
+        # NEW: explicit BTC/XAU mapping debug
+        logger.info(
+            "SYMBOL MAP CHECK: BTCUSD=%s XAUUSD=%s",
+            self.symbol_name_to_id.get("BTCUSD"),
+            self.symbol_name_to_id.get("XAUUSD"),
+        )
+
         # Track total batches expected for deferred spot subscription
         total_batches = (len(ids) + 199) // 200  # ceiling division matching batch_size=200
         self._symbol_batch_total = int(total_batches)
