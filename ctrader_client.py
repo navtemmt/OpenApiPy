@@ -112,12 +112,6 @@ class CTraderClient:
         self._stop_periodic_tasks()
 
     def _handle_message(self, client, message):
-        logger.info(
-            "DEBUG type(extracted)=%s isinstance(..., ProtoOASpotEvent)=%s",
-            type(extracted),
-            isinstance(extracted, ProtoOASpotEvent),
-        )
-
         self.last_message_time = time.time()
     
         extracted = None
@@ -127,6 +121,10 @@ class CTraderClient:
                 "Received message payloadType=%s type=%s",
                 getattr(extracted, "payloadType", None),
                 type(extracted),
+            )
+            logger.info(
+                "DEBUG isinstance(extracted, ProtoOASpotEvent)=%s",
+                isinstance(extracted, ProtoOASpotEvent),
             )
         except Exception:
             logger.info("Received raw message (extract failed): %r", message)
@@ -153,6 +151,7 @@ class CTraderClient:
                 self._on_message_callback(message)
             except Exception:
                 logger.exception("User message callback crashed")
+
     
 
     def _on_spot_event(self, spot_event: ProtoOASpotEvent):
