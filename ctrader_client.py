@@ -112,6 +112,12 @@ class CTraderClient:
         self._stop_periodic_tasks()
 
     def _handle_message(self, client, message):
+        logger.info(
+            "DEBUG type(extracted)=%s isinstance(..., ProtoOASpotEvent)=%s",
+            type(extracted),
+            isinstance(extracted, ProtoOASpotEvent),
+        )
+
         self.last_message_time = time.time()
     
         extracted = None
