@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 # Symbols to subscribe for spot quotes at startup (for FIXED_USD / PERCENT_EQUITY sizing).
 STARTUP_SPOT_SYMBOLS = ["XAUUSD", "BTCUSD"]
 
+# Temporary: how many symbols to probe for ticking via OpenAPI
+PROBE_SPOT_COUNT = 50
+
 
 def load_symbol_map(self, debug_dump: bool = False) -> None:
     """Request SymbolsList then request full specs by id."""
@@ -89,6 +92,24 @@ def on_symbols_list(self, result, debug_dump: bool = False) -> None:
             self.symbol_name_to_id.get("BTCUSD"),
             self.symbol_name_to_id.get("XAUUSD"),
         )
+
+        # TEMP: probe which symbols actually tick on OpenAPI
+        try:
+            probe_ids = ids[:PROBE_SPOT_COUNT]
+            logger.info(
+                "PROBE subscribe_spots to first %d symbols: %s",
+                len(probe_ids),
+                probe_ids,
+            )
+            if hasattr(self, "subscribe_spots"):
+                self.subscribe_spots(
+                    account_id=int(self.account_id),
+                    symbol_ids=probe_ids,
+                )
+            else:
+                logger.error("subscribe_spots method not found on client instance during probe")
+        except Exception as e:
+            logger.error("Failed probe spot subscription: %s", e)
 
         # Track total batches expected for deferred spot subscription
         total_batches = (len(ids) + 199) // 200  # ceiling division matching batch_size=200
