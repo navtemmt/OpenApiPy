@@ -6,6 +6,8 @@ Manages multiple cTrader client connections for different accounts.
 
 import logging
 from typing import Dict, Optional, Tuple
+import inspect
+import ctrader_client as ctr_mod
 
 from trade_processor import notify_position_update
 from ctrader_client import CTraderClient
@@ -18,6 +20,15 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
 )
 
 logger = logging.getLogger(__name__)
+
+# One‑shot debug: confirm which _on_spot_event implementation is live
+try:
+    logger.info(
+        "DEBUG CTraderClient._on_spot_event SOURCE:\n%s",
+        inspect.getsource(ctr_mod.CTraderClient._on_spot_event),
+    )
+except Exception:
+    logger.info("DEBUG unable to inspect CTraderClient._on_spot_event source")
 
 
 class AccountManager:
