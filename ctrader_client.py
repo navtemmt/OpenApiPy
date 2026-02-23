@@ -197,6 +197,7 @@ class CTraderClient:
                     )
         except Exception:
             logger.debug("spot event parse error", exc_info=True)
+
     
         
 
