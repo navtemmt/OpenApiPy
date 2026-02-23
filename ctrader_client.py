@@ -147,20 +147,19 @@ class CTraderClient:
                 logger.exception("User message callback crashed")
 
     def _on_spot_event(self, spot_event: ProtoOASpotEvent):
-        import inspect
-        logger.info(
-            "ACTIVE _on_spot_event SOURCE:\n%s",
-            inspect.getsource(self._on_spot_event),
-        )
-
-        logger.info(">> _on_spot_event: %d entries", len(getattr(spot_event, "spot", [])))
+        spots = list(getattr(spot_event, "spot", []))
+        if not spots:
+            logger.info(">> _on_spot_event: 0 entries")
+            return
+    
+        logger.info(">> _on_spot_event: %d entries", len(spots))
         try:
-            for s in getattr(spot_event, "spot", []):
+            for s in spots:
                 symbol_id = int(getattr(s, "symbolId", 0) or 0)
                 bid_raw = getattr(s, "bid", 0)
                 ask_raw = getattr(s, "ask", 0)
                 ts = int(getattr(s, "timestamp", 0) or 0)
-
+    
                 logger.info(
                     "SPOT RAW sid=%s bid_raw=%s ask_raw=%s ts=%s",
                     symbol_id,
@@ -168,20 +167,20 @@ class CTraderClient:
                     ask_raw,
                     ts,
                 )
-
+    
                 if not symbol_id:
                     continue
-
+    
                 bid = float(bid_raw or 0.0)
                 ask = float(ask_raw or 0.0)
                 self.spot_quotes[symbol_id] = {"bid": bid, "ask": ask, "ts": ts}
-
+    
                 symbol_name = None
                 for name, sid in self.symbol_name_to_id.items():
                     if sid == symbol_id:
                         symbol_name = name
                         break
-
+    
                 if symbol_name:
                     logger.info(
                         "QUOTE %s | bid=%.5f ask=%.5f ts=%s",
@@ -200,6 +199,7 @@ class CTraderClient:
                     )
         except Exception:
             logger.debug("spot event parse error", exc_info=True)
+
 
     # ------------------------------------------------------------------
     # Heartbeat / health (delegated to ctrader_monitor_impl.py)
