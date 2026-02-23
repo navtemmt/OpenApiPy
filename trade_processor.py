@@ -32,65 +32,6 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _get_recent_entry_price_from_quote(client, config, symbol_id: int, side: str):
-    """
-    Market entry price from most recent cTrader spot quote.
-
-    Returns:
-      (entry_price: float | None, decision: str)
-
-    Rejects if:
-      - no quote,
-      - quote timestamp missing,
-      - quote is older than config.max_quote_age_ms,
-      - bid/ask invalid for the requested side.
-    """
-    max_age_ms = int(getattr(config, "max_quote_age_ms", 3000) or 3000)
-
-    try:
-        q = client.get_last_quote(int(symbol_id))
-    except Exception:
-        q = None
-
-    if not q:
-        return None, "REJECT_NO_QUOTE"
-
-    try:
-        ts = int(q.get("ts", 0) or 0)
-        bid = float(q.get("bid", 0) or 0.0)
-        ask = float(q.get("ask", 0) or 0.0)
-    except Exception:
-        return None, "REJECT_BAD_QUOTE"
-
-    if ts <= 0:
-        return None, "REJECT_BAD_QUOTE_TS"
-
-    age_ms = _now_ms() - ts
-    if age_ms > max_age_ms:
-        return None, f"REJECT_STALE_QUOTE age_ms={age_ms}"
-
-    s = str(side or "").strip().upper()
-    if s in ("BUY", "LONG"):
-        if ask <= 0:
-            return None, "REJECT_BAD_QUOTE_ASK"
-        return ask, f"QUOTE_OK_ASK age_ms={age_ms}"
-    else:
-        if bid <= 0:
-            return None, "REJECT_BAD_QUOTE_BID"
-        return bid, f"QUOTE_OK_BID age_ms={age_ms}"
-
-
-def _ensure_spot_subscribed(client, config, symbol_id: int):
-    """
-    Best-effort subscription so future market orders have quotes.
-    Safe to call often; server/client should ignore duplicates.
-    """
-    try:
-        client.subscribe_spots(account_id=config.account_id, symbol_ids=[int(symbol_id)])
-    except Exception:
-        pass
-
-
 def _lots_to_ctrader_cents(lots: float, mt5_contract_size: float) -> int:
     """
     MT5 lots -> underlying units -> cTrader cents-of-units.
@@ -250,20 +191,12 @@ def _resolve_open_volume_for_account(data: dict, config, *, account_name=None, c
             return None, f"REJECT_{risk_mode}_NO_SYMBOL_DETAILS"
 
         # Determine entry price:
-        # - For market orders: use recent spot quote (ask/bid depending on side)
-        # - For pending orders: caller should pass entry_price in data["entry_price"] (or limit/stop)
+        # For both market and pending orders we now rely on MT5 to provide entry_price.
+        # For pendings this is set in handle_pending_open_event; for markets the MT5 EA
+        # should populate data["entry_price"] with the current MT5 price.
         entry_price = float(data.get("entry_price", 0) or 0.0)
-
         if entry_price <= 0:
-            _ensure_spot_subscribed(client, config, int(symbol_id))
-            entry_price, q_decision = _get_recent_entry_price_from_quote(
-                client=client,
-                config=config,
-                symbol_id=int(symbol_id),
-                side=str(side or ""),
-            )
-            if entry_price is None or float(entry_price) <= 0:
-                return None, f"REJECT_{risk_mode}_{q_decision}"
+            return None, f"REJECT_{risk_mode}_NO_ENTRY_PRICE_FROM_MT5"
 
         risk_per_1lot = _estimate_risk_ccy_per_1lot(symbol, float(entry_price), float(sl))
         if risk_per_1lot <= 0:
