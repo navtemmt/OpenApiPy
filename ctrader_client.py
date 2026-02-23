@@ -149,10 +149,10 @@ class CTraderClient:
     def _on_spot_event(self, spot_event: ProtoOASpotEvent):
         spots = list(getattr(spot_event, "spot", []))
         if not spots:
-            logger.info(">> _on_spot_event: 0 entries")
+            # was: logger.info(">> _on_spot_event: 0 entries")
             return
     
-        logger.info(">> _on_spot_event: %d entries", len(spots))
+        # was: logger.info(">> _on_spot_event: %d entries", len(spots))
         try:
             for s in spots:
                 symbol_id = int(getattr(s, "symbolId", 0) or 0)
@@ -160,13 +160,11 @@ class CTraderClient:
                 ask_raw = getattr(s, "ask", 0)
                 ts = int(getattr(s, "timestamp", 0) or 0)
     
-                logger.info(
-                    "SPOT RAW sid=%s bid_raw=%s ask_raw=%s ts=%s",
-                    symbol_id,
-                    bid_raw,
-                    ask_raw,
-                    ts,
-                )
+                # was a very noisy info log:
+                # logger.info(
+                #     "SPOT RAW sid=%s bid_raw=%s ask_raw=%s ts=%s",
+                #     symbol_id, bid_raw, ask_raw, ts,
+                # )
     
                 if not symbol_id:
                     continue
@@ -175,30 +173,26 @@ class CTraderClient:
                 ask = float(ask_raw or 0.0)
                 self.spot_quotes[symbol_id] = {"bid": bid, "ask": ask, "ts": ts}
     
-                symbol_name = None
-                for name, sid in self.symbol_name_to_id.items():
-                    if sid == symbol_id:
-                        symbol_name = name
-                        break
-    
-                if symbol_name:
-                    logger.info(
-                        "QUOTE %s | bid=%.5f ask=%.5f ts=%s",
-                        symbol_name,
-                        bid,
-                        ask,
-                        ts,
-                    )
-                else:
-                    logger.info(
-                        "QUOTE symbolId=%s | bid=%.5f ask=%.5f ts=%s",
-                        symbol_id,
-                        bid,
-                        ask,
-                        ts,
-                    )
+                # Optional: keep at debug if you still want to inspect sometimes
+                # symbol_name = None
+                # for name, sid in self.symbol_name_to_id.items():
+                #     if sid == symbol_id:
+                #         symbol_name = name
+                #         break
+                #
+                # if symbol_name:
+                #     logger.debug(
+                #         "QUOTE %s | bid=%.5f ask=%.5f ts=%s",
+                #         symbol_name, bid, ask, ts,
+                #     )
+                # else:
+                #     logger.debug(
+                #         "QUOTE symbolId=%s | bid=%.5f ask=%.5f ts=%s",
+                #         symbol_id, bid, ask, ts,
+                #     )
         except Exception:
             logger.debug("spot event parse error", exc_info=True)
+    
 
 
     # ------------------------------------------------------------------
