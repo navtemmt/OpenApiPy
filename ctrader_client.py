@@ -155,6 +155,12 @@ class CTraderClient:
     
 
     def _on_spot_event(self, spot_event: ProtoOASpotEvent):
+        import inspect
+        logger.info(
+            "ACTIVE _on_spot_event SOURCE:\n%s",
+            inspect.getsource(self._on_spot_event),
+        )
+    
         logger.info(">> _on_spot_event: %d entries", len(getattr(spot_event, "spot", [])))
         try:
             for s in getattr(spot_event, "spot", []):
@@ -202,6 +208,7 @@ class CTraderClient:
                     )
         except Exception:
             logger.debug("spot event parse error", exc_info=True)
+
 
     
         
