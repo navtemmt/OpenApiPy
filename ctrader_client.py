@@ -150,6 +150,7 @@ class CTraderClient:
     
 
     def _on_spot_event(self, spot_event: ProtoOASpotEvent):
+        logger.info(">> _on_spot_event: %d spot entries", len(getattr(spot_event, "spot", [])))
         try:
             for s in getattr(spot_event, "spot", []):
                 symbol_id = int(getattr(s, "symbolId", 0) or 0)
@@ -157,7 +158,6 @@ class CTraderClient:
                 ask_raw = getattr(s, "ask", 0)
                 ts = int(getattr(s, "timestamp", 0) or 0)
     
-                # Always log raw ids first
                 logger.info(
                     "SPOT RAW sid=%s bid_raw=%s ask_raw=%s ts=%s",
                     symbol_id,
@@ -198,6 +198,7 @@ class CTraderClient:
         except Exception:
             logger.debug("spot event parse error", exc_info=True)
     
+        
 
     # ------------------------------------------------------------------
     # Heartbeat / health (delegated to ctrader_monitor_impl.py)
