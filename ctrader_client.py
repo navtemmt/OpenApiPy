@@ -28,6 +28,9 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+# Cache numeric payloadType for spot events
+PROTO_OA_SPOT_EVENT_TYPE = ProtoOASpotEvent().payloadType
+
 
 class CTraderClient:
     """High-level wrapper for cTrader Open API trading operations."""
@@ -115,33 +118,24 @@ class CTraderClient:
         self.last_message_time = time.time()
 
         extracted = None
+        payload_type = None
         try:
             extracted = Protobuf.extract(message)
+            payload_type = getattr(extracted, "payloadType", None)
             logger.info(
                 "Received message payloadType=%s type=%s",
-                getattr(extracted, "payloadType", None),
+                payload_type,
                 type(extracted),
-            )
-            logger.info(
-                "DEBUG isinstance(extracted, ProtoOASpotEvent)=%s",
-                isinstance(extracted, ProtoOASpotEvent),
             )
         except Exception:
             logger.info("Received raw message (extract failed): %r", message)
             extracted = None
 
-        # Internal handling: cache spots if we receive them
+        # Internal handling: route spot events by payloadType only
         try:
-            # Direct spot event
-            if isinstance(extracted, ProtoOASpotEvent):
-                logger.info("Received ProtoOASpotEvent with %d spots", len(extracted.spot))
+            if payload_type == PROTO_OA_SPOT_EVENT_TYPE:
+                logger.info("ROUTE: ProtoOASpotEvent by payloadType")
                 self._on_spot_event(extracted)
-            else:
-                # Some OpenApiPy builds wrap the payload; try common wrapper attr
-                inner = getattr(extracted, "payload", None)
-                if isinstance(inner, ProtoOASpotEvent):
-                    logger.info("Received wrapped ProtoOASpotEvent with %d spots", len(inner.spot))
-                    self._on_spot_event(inner)
         except Exception:
             logger.debug("Failed to process spot event", exc_info=True)
 
