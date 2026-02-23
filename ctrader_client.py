@@ -113,7 +113,7 @@ class CTraderClient:
 
     def _handle_message(self, client, message):
         self.last_message_time = time.time()
-    
+
         extracted = None
         try:
             extracted = Protobuf.extract(message)
@@ -129,7 +129,7 @@ class CTraderClient:
         except Exception:
             logger.info("Received raw message (extract failed): %r", message)
             extracted = None
-    
+
         # Internal handling: cache spots if we receive them
         try:
             # Direct spot event
@@ -144,7 +144,7 @@ class CTraderClient:
                     self._on_spot_event(inner)
         except Exception:
             logger.debug("Failed to process spot event", exc_info=True)
-    
+
         # Forward raw message to user callback (AccountManager parses it)
         if self._on_message_callback:
             try:
@@ -152,15 +152,13 @@ class CTraderClient:
             except Exception:
                 logger.exception("User message callback crashed")
 
-    
-
     def _on_spot_event(self, spot_event: ProtoOASpotEvent):
         import inspect
         logger.info(
             "ACTIVE _on_spot_event SOURCE:\n%s",
             inspect.getsource(self._on_spot_event),
         )
-    
+
         logger.info(">> _on_spot_event: %d entries", len(getattr(spot_event, "spot", [])))
         try:
             for s in getattr(spot_event, "spot", []):
@@ -168,7 +166,7 @@ class CTraderClient:
                 bid_raw = getattr(s, "bid", 0)
                 ask_raw = getattr(s, "ask", 0)
                 ts = int(getattr(s, "timestamp", 0) or 0)
-    
+
                 logger.info(
                     "SPOT RAW sid=%s bid_raw=%s ask_raw=%s ts=%s",
                     symbol_id,
@@ -176,20 +174,20 @@ class CTraderClient:
                     ask_raw,
                     ts,
                 )
-    
+
                 if not symbol_id:
                     continue
-    
+
                 bid = float(bid_raw or 0.0)
                 ask = float(ask_raw or 0.0)
                 self.spot_quotes[symbol_id] = {"bid": bid, "ask": ask, "ts": ts}
-    
+
                 symbol_name = None
                 for name, sid in self.symbol_name_to_id.items():
                     if sid == symbol_id:
                         symbol_name = name
                         break
-    
+
                 if symbol_name:
                     logger.info(
                         "QUOTE %s | bid=%.5f ask=%.5f ts=%s",
@@ -208,10 +206,6 @@ class CTraderClient:
                     )
         except Exception:
             logger.debug("spot event parse error", exc_info=True)
-
-
-    
-        
 
     # ------------------------------------------------------------------
     # Heartbeat / health (delegated to ctrader_monitor_impl.py)
