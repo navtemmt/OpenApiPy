@@ -107,7 +107,7 @@ class CTraderClient:
     def _handle_disconnected(self, client, reason):
         logger.warning("Disconnected from cTrader: %s", reason)
         self.is_connected = False
-               self.is_app_authed = False
+        self.is_app_authed = False
         self.is_account_authed = False
         self.symbol_name_to_id.clear()
         self.symbol_details.clear()
