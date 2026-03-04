@@ -107,7 +107,7 @@ class CTraderClient:
     def _handle_disconnected(self, client, reason):
         logger.warning("Disconnected from cTrader: %s", reason)
         self.is_connected = False
-        self.is_app_authed = False
+               self.is_app_authed = False
         self.is_account_authed = False
         self.symbol_name_to_id.clear()
         self.symbol_details.clear()
@@ -122,19 +122,21 @@ class CTraderClient:
         try:
             extracted = Protobuf.extract(message)
             payload_type = getattr(extracted, "payloadType", None)
-            logger.info(
+            # was INFO, now DEBUG to avoid spam
+            logger.debug(
                 "Received message payloadType=%s type=%s",
                 payload_type,
                 type(extracted),
             )
         except Exception:
-            logger.info("Received raw message (extract failed): %r", message)
+            logger.debug("Received raw message (extract failed): %r", message)
             extracted = None
 
         # Internal handling: route spot events by payloadType only
         try:
             if payload_type == PROTO_OA_SPOT_EVENT_TYPE:
-                logger.info("ROUTE: ProtoOASpotEvent by payloadType")
+                # was INFO, now DEBUG
+                logger.debug("ROUTE: ProtoOASpotEvent by payloadType")
                 self._on_spot_event(extracted)
         except Exception:
             logger.debug("Failed to process spot event", exc_info=True)
@@ -149,31 +151,24 @@ class CTraderClient:
     def _on_spot_event(self, spot_event: ProtoOASpotEvent):
         spots = list(getattr(spot_event, "spot", []))
         if not spots:
-            # was: logger.info(">> _on_spot_event: 0 entries")
+            # previously logged 0 entries; now silent
             return
-    
-        # was: logger.info(">> _on_spot_event: %d entries", len(spots))
+
         try:
             for s in spots:
                 symbol_id = int(getattr(s, "symbolId", 0) or 0)
                 bid_raw = getattr(s, "bid", 0)
                 ask_raw = getattr(s, "ask", 0)
                 ts = int(getattr(s, "timestamp", 0) or 0)
-    
-                # was a very noisy info log:
-                # logger.info(
-                #     "SPOT RAW sid=%s bid_raw=%s ask_raw=%s ts=%s",
-                #     symbol_id, bid_raw, ask_raw, ts,
-                # )
-    
+
                 if not symbol_id:
                     continue
-    
+
                 bid = float(bid_raw or 0.0)
                 ask = float(ask_raw or 0.0)
                 self.spot_quotes[symbol_id] = {"bid": bid, "ask": ask, "ts": ts}
-    
-                # Optional: keep at debug if you still want to inspect sometimes
+
+                # Optional debug-only quote logging left commented out
                 # symbol_name = None
                 # for name, sid in self.symbol_name_to_id.items():
                 #     if sid == symbol_id:
@@ -192,8 +187,6 @@ class CTraderClient:
                 #     )
         except Exception:
             logger.debug("spot event parse error", exc_info=True)
-    
-
 
     # ------------------------------------------------------------------
     # Heartbeat / health (delegated to ctrader_monitor_impl.py)
