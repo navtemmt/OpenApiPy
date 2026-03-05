@@ -169,6 +169,91 @@ def _estimate_risk_ccy_per_1lot_from_mt5(data: dict, entry_price: float, sl_pric
         return 0.0
 
 
+def _enforce_max_risk_on_fill(
+    account_name,
+    client,
+    config,
+    account_manager,
+    position,
+    symbol,
+    *,
+    mt5_symbol: str | None = None,
+    mt5_data: dict | None = None,
+):
+    """
+    After a follower position is OPEN, trim excess volume if actual risk
+    (based on fill price and SL) exceeds the intended risk for FIXED_USD / PERCENT_EQUITY.
+    """
+    rm = _risk_mode(config)
+    if rm not in ("FIXED_USD", "PERCENT_EQUITY"):
+        return
+
+    entry = float(getattr(position, "price", 0) or 0.0)
+    sl = float(getattr(position, "stopLoss", 0) or 0.0)
+    if entry <= 0 or sl <= 0:
+        return
+
+    # Recompute risk per 1 lot with same logic as at OPEN
+    risk_per_1lot = _estimate_risk_ccy_per_1lot_from_symbol(symbol, entry, sl)
+    if risk_per_1lot <= 0 and mt5_data:
+        risk_per_1lot = _estimate_risk_ccy_per_1lot_from_mt5(mt5_data, entry, sl)
+    if risk_per_1lot <= 0:
+        return
+
+    if rm == "FIXED_USD":
+        target_risk = float(getattr(config, "fixed_usd_risk", 0) or 0.0)
+    else:
+        pct = float(getattr(config, "risk_percent", 0) or 0.0)
+        ref_amt = _get_account_equity_or_balance(account_manager, account_name, config)
+        target_risk = (pct / 100.0) * float(ref_amt) if pct > 0 and ref_amt > 0 else 0.0
+
+    if target_risk <= 0:
+        return
+
+    lot_size_cents = float(getattr(symbol, "lotSize", 0) or 0.0)
+    follower_units = float(getattr(position.tradeData, "volume", 0) or 0.0)
+    if lot_size_cents <= 0 or follower_units <= 0:
+        return
+
+    follower_lots = follower_units / lot_size_cents
+    actual_risk = follower_lots * risk_per_1lot
+    if actual_risk <= target_risk:
+        return
+
+    allowed_lots = target_risk / risk_per_1lot
+    excess_lots = follower_lots - allowed_lots
+    if excess_lots <= 0:
+        return
+
+    excess_units = int(round(excess_lots * lot_size_cents))
+    if excess_units <= 0:
+        return
+
+    logger.info(
+        f"[{account_name}] Over-risk detected on fill: rm={rm}, "
+        f"actual_risk={actual_risk:.2f} target={target_risk:.2f}, "
+        f"follower_lots={follower_lots:.4f}, trim_lots={excess_lots:.4f}, "
+        f"trim_units={excess_units}"
+    )
+
+    try:
+        client.close_position(
+            account_id=config.account_id,
+            position_id=position.positionId,
+            volume=excess_units,
+            symbol_id=symbol.symbolId,
+        )
+        logger.info(
+            f"[{account_name}] Over-risk partial close sent: "
+            f"positionId={position.positionId}, trim_units={excess_units}"
+        )
+    except Exception as e:
+        logger.error(
+            f"[{account_name}] Failed over-risk partial close for "
+            f"positionId={position.positionId}: {e}"
+        )
+
+
 def _resolve_open_volume_for_account(data: dict, config, *, account_name=None, client=None, account_manager=None):
     """
     Decide which lots to use for OPEN based on per-account risk settings.
