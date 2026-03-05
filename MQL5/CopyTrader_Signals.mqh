@@ -48,6 +48,7 @@ void SendOpenSignal(ulong ticket)
       "\"type\":\"" + tradeType + "\","
       "\"volume\":" + DoubleToString(volume, 2) + ","
       "\"price\":" + DoubleToString(openPrice, 5) + ","
+      "\"entry_price\":" + DoubleToString(openPrice, 5) + ","   // added for Python risk sizing
       "\"sl\":" + DoubleToString(sl, 5) + ","
       "\"tp\":" + DoubleToString(tp, 5) + ","
       "\"magic\":" + (string)magic + ","
