@@ -95,13 +95,10 @@ def _get_symbol_details(client, symbol_id: int):
         return None
 
 
-def _estimate_risk_ccy_per_1lot(symbol, entry_price: float, sl_price: float) -> float:
+def _estimate_risk_ccy_per_1lot_from_symbol(symbol, entry_price: float, sl_price: float) -> float:
     """
-    Estimate money risk (in deposit currency) for 1.0 lot given entry and SL.
-
-    Requires:
-      - tickValue (money per 1 lot per tick), and
-      - tick size inferred from pipPosition or digits.
+    Estimate money risk (in deposit currency) for 1.0 lot given entry and SL
+    using cTrader symbol specs (tickValue + pipPosition/digits).
 
     Returns 0 if cannot compute.
     """
@@ -141,6 +138,37 @@ def _estimate_risk_ccy_per_1lot(symbol, entry_price: float, sl_price: float) -> 
         return 0.0
 
 
+def _estimate_risk_ccy_per_1lot_from_mt5(data: dict, entry_price: float, sl_price: float) -> float:
+    """
+    Estimate money risk per 1.0 MT5 lot using MT5 contract meta.
+
+    Assumes MT5 account currency and cTrader deposit currency are effectively the same
+    (e.g., both USD), so loss in quote currency ~= loss in account currency.
+
+    Uses:
+      - entry_price, sl_price
+      - mt5_contract_size
+    """
+    try:
+        entry = float(entry_price or 0.0)
+        sl = float(sl_price or 0.0)
+        if entry <= 0 or sl <= 0:
+            return 0.0
+
+        dist = abs(entry - sl)
+        if dist <= 0:
+            return 0.0
+
+        mt5_contract_size = float(data.get("mt5_contract_size", 0) or 0.0)
+        if mt5_contract_size <= 0:
+            return 0.0
+
+        # Approximate: 1 lot risk ≈ price distance * contract size
+        return dist * mt5_contract_size
+    except Exception:
+        return 0.0
+
+
 def _resolve_open_volume_for_account(data: dict, config, *, account_name=None, client=None, account_manager=None):
     """
     Decide which lots to use for OPEN based on per-account risk settings.
@@ -175,7 +203,7 @@ def _resolve_open_volume_for_account(data: dict, config, *, account_name=None, c
         return src_lots, "NO_SL_FALLBACK_SOURCE_VOLUME"
 
     if risk_mode in ("FIXED_USD", "PERCENT_EQUITY"):
-        # money-risk modes: NEVER fallback to source volume if missing core context
+        # money-risk modes: never silently fallback; either we can price risk or we reject
         if not (account_manager and client and account_name):
             return None, f"REJECT_{risk_mode}_MISSING_CONTEXT"
 
@@ -191,17 +219,20 @@ def _resolve_open_volume_for_account(data: dict, config, *, account_name=None, c
             return None, f"REJECT_{risk_mode}_NO_SYMBOL_DETAILS"
 
         # Determine entry price:
-        # For both market and pending orders we now rely on MT5 to provide entry_price.
-        # For pendings this is set in handle_pending_open_event; for markets the MT5 EA
-        # should populate data["entry_price"] with the current MT5 price.
+        # For both market and pending orders we rely on MT5 to provide entry_price.
         entry_price = float(data.get("entry_price", 0) or 0.0)
         if entry_price <= 0:
             return None, f"REJECT_{risk_mode}_NO_ENTRY_PRICE_FROM_MT5"
 
-        risk_per_1lot = _estimate_risk_ccy_per_1lot(symbol, float(entry_price), float(sl))
+        # 1) Try cTrader symbol-based tickValue (if broker provides it)
+        risk_per_1lot = _estimate_risk_ccy_per_1lot_from_symbol(symbol, float(entry_price), float(sl))
+
+        # 2) If that fails, fall back to MT5 contract-based risk math
         if risk_per_1lot <= 0:
-            # Symbol specs (e.g., tickValue) do not allow pricing risk; fall back.
-            return src_lots, f"{risk_mode}_CANNOT_PRICE_RISK_FALLBACK_SOURCE_VOLUME"
+            risk_per_1lot = _estimate_risk_ccy_per_1lot_from_mt5(data, float(entry_price), float(sl))
+
+        if risk_per_1lot <= 0:
+            return None, f"REJECT_{risk_mode}_CANNOT_PRICE_RISK"
 
         if risk_mode == "FIXED_USD":
             usd_risk = float(getattr(config, "fixed_usd_risk", 0) or 0)
