@@ -5,7 +5,7 @@ Processes incoming MT5 trade events and routes them to appropriate handlers.
 
 import time
 
-from app_state import logger, PENDING_SLTP, MASTER_OPEN_LOTS
+from app_state import logger, PENDING_SLTP, MASTER_OPEN_LOTS, MASTER_CLOSED_LOTS
 from trade_executor import copy_open_to_account, copy_pending_to_account
 from symbol_mapper import SymbolMapper
 
@@ -437,6 +437,7 @@ def handle_open_event(data, account_manager):
     # Store master open lots for proportional close later (FIXED_LOT / FIXED_USD / PERCENT_EQUITY)
     if src_volume and float(src_volume) > 0:
         MASTER_OPEN_LOTS[int(ticket)] = float(src_volume)
+        MASTER_CLOSED_LOTS[int(ticket)] = 0.0
 
     # Store pending SL/TP immediately so it can be applied as soon as positionId is known
     if (sl and sl > 0) or (tp and tp > 0):
@@ -646,6 +647,8 @@ def handle_close_event(data, account_manager):
     logger.info(f"CLOSE event - Ticket: {ticket}, Symbol: {mt5_symbol}, close_lots={close_lots}")
 
     master_open_lots = float(MASTER_OPEN_LOTS.get(int(ticket), 0) or 0)
+    master_closed_lots = float(MASTER_CLOSED_LOTS.get(int(ticket), 0) or 0)
+    master_remaining_lots = max(0.0, master_open_lots - master_closed_lots)
 
     for account_name, (client, config) in account_manager.get_all_accounts().items():
         try:
@@ -663,17 +666,21 @@ def handle_close_event(data, account_manager):
             close_units = None
 
             # If master sent a partial close volume and follower is not SOURCE_VOLUME,
-            # close the same percentage of follower position.
+            # close the same percentage of follower position based on remaining master size.
             if close_lots is not None and follower_units is not None and int(follower_units) > 0:
-                if rm != "SOURCE_VOLUME" and master_open_lots > 0:
-                    pct = float(close_lots) / float(master_open_lots)
+                if rm != "SOURCE_VOLUME" and master_remaining_lots > 0:
+                    pct = float(close_lots) / float(master_remaining_lots)
                     pct = max(0.0, min(1.0, pct))
                     close_units = int(round(pct * float(follower_units)))
                     logger.info(
                         f"[{account_name}] Proportional CLOSE: risk_mode={rm}, "
-                        f"master_close_lots={float(close_lots):.4f}, master_open_lots={master_open_lots:.4f}, "
+                        f"master_close_lots={float(close_lots):.4f}, master_remaining_lots={master_remaining_lots:.4f}, "
                         f"pct={pct:.4f}, follower_units={int(follower_units)} -> close_units={close_units}"
                     )
+                    # update cumulative closed lots AFTER computing pct
+                    MASTER_CLOSED_LOTS[int(ticket)] = master_closed_lots + float(close_lots)
+                    master_closed_lots = MASTER_CLOSED_LOTS[int(ticket)]
+                    master_remaining_lots = max(0.0, master_open_lots - master_closed_lots)
                 else:
                     # Legacy behavior: treat MT5 close_lots as absolute lots-to-close
                     if mt5_contract_size > 0:
@@ -720,9 +727,10 @@ def handle_close_event(data, account_manager):
     if int(ticket) in PENDING_SLTP:
         del PENDING_SLTP[int(ticket)]
 
-    # Best-effort cleanup
+    # Best-effort cleanup for master tracking (when MT5 sends final close with no volume)
     try:
         if close_lots is None:
             MASTER_OPEN_LOTS.pop(int(ticket), None)
+            MASTER_CLOSED_LOTS.pop(int(ticket), None)
     except Exception:
         pass
