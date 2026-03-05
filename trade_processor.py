@@ -175,7 +175,7 @@ def _resolve_open_volume_for_account(data: dict, config, *, account_name=None, c
         return src_lots, "NO_SL_FALLBACK_SOURCE_VOLUME"
 
     if risk_mode in ("FIXED_USD", "PERCENT_EQUITY"):
-        # money-risk modes: NEVER fallback to source volume if missing inputs
+        # money-risk modes: NEVER fallback to source volume if missing core context
         if not (account_manager and client and account_name):
             return None, f"REJECT_{risk_mode}_MISSING_CONTEXT"
 
@@ -200,7 +200,8 @@ def _resolve_open_volume_for_account(data: dict, config, *, account_name=None, c
 
         risk_per_1lot = _estimate_risk_ccy_per_1lot(symbol, float(entry_price), float(sl))
         if risk_per_1lot <= 0:
-            return None, f"REJECT_{risk_mode}_CANNOT_PRICE_RISK"
+            # Symbol specs (e.g., tickValue) do not allow pricing risk; fall back.
+            return src_lots, f"{risk_mode}_CANNOT_PRICE_RISK_FALLBACK_SOURCE_VOLUME"
 
         if risk_mode == "FIXED_USD":
             usd_risk = float(getattr(config, "fixed_usd_risk", 0) or 0)
