@@ -176,13 +176,11 @@ def _enforce_max_risk_on_fill(
     account_manager,
     position,
     symbol,
-    *,
-    mt5_symbol: str | None = None,
-    mt5_data: dict | None = None,
 ):
     """
     After a follower position is OPEN, trim excess volume if actual risk
     (based on fill price and SL) exceeds the intended risk for FIXED_USD / PERCENT_EQUITY.
+    Uses only cTrader symbol/position data (no MT5 payload).
     """
     rm = _risk_mode(config)
     if rm not in ("FIXED_USD", "PERCENT_EQUITY"):
@@ -193,10 +191,7 @@ def _enforce_max_risk_on_fill(
     if entry <= 0 or sl <= 0:
         return
 
-    # Recompute risk per 1 lot with same logic as at OPEN
     risk_per_1lot = _estimate_risk_ccy_per_1lot_from_symbol(symbol, entry, sl)
-    if risk_per_1lot <= 0 and mt5_data:
-        risk_per_1lot = _estimate_risk_ccy_per_1lot_from_mt5(mt5_data, entry, sl)
     if risk_per_1lot <= 0:
         return
 
