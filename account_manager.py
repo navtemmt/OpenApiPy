@@ -9,7 +9,7 @@ from typing import Dict, Optional, Tuple
 import inspect
 import ctrader_client as ctr_mod
 
-from trade_processor import notify_position_update
+from trade_processor import notify_position_update, _enforce_max_risk_on_fill
 from ctrader_client import CTraderClient
 from config_loader import AccountConfig
 from ctrader_open_api import Protobuf
@@ -49,6 +49,9 @@ class AccountManager:
         # Per-account cached funds (deposit currency)
         self.account_equity: Dict[str, float] = {}
         self.account_balance: Dict[str, float] = {}
+
+        # Per-account mapping: MT5 ticket -> last MT5 payload (for risk checks)
+        self.mt5_payloads: Dict[str, Dict[int, dict]] = {}
 
     # ------------------------------------------------------------------
     # Helpers
@@ -153,6 +156,8 @@ class AccountManager:
             self.position_volumes[acc_name] = {}
         if acc_name not in self.order_maps:
             self.order_maps[acc_name] = {}
+        if acc_name not in self.mt5_payloads:
+            self.mt5_payloads[acc_name] = {}
 
     # ------------------------------------------------------------------
     # Account lifecycle
@@ -227,6 +232,51 @@ class AccountManager:
                             logger.info(
                                 f"[{acc_name}] (exec vol) positionId {position_id} volume={vol} (exec_type={exec_type})"
                             )
+
+                        # Over-risk enforcement on fills (POSITION_STATUS_OPEN / exec_type == DEAL)
+                        try:
+                            if position_id and ticket is not None:
+                                from ctrader_open_api.messages.OpenApiMessages_pb2 import (
+                                    ProtoOAExecutionType,
+                                    ProtoOAPositionStatus,
+                                )
+
+                                pos_status = getattr(pos, "positionStatus", None)
+                                is_open = pos_status == ProtoOAPositionStatus.POSITION_STATUS_OPEN
+                                is_fill = exec_type == ProtoOAExecutionType.ORDER_FILLED
+
+                                if is_open and is_fill:
+                                    config = self.get_config(acc_name)
+                                    if config:
+                                        # symbol details
+                                        symbol_id = int(
+                                            getattr(
+                                                getattr(pos, "tradeData", None) or pos,
+                                                "symbolId",
+                                                0,
+                                            )
+                                            or 0
+                                        )
+                                        symbol = None
+                                        client_obj = self.get_client(acc_name)
+                                        if client_obj and hasattr(client_obj, "symbol_details"):
+                                            symbol = client_obj.symbol_details.get(symbol_id)
+
+                                        mt5_data = self.mt5_payloads.get(acc_name, {}).get(int(ticket), None)
+
+                                        if symbol is not None:
+                                            _enforce_max_risk_on_fill(
+                                                account_name=acc_name,
+                                                client=client_obj,
+                                                config=config,
+                                                account_manager=self,
+                                                position=pos,
+                                                symbol=symbol,
+                                                mt5_symbol=None,
+                                                mt5_data=mt5_data,
+                                            )
+                        except Exception as e:
+                            logger.debug(f"[{acc_name}] over-risk enforce failed: {e}")
 
                     return
 
@@ -376,6 +426,7 @@ class AccountManager:
         try:
             self.position_maps.get(account_name, {}).pop(int(mt5_ticket), None)
             self.order_maps.get(account_name, {}).pop(int(mt5_ticket), None)
+            self.mt5_payloads.get(account_name, {}).pop(int(mt5_ticket), None)
         except Exception:
             pass
 
