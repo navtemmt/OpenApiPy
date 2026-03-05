@@ -27,3 +27,8 @@ DEDUPE_WINDOW_MS = 1500
 # pct = close_lots / master_open_lots
 # mt5_ticket -> float lots
 MASTER_OPEN_LOTS = {}
+
+# Track cumulative lots closed on the master side so we can base each proportional
+# follower close on the *remaining* master size instead of the original size.
+# mt5_ticket -> float lots_closed_so_far
+MASTER_CLOSED_LOTS = {}
