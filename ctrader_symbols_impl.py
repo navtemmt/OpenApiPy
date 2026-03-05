@@ -225,6 +225,12 @@ def on_symbol_specs(self, result, debug_dump: bool = False) -> None:
 
         if self._symbol_batch_done >= total:
             logger.info("All symbol spec batches completed.")
+            # One-shot debug: dump key symbol specs
+            try:
+                debug_symbol_details(self, "BTCUSD")
+                debug_symbol_details(self, "XAUUSD")
+            except Exception:
+                logger.debug("debug_symbol_details call failed", exc_info=True)
             _subscribe_startup_spots(self)
 
     except Exception as e:
@@ -272,6 +278,31 @@ def _subscribe_startup_spots(self) -> None:
 
     except Exception as e:
         logger.error("Failed to subscribe to startup spot symbols: %s", e)
+
+
+def debug_symbol_details(self, symbol_name: str) -> None:
+    """
+    One-shot debug: log full symbol details (fields) for a given cTrader symbol.
+    """
+    try:
+        name = (symbol_name or "").upper()
+        sid = self.symbol_name_to_id.get(name)
+        if not sid:
+            logger.info("DEBUG symbol_details: name=%s not in symbol_name_to_id", name)
+            return
+
+        s = self.symbol_details.get(int(sid))
+        if not s:
+            logger.info("DEBUG symbol_details: name=%s id=%s has no full specs yet", name, sid)
+            return
+
+        if hasattr(s, "ListFields"):
+            fields = [(f.name, v) for f, v in s.ListFields()]
+            logger.info("DEBUG symbol_details: name=%s id=%s fields=%s", name, sid, fields)
+        else:
+            logger.info("DEBUG symbol_details: name=%s id=%s repr=%r", name, sid, s)
+    except Exception as e:
+        logger.error("DEBUG symbol_details failed for %s: %s", symbol_name, e)
 
 
 def get_symbol_id_by_name(self, name: str) -> Optional[int]:
