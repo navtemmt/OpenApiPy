@@ -32,6 +32,85 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _to_int(value, default=0):
+    try:
+        return int(float(value))
+    except Exception:
+        return default
+
+
+def _to_float(value, default=0.0):
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _to_float_or_none(value):
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _canonical_event_type(data: dict) -> str:
+    raw = str(
+        data.get("event_type")
+        or data.get("action")
+        or data.get("event")
+        or ""
+    ).strip().upper().replace("-", "_").replace(" ", "_")
+
+    aliases = {
+        "PENDING_CLOSE": "PENDING_CANCEL",
+        "PENDINGCLOSE": "PENDING_CANCEL",
+        "PENDING_CANCEL": "PENDING_CANCEL",
+        "PENDINGCANCEL": "PENDING_CANCEL",
+        "PENDING_DELETE": "PENDING_CANCEL",
+        "PENDINGDELETE": "PENDING_CANCEL",
+        "ORDER_DELETE": "PENDING_CANCEL",
+        "ORDERDELETE": "PENDING_CANCEL",
+        "PENDING_OPEN": "PENDING_OPEN",
+        "PENDINGOPEN": "PENDING_OPEN",
+    }
+    return aliases.get(raw, raw)
+
+
+def _canonical_pending_type(data: dict) -> str:
+    raw = str(
+        data.get("pending_type")
+        or data.get("order_type")
+        or data.get("pending_order_type")
+        or ""
+    ).strip().lower().replace("-", "_").replace(" ", "_")
+
+    aliases = {
+        "limit": "limit",
+        "stop": "stop",
+        "stop_limit": "stop_limit",
+        "stoplimit": "stop_limit",
+        "buy_limit": "limit",
+        "sell_limit": "limit",
+        "buylimit": "limit",
+        "selllimit": "limit",
+        "op_buylimit": "limit",
+        "op_selllimit": "limit",
+        "buy_stop": "stop",
+        "sell_stop": "stop",
+        "buystop": "stop",
+        "sellstop": "stop",
+        "op_buystop": "stop",
+        "op_sellstop": "stop",
+        "buy_stop_limit": "stop_limit",
+        "sell_stop_limit": "stop_limit",
+        "buystoplimit": "stop_limit",
+        "sellstoplimit": "stop_limit",
+    }
+    return aliases.get(raw, raw)
+
+
 def _lots_to_ctrader_cents(lots: float, mt5_contract_size: float) -> int:
     """
     MT5 lots -> underlying units -> cTrader cents-of-units.
@@ -163,7 +242,6 @@ def _estimate_risk_ccy_per_1lot_from_mt5(data: dict, entry_price: float, sl_pric
         if mt5_contract_size <= 0:
             return 0.0
 
-        # Approximate: 1 lot risk ≈ price distance * contract size
         return dist * mt5_contract_size
     except Exception:
         return 0.0
@@ -283,12 +361,10 @@ def _resolve_open_volume_for_account(data: dict, config, *, account_name=None, c
         return src_lots, "NO_SL_FALLBACK_SOURCE_VOLUME"
 
     if risk_mode in ("FIXED_USD", "PERCENT_EQUITY"):
-        # money-risk modes: never silently fallback; either we can price risk or we reject
         if not (account_manager and client and account_name):
             return None, f"REJECT_{risk_mode}_MISSING_CONTEXT"
 
         mt5_symbol = data.get("symbol")
-        side = data.get("side") or data.get("type")
 
         symbol_id = _get_symbol_id_for_account(client, config, mt5_symbol)
         if symbol_id is None:
@@ -298,16 +374,12 @@ def _resolve_open_volume_for_account(data: dict, config, *, account_name=None, c
         if symbol is None:
             return None, f"REJECT_{risk_mode}_NO_SYMBOL_DETAILS"
 
-        # Determine entry price:
-        # For both market and pending orders we rely on MT5 to provide entry_price.
         entry_price = float(data.get("entry_price", 0) or 0.0)
         if entry_price <= 0:
             return None, f"REJECT_{risk_mode}_NO_ENTRY_PRICE_FROM_MT5"
 
-        # 1) Try cTrader symbol-based tickValue (if broker provides it)
         risk_per_1lot = _estimate_risk_ccy_per_1lot_from_symbol(symbol, float(entry_price), float(sl))
 
-        # 2) If that fails, fall back to MT5 contract-based risk math
         if risk_per_1lot <= 0:
             risk_per_1lot = _estimate_risk_ccy_per_1lot_from_mt5(data, float(entry_price), float(sl))
 
@@ -333,7 +405,6 @@ def _resolve_open_volume_for_account(data: dict, config, *, account_name=None, c
 
         return lots, f"{risk_mode} usd={usd_risk:.2f} perLot={risk_per_1lot:.2f} entry={float(entry_price):.5f}"
 
-    # default behavior
     return src_lots, f"{risk_mode}_USING_SOURCE_VOLUME_FOR_NOW"
 
 
@@ -393,9 +464,9 @@ def notify_position_update(account_name, ticket, account_manager):
 
 def process_trade_event(data, account_manager):
     try:
-        event_type = data.get("event_type") or data.get("action")
-        ticket = int(data.get("ticket", 0))
-        magic = int(data.get("magic", 0))
+        event_type = _canonical_event_type(data)
+        ticket = _to_int(data.get("ticket", 0), 0)
+        magic = _to_int(data.get("magic", 0), 0)
 
         logger.info(f"Processing event: {event_type} for ticket {ticket} (magic: {magic})")
 
@@ -403,11 +474,8 @@ def process_trade_event(data, account_manager):
             handle_open_event(data, account_manager)
         elif event_type == "PENDING_OPEN":
             handle_pending_open_event(data, account_manager)
-
-        # accept MT5 "PENDING_CLOSE" as alias of "PENDING_CANCEL"
-        elif event_type in ("PENDING_CANCEL", "PENDING_CLOSE"):
+        elif event_type == "PENDING_CANCEL":
             handle_pending_cancel_event(data, account_manager)
-
         elif event_type == "MODIFY":
             handle_modify_event(data, account_manager)
         elif event_type == "CLOSE":
@@ -421,26 +489,24 @@ def process_trade_event(data, account_manager):
 
 
 def handle_open_event(data, account_manager):
-    ticket = int(data.get("ticket"))
+    ticket = _to_int(data.get("ticket"))
     mt5_symbol = data.get("symbol")
-    side = data.get("side") or data.get("type")
-    src_volume = float(data.get("volume", 0))
-    sl = float(data.get("sl", 0))
-    tp = float(data.get("tp", 0))
-    magic = int(data.get("magic", 0))
+    side = str(data.get("side") or data.get("type") or "").strip().upper()
+    src_volume = _to_float(data.get("volume", 0), 0.0)
+    sl = _to_float(data.get("sl", 0), 0.0)
+    tp = _to_float(data.get("tp", 0), 0.0)
+    magic = _to_int(data.get("magic", 0), 0)
 
     logger.info(
         f"OPEN event - Ticket: {ticket}, Symbol: {mt5_symbol}, "
         f"Side: {side}, Volume: {src_volume}, SL: {sl}, TP: {tp}"
     )
 
-    # Store master open lots for proportional close later (FIXED_LOT / FIXED_USD / PERCENT_EQUITY)
-    if src_volume and float(src_volume) > 0:
+    if src_volume > 0:
         MASTER_OPEN_LOTS[int(ticket)] = float(src_volume)
         MASTER_CLOSED_LOTS[int(ticket)] = 0.0
 
-    # Store pending SL/TP immediately so it can be applied as soon as positionId is known
-    if (sl and sl > 0) or (tp and tp > 0):
+    if sl > 0 or tp > 0:
         PENDING_SLTP[int(ticket)] = {"symbol": mt5_symbol, "sl": float(sl), "tp": float(tp)}
 
     for account_name, (client, config) in account_manager.get_all_accounts().items():
@@ -478,40 +544,44 @@ def handle_pending_open_event(data, account_manager):
     """
     Pending order open (LIMIT / STOP / STOP_LIMIT).
 
-    Expected MT5 payload keys (recommended):
+    Canonical expected payload after bridge normalization:
       pending_type: 'limit' | 'stop' | 'stop_limit'
-      For LIMIT: entry_price (or limit_price)
-      For STOP: entry_price (or stop_price)
-      For STOP_LIMIT: stop_price + limit_price (preferred)
-
-    Also uses:
-      ticket, symbol, side/type, volume, sl, tp, magic
-      expiration_ms (optional): ms since epoch
+      ticket, symbol, side, volume, sl, tp, magic
+      entry_price / stop_price / limit_price
+      expiration_ms (optional)
     """
-    ticket = int(data.get("ticket"))
+    ticket = _to_int(data.get("ticket"))
     mt5_symbol = data.get("symbol")
-    side = data.get("side") or data.get("type")
-    volume = float(data.get("volume", 0))
-    sl = float(data.get("sl", 0))
-    tp = float(data.get("tp", 0))
-    magic = int(data.get("magic", 0))
+    side = str(data.get("side") or data.get("type") or "").strip().upper()
+    volume = _to_float(data.get("volume", 0), 0.0)
+    sl = _to_float(data.get("sl", 0), 0.0)
+    tp = _to_float(data.get("tp", 0), 0.0)
+    magic = _to_int(data.get("magic", 0), 0)
 
-    pending_type = (data.get("pending_type") or data.get("order_type") or "").strip().lower()
+    pending_type = _canonical_pending_type(data)
 
-    # Accept either "entry_price" or explicit stop/limit prices
-    entry_price = float(data.get("entry_price", 0) or 0)
-    stop_price = float(data.get("stop_price", 0) or 0)
-    limit_price = float(data.get("limit_price", 0) or 0)
+    entry_price = _to_float(data.get("entry_price", 0), 0.0)
+    stop_price = _to_float(data.get("stop_price", 0), 0.0)
+    limit_price = _to_float(data.get("limit_price", 0), 0.0)
+    expiration_ms = _to_int(data.get("expiration_ms", 0), 0)
 
-    expiration_ms = int(data.get("expiration_ms", 0) or 0)
+    if pending_type not in ("limit", "stop", "stop_limit"):
+        logger.warning(
+            f"PENDING_OPEN ignored for ticket {ticket}: unsupported pending_type={pending_type!r}"
+        )
+        return
 
-    # Backward-compatible defaults:
-    # - For LIMIT/STOP, if explicit field not provided, use entry_price
-    if pending_type in ("limit", "stop"):
-        if pending_type == "limit" and limit_price <= 0:
-            limit_price = entry_price
-        if pending_type == "stop" and stop_price <= 0:
+    if pending_type == "limit" and limit_price <= 0:
+        limit_price = entry_price
+
+    if pending_type == "stop" and stop_price <= 0:
+        stop_price = entry_price
+
+    if pending_type == "stop_limit":
+        if stop_price <= 0:
             stop_price = entry_price
+        if limit_price <= 0:
+            limit_price = entry_price
 
     logger.info(
         f"PENDING_OPEN event - Ticket: {ticket}, Symbol: {mt5_symbol}, Side: {side}, "
@@ -520,24 +590,24 @@ def handle_pending_open_event(data, account_manager):
         f"expiration_ms={expiration_ms}"
     )
 
-    # Determine pending order entry price for risk sizing
     pending_entry_price = 0.0
     if pending_type == "limit":
         pending_entry_price = float(limit_price or 0.0)
     elif pending_type == "stop":
         pending_entry_price = float(stop_price or 0.0)
     elif pending_type == "stop_limit":
-        # Prefer limit price as the actual fill target; if missing, use stop.
-        pending_entry_price = float(limit_price or 0.0) if float(limit_price or 0.0) > 0 else float(stop_price or 0.0)
+        pending_entry_price = (
+            float(limit_price or 0.0)
+            if float(limit_price or 0.0) > 0
+            else float(stop_price or 0.0)
+        )
 
     for account_name, (client, config) in account_manager.get_all_accounts().items():
         try:
-            # If money-risk modes are enabled, size volume here (override the source volume)
             rm = _risk_mode(config)
             sizing_volume = float(volume)
 
             if rm in ("FIXED_USD", "PERCENT_EQUITY"):
-                # Provide entry_price so resolver doesn't use quotes for pending orders
                 sizing_data = dict(data)
                 sizing_data["entry_price"] = float(pending_entry_price or 0.0)
 
@@ -549,10 +619,15 @@ def handle_pending_open_event(data, account_manager):
                     account_manager=account_manager,
                 )
                 if lots is None or float(lots) <= 0:
-                    logger.warning(f"[{account_name}] PENDING_OPEN rejected for ticket {ticket}: {decision}")
+                    logger.warning(
+                        f"[{account_name}] PENDING_OPEN rejected for ticket {ticket}: {decision}"
+                    )
                     continue
+
                 sizing_volume = float(lots)
-                logger.info(f"[{account_name}] PENDING_OPEN sizing: {decision}, lots={float(lots):.4f}")
+                logger.info(
+                    f"[{account_name}] PENDING_OPEN sizing: {decision}, lots={float(lots):.4f}"
+                )
 
             copy_pending_to_account(
                 account_name=account_name,
@@ -576,12 +651,11 @@ def handle_pending_open_event(data, account_manager):
 
 def handle_pending_cancel_event(data, account_manager):
     """
-    Cancel pending order by MT5 ticket.
+    Cancel pending order by master ticket.
 
     Uses AccountManager mapping: per-account ticket -> cTrader orderId.
-    (orderId is learned from ProtoOAExecutionEvent.order where label == MT5_<ticket>.)
     """
-    ticket = int(data.get("ticket", 0))
+    ticket = _to_int(data.get("ticket", 0), 0)
     mt5_symbol = data.get("symbol")
 
     logger.info(f"PENDING_CANCEL event - Ticket: {ticket}, Symbol: {mt5_symbol}")
@@ -603,10 +677,10 @@ def handle_pending_cancel_event(data, account_manager):
 
 
 def handle_modify_event(data, account_manager):
-    ticket = int(data.get("ticket"))
+    ticket = _to_int(data.get("ticket"))
     mt5_symbol = data.get("symbol")
-    new_sl = float(data.get("sl", 0))
-    new_tp = float(data.get("tp", 0))
+    new_sl = _to_float(data.get("sl", 0), 0.0)
+    new_tp = _to_float(data.get("tp", 0), 0.0)
 
     logger.info(
         f"MODIFY event - Ticket: {ticket}, Symbol: {mt5_symbol}, "
@@ -638,11 +712,11 @@ def handle_modify_event(data, account_manager):
 
 
 def handle_close_event(data, account_manager):
-    ticket = int(data.get("ticket"))
+    ticket = _to_int(data.get("ticket"))
     mt5_symbol = data.get("symbol")
 
-    close_lots = data.get("volume", None)
-    mt5_contract_size = float(data.get("mt5_contract_size", 0) or 0)
+    close_lots = _to_float_or_none(data.get("volume", None))
+    mt5_contract_size = _to_float(data.get("mt5_contract_size", 0), 0.0)
 
     logger.info(f"CLOSE event - Ticket: {ticket}, Symbol: {mt5_symbol}, close_lots={close_lots}")
 
@@ -658,39 +732,36 @@ def handle_close_event(data, account_manager):
                 continue
 
             symbol_id = _get_symbol_id_for_account(client, config, mt5_symbol)
-
             rm = _risk_mode(config)
-
             follower_units = account_manager.get_position_volume(account_name, position_id)
 
             close_units = None
 
-            # If master sent a partial close volume and follower is not SOURCE_VOLUME,
-            # close the same percentage of follower position based on remaining master size.
             if close_lots is not None and follower_units is not None and int(follower_units) > 0:
                 if rm != "SOURCE_VOLUME" and master_remaining_lots > 0:
                     pct = float(close_lots) / float(master_remaining_lots)
                     pct = max(0.0, min(1.0, pct))
                     close_units = int(round(pct * float(follower_units)))
+
                     logger.info(
                         f"[{account_name}] Proportional CLOSE: risk_mode={rm}, "
-                        f"master_close_lots={float(close_lots):.4f}, master_remaining_lots={master_remaining_lots:.4f}, "
+                        f"master_close_lots={float(close_lots):.4f}, "
+                        f"master_remaining_lots={master_remaining_lots:.4f}, "
                         f"pct={pct:.4f}, follower_units={int(follower_units)} -> close_units={close_units}"
                     )
-                    # update cumulative closed lots AFTER computing pct
+
                     MASTER_CLOSED_LOTS[int(ticket)] = master_closed_lots + float(close_lots)
                     master_closed_lots = MASTER_CLOSED_LOTS[int(ticket)]
                     master_remaining_lots = max(0.0, master_open_lots - master_closed_lots)
                 else:
-                    # Legacy behavior: treat MT5 close_lots as absolute lots-to-close
                     if mt5_contract_size > 0:
                         close_units = _lots_to_ctrader_cents(float(close_lots), mt5_contract_size)
+
                     logger.info(
                         f"[{account_name}] Absolute CLOSE: risk_mode={rm}, close_lots={close_lots}, "
                         f"mt5_contract_size={mt5_contract_size} -> close_units={close_units}"
                     )
 
-            # If close volume unknown/invalid, close full follower position
             if close_units is None or int(close_units) <= 0:
                 close_units = follower_units
 
@@ -701,7 +772,6 @@ def handle_close_event(data, account_manager):
                 )
                 continue
 
-            # Never try to close more than current follower volume
             if follower_units is not None and int(follower_units) > 0:
                 close_units = min(int(close_units), int(follower_units))
 
@@ -717,7 +787,6 @@ def handle_close_event(data, account_manager):
                 f"(ticket {ticket}) close_units={int(close_units)}"
             )
 
-            # If this was a full close on follower, remove mappings
             if follower_units is not None and int(close_units) >= int(follower_units):
                 account_manager.remove_mapping(account_name, ticket)
 
@@ -727,7 +796,6 @@ def handle_close_event(data, account_manager):
     if int(ticket) in PENDING_SLTP:
         del PENDING_SLTP[int(ticket)]
 
-    # Best-effort cleanup for master tracking (when MT5 sends final close with no volume)
     try:
         if close_lots is None:
             MASTER_OPEN_LOTS.pop(int(ticket), None)
