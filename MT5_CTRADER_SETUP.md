@@ -62,7 +62,7 @@ venv\Scripts\activate
 source venv/bin/activate
 
 # Install dependencies
-pip install twisted protobuf python-dotenv flask
+python -m pip install requests pyOpenSSL "Twisted==21.7.0" protobuf python-dotenv flask
 ```
 
 ### Step 3: Configure Environment Variables
