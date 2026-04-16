@@ -19,8 +19,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
-
 # Global pending SL/TP map: ticket -> dict(symbol, sl, tp)
 PENDING_SLTP = {}
 
@@ -150,7 +148,6 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             symbol_id=symbol_id,
         )
 
-        # done
         PENDING_SLTP.pop(int(ticket), None)
 
     def _handle_open(self, event):
@@ -168,7 +165,6 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             f"(ticket #{ticket}, magic {magic})"
         )
 
-        # Store pending SL/TP if provided
         if (sl and float(sl) > 0) or (tp and float(tp) > 0):
             PENDING_SLTP[int(ticket)] = {
                 "symbol": mt5_symbol,
@@ -193,7 +189,6 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                     magic,
                     event,
                 )
-                # Try to apply pending SL/TP immediately after order sent
                 self._try_apply_pending_sltp(account_name, client, config, ticket)
             except Exception as e:
                 logger.error(
@@ -306,7 +301,6 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                 f"volume_cents={volume_to_send}"
             )
 
-        # Send market order without SL/TP
         final_sl = None
         final_tp = None
 
@@ -349,7 +343,6 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
 
         for account_name, (client, config) in accounts.items():
             try:
-                # Try to apply any pending SL/TP first
                 self._try_apply_pending_sltp(account_name, client, config, ticket)
 
                 position_id = self.account_manager.get_position_id(account_name, ticket)
@@ -425,7 +418,6 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
 
         for account_name, (client, config) in accounts.items():
             try:
-                # Try to apply any pending SL/TP first
                 self._try_apply_pending_sltp(account_name, client, config, ticket)
 
                 position_id = self.account_manager.get_position_id(account_name, ticket)
@@ -528,7 +520,7 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                 )
 
 
-def run_http_server(host: str = "127.0.0.1", port: int = 3140):
+def run_http_server(host: str = "127.0.0.1", port: int = 80):
     """Run HTTP server in a separate thread."""
     server = HTTPServer((host, port), MT5BridgeHandler)
     logger.info(f"MT5 Bridge Server listening on {host}:{port}")
@@ -568,7 +560,14 @@ def main():
     MT5BridgeHandler.account_manager = account_manager
 
     logger.info("\nStarting HTTP server...")
-    server_thread = Thread(target=run_http_server, daemon=True)
+    HOST = "127.0.0.1"
+    PORT = 80
+
+    server_thread = Thread(
+        target=run_http_server,
+        args=(HOST, PORT),
+        daemon=True
+    )
     server_thread.start()
 
     logger.info("Bridge server is running. Press Ctrl+C to stop.")
@@ -582,4 +581,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("\nShutting down bridge server...")
         reactor.stop()
-
