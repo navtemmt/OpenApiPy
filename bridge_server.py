@@ -7,6 +7,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from app_state import logger
 from trade_processor import process_trade_event
+from event_normalizer import normalize_trade_event
 
 
 # Lightweight HTTP-layer de-dupe
@@ -58,17 +59,7 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(content_length).decode("utf-8")
             data = json.loads(body)
 
-            # Backward compatibility: normalize field names
-            # Support: 'action' (MT5), 'event' (old), 'event_type' (new)
-            if "event_type" not in data:
-                if "action" in data:
-                    data["event_type"] = str(data["action"]).upper()
-                elif "event" in data:
-                    data["event_type"] = str(data["event"]).upper()
-
-            # Normalize 'type' to 'side' (MT5 sends 'type': 'BUY'/'SELL')
-            if "type" in data and "side" not in data:
-                data["side"] = data["type"]
+            data = normalize_trade_event(data)
 
             logger.info(
                 f"Received trade event: {data.get('event_type')} "
@@ -95,7 +86,7 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             self.send_error(400, "Invalid JSON")
 
         except Exception as e:
-            logger.error(f"Error processing request: {e}")
+            logger.error(f"Error processing request: {e}", exc_info=True)
             self.send_error(500, "Internal server error")
 
     def do_GET(self):
