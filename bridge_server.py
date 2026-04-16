@@ -1,18 +1,16 @@
-"""HTTP server infrastructure for receiving MT5 trade events.
-Simplified HTTP request handler that delegates to trade processor.
-"""
+"""HTTP server infrastructure for receiving MT4/MT5 trade events."""
 import json
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from threading import Thread
 
 from app_state import logger
 from trade_processor import process_trade_event
 from event_normalizer import normalize_trade_event
 
 
-# Lightweight HTTP-layer de-dupe
 DEDUPE_WINDOW_MS = 2000
-_event_dedupe = {}  # (event_type, ticket) -> last_seen_ms
+_event_dedupe = {}
 
 
 def _now_ms() -> int:
@@ -29,7 +27,6 @@ def _should_drop_duplicate(data: dict) -> bool:
     now = _now_ms()
     key = _dedupe_key(data)
 
-    # prune occasionally
     if len(_event_dedupe) > 2000:
         cutoff = now - (DEDUPE_WINDOW_MS * 4)
         for k, ts in list(_event_dedupe.items()):
@@ -45,15 +42,12 @@ def _should_drop_duplicate(data: dict) -> bool:
 
 
 class MT5BridgeHandler(BaseHTTPRequestHandler):
-    """HTTP request handler for MT5 trade events."""
     account_manager = None
 
     def log_message(self, format, *args):
-        """Override to use Python logging instead of printing."""
         logger.info(f"{self.address_string()} - {format % args}")
 
     def do_POST(self):
-        """Handle POST request with trade event JSON."""
         try:
             content_length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_length).decode("utf-8")
@@ -90,21 +84,38 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             self.send_error(500, "Internal server error")
 
     def do_GET(self):
-        """Handle GET request - health check endpoint."""
         if self.path == "/health":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(
-                json.dumps({"status": "ok", "service": "MT5$to cTrader Bridge"}).encode("utf-8")
+                json.dumps({"status": "ok", "service": "MT5-to-cTrader Bridge"}).encode("utf-8")
             )
         else:
             self.send_error(404, "Not found")
 
 
-def run_http_server(host, port, account_manager):
-    """Start the HTTP server with the given configuration."""
+def _serve_http(host, port, account_manager):
     MT5BridgeHandler.account_manager = account_manager
     server = HTTPServer((host, port), MT5BridgeHandler)
     logger.info(f"HTTP server listening on {host}:{port}")
     server.serve_forever()
+
+
+def run_http_servers(host, ports, account_manager):
+    threads = []
+
+    for port in ports:
+        t = Thread(
+            target=_serve_http,
+            args=(host, int(port), account_manager),
+            daemon=True,
+        )
+        t.start()
+        threads.append(t)
+
+    return threads
+
+
+def run_http_server(host, port, account_manager):
+    _serve_http(host, port, account_manager)
