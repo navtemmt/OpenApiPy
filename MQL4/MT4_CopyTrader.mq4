@@ -3,7 +3,7 @@
 //| MT4 to cTrader Copy Trading EA                                   |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025"
-#property version   "1.13"
+#property version   "1.14"
 #property strict
 
 input string BridgeServerURL   = "http://127.0.0.1:3140";
@@ -22,7 +22,11 @@ int OnInit()
 {
    Print("MT4 CopyTrader EA initialized. Bridge server: ", BridgeServerURL);
 
-   UpdateTradeList();
+   // Startup sync existing live market orders first.
+   // This recovers missed/reverse positions after EA restart/reinit.
+   StartupSyncOpenTrades();
+
+   // Build baseline for pending orders, then discover any existing pendings once.
    UpdatePendingList();
 
    Print("Initial trades tracked: ", g_lastTradeCount,
