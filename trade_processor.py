@@ -55,6 +55,19 @@ def _to_float_or_none(value):
         return None
 
 
+def _to_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    raw = str(value).strip().lower()
+    if raw in ("1", "true", "yes", "y", "on"):
+        return True
+    if raw in ("0", "false", "no", "n", "off"):
+        return False
+    return default
+
+
 def _canonical_event_type(data: dict) -> str:
     raw = str(
         data.get("event_type")
@@ -148,6 +161,34 @@ def _risk_reference(config) -> str:
     return raw.strip().upper()
 
 
+def _startup_market_recovery_mode(config) -> str:
+    raw = str(getattr(config, "startup_market_recovery_mode", "skip") or "skip")
+    raw = raw.split(";", 1)[0].split("#", 1)[0].strip().lower()
+    if raw not in ("market", "market_or_pending", "skip"):
+        return "skip"
+    return raw
+
+
+def _startup_sync_market_orders_enabled(config) -> bool:
+    return bool(getattr(config, "startup_sync_market_orders", False))
+
+
+def _startup_market_max_distance_pips(config) -> float:
+    try:
+        v = float(getattr(config, "startup_market_max_distance_pips", 10.0) or 10.0)
+        return v if v >= 0 else 10.0
+    except Exception:
+        return 10.0
+
+
+def _startup_pending_expiration_ms(config) -> int:
+    try:
+        v = int(float(getattr(config, "startup_pending_expiration_ms", 0) or 0))
+        return v if v >= 0 else 0
+    except Exception:
+        return 0
+
+
 def _get_account_equity_or_balance(account_manager, account_name: str, config) -> float:
     ref = _risk_reference(config)
 
@@ -172,6 +213,42 @@ def _get_symbol_details(client, symbol_id: int):
         return client.symbol_details.get(int(symbol_id)) if hasattr(client, "symbol_details") else None
     except Exception:
         return None
+
+
+def _read_attr_or_key(obj, name, default=None):
+    if obj is None:
+        return default
+    try:
+        if isinstance(obj, dict):
+            return obj.get(name, default)
+        return getattr(obj, name, default)
+    except Exception:
+        return default
+
+
+def _first_positive_float(*values):
+    for value in values:
+        try:
+            f = float(value)
+            if f > 0:
+                return f
+        except Exception:
+            pass
+    return None
+
+
+def _symbol_pip_size(symbol) -> float:
+    try:
+        pip_pos = _read_attr_or_key(symbol, "pipPosition", None)
+        digits = _to_int(_read_attr_or_key(symbol, "digits", 0), 0)
+
+        if pip_pos is not None:
+            return float(10 ** (-int(pip_pos)))
+        if digits > 0:
+            return float(10 ** (-digits))
+    except Exception:
+        pass
+    return 0.0
 
 
 def _estimate_risk_ccy_per_1lot_from_symbol(symbol, entry_price: float, sl_price: float) -> float:
@@ -408,6 +485,175 @@ def _resolve_open_volume_for_account(data: dict, config, *, account_name=None, c
     return src_lots, f"{risk_mode}_USING_SOURCE_VOLUME_FOR_NOW"
 
 
+def _extract_open_entry_price(data: dict) -> float:
+    for key in ("entry_price", "open_price", "price", "entry", "openPrice"):
+        v = _to_float(data.get(key, 0), 0.0)
+        if v > 0:
+            return v
+    return 0.0
+
+
+def _is_startup_market_recovery(data: dict) -> bool:
+    if _to_bool(data.get("startup_sync"), False):
+        return True
+    if _to_bool(data.get("startup_recovery"), False):
+        return True
+    if _to_bool(data.get("is_startup_sync"), False):
+        return True
+    if _to_bool(data.get("recovery"), False):
+        return True
+
+    sync_origin = str(
+        data.get("sync_origin")
+        or data.get("origin")
+        or data.get("source")
+        or data.get("reason")
+        or ""
+    ).strip().lower()
+
+    return sync_origin in ("startup", "startup_sync", "startup_recovery", "recovery")
+
+
+def _quote_value_from_obj(obj, *names):
+    if obj is None:
+        return None
+
+    for name in names:
+        v = _read_attr_or_key(obj, name, None)
+        pv = _first_positive_float(v)
+        if pv is not None:
+            return pv
+
+    nested = _read_attr_or_key(obj, "quote", None)
+    if nested is not None:
+        for name in names:
+            v = _read_attr_or_key(nested, name, None)
+            pv = _first_positive_float(v)
+            if pv is not None:
+                return pv
+
+    return None
+
+
+def _get_current_market_price(client, symbol_id: int, side: str):
+    side = str(side or "").strip().upper()
+
+    symbol = _get_symbol_details(client, symbol_id)
+    quote_obj = None
+    try:
+        if hasattr(client, "symbol_quotes"):
+            quote_obj = client.symbol_quotes.get(int(symbol_id))
+    except Exception:
+        quote_obj = None
+
+    ask = _first_positive_float(
+        _quote_value_from_obj(quote_obj, "ask", "askPrice", "bestAsk"),
+        _quote_value_from_obj(symbol, "ask", "askPrice", "bestAsk"),
+    )
+    bid = _first_positive_float(
+        _quote_value_from_obj(quote_obj, "bid", "bidPrice", "bestBid"),
+        _quote_value_from_obj(symbol, "bid", "bidPrice", "bestBid"),
+    )
+
+    if side == "BUY":
+        return ask if ask is not None else bid
+    if side == "SELL":
+        return bid if bid is not None else ask
+    return ask if ask is not None else bid
+
+
+def _build_startup_recovery_plan(client, config, mt5_symbol: str, side: str, entry_price: float):
+    mode = _startup_market_recovery_mode(config)
+
+    if mode == "skip":
+        return {"action": "skip", "reason": "startup_market_recovery_mode=skip"}
+
+    if mode == "market":
+        return {"action": "market", "reason": "startup_market_recovery_mode=market"}
+
+    symbol_id = _get_symbol_id_for_account(client, config, mt5_symbol)
+    if symbol_id is None:
+        return {"action": "skip", "reason": "startup recovery: no symbol_id"}
+
+    symbol = _get_symbol_details(client, int(symbol_id))
+    if symbol is None:
+        return {"action": "skip", "reason": "startup recovery: no symbol details"}
+
+    if float(entry_price or 0.0) <= 0:
+        return {"action": "skip", "reason": "startup recovery: missing entry_price"}
+
+    current_price = _get_current_market_price(client, int(symbol_id), side)
+    if current_price is None or float(current_price) <= 0:
+        return {"action": "skip", "reason": "startup recovery: current market price unavailable"}
+
+    pip_size = _symbol_pip_size(symbol)
+    if pip_size <= 0:
+        return {"action": "skip", "reason": "startup recovery: invalid pip size"}
+
+    distance_pips = abs(float(current_price) - float(entry_price)) / float(pip_size)
+    max_distance_pips = _startup_market_max_distance_pips(config)
+
+    if distance_pips <= max_distance_pips:
+        return {
+            "action": "market",
+            "reason": (
+                f"startup recovery: current={float(current_price):.5f}, "
+                f"entry={float(entry_price):.5f}, distance_pips={distance_pips:.2f} "
+                f"<= max_distance_pips={max_distance_pips:.2f}"
+            ),
+        }
+
+    side = str(side or "").strip().upper()
+
+    if side == "BUY":
+        if float(current_price) > float(entry_price):
+            return {
+                "action": "pending",
+                "pending_type": "limit",
+                "limit_price": float(entry_price),
+                "stop_price": 0.0,
+                "reason": (
+                    f"startup recovery BUY -> LIMIT at entry: current={float(current_price):.5f}, "
+                    f"entry={float(entry_price):.5f}, distance_pips={distance_pips:.2f}"
+                ),
+            }
+        return {
+            "action": "pending",
+            "pending_type": "stop",
+            "stop_price": float(entry_price),
+            "limit_price": 0.0,
+            "reason": (
+                f"startup recovery BUY -> STOP at entry: current={float(current_price):.5f}, "
+                f"entry={float(entry_price):.5f}, distance_pips={distance_pips:.2f}"
+            ),
+        }
+
+    if side == "SELL":
+        if float(current_price) < float(entry_price):
+            return {
+                "action": "pending",
+                "pending_type": "limit",
+                "limit_price": float(entry_price),
+                "stop_price": 0.0,
+                "reason": (
+                    f"startup recovery SELL -> LIMIT at entry: current={float(current_price):.5f}, "
+                    f"entry={float(entry_price):.5f}, distance_pips={distance_pips:.2f}"
+                ),
+            }
+        return {
+            "action": "pending",
+            "pending_type": "stop",
+            "stop_price": float(entry_price),
+            "limit_price": 0.0,
+            "reason": (
+                f"startup recovery SELL -> STOP at entry: current={float(current_price):.5f}, "
+                f"entry={float(entry_price):.5f}, distance_pips={distance_pips:.2f}"
+            ),
+        }
+
+    return {"action": "skip", "reason": f"startup recovery: unsupported side={side!r}"}
+
+
 def try_apply_pending_sltp(account_name, client, config, ticket, account_manager):
     pending = PENDING_SLTP.get(int(ticket))
     if not pending:
@@ -496,10 +742,13 @@ def handle_open_event(data, account_manager):
     sl = _to_float(data.get("sl", 0), 0.0)
     tp = _to_float(data.get("tp", 0), 0.0)
     magic = _to_int(data.get("magic", 0), 0)
+    entry_price = _extract_open_entry_price(data)
+    is_startup_recovery = _is_startup_market_recovery(data)
 
     logger.info(
         f"OPEN event - Ticket: {ticket}, Symbol: {mt5_symbol}, "
-        f"Side: {side}, Volume: {src_volume}, SL: {sl}, TP: {tp}"
+        f"Side: {side}, Volume: {src_volume}, SL: {sl}, TP: {tp}, "
+        f"EntryPrice: {entry_price}, StartupRecovery: {is_startup_recovery}"
     )
 
     if src_volume > 0:
@@ -511,6 +760,14 @@ def handle_open_event(data, account_manager):
 
     for account_name, (client, config) in account_manager.get_all_accounts().items():
         try:
+            existing_position_id = account_manager.get_position_id(account_name, int(ticket))
+            if existing_position_id:
+                logger.info(
+                    f"[{account_name}] OPEN skip for ticket {ticket}: "
+                    f"already mapped to positionId={existing_position_id}"
+                )
+                continue
+
             lots, decision = _resolve_open_volume_for_account(
                 data,
                 config,
@@ -523,6 +780,49 @@ def handle_open_event(data, account_manager):
                 continue
 
             logger.info(f"[{account_name}] OPEN sizing: {decision}, lots={float(lots):.4f}")
+
+            if is_startup_recovery:
+                if not _startup_sync_market_orders_enabled(config):
+                    logger.info(
+                        f"[{account_name}] Startup recovery skipped for ticket {ticket}: "
+                        f"startup_sync_market_orders=false"
+                    )
+                    continue
+
+                recovery_plan = _build_startup_recovery_plan(
+                    client=client,
+                    config=config,
+                    mt5_symbol=mt5_symbol,
+                    side=side,
+                    entry_price=entry_price,
+                )
+
+                logger.info(
+                    f"[{account_name}] Startup recovery decision for ticket {ticket}: "
+                    f"{recovery_plan.get('reason', recovery_plan.get('action'))}"
+                )
+
+                if recovery_plan.get("action") == "skip":
+                    continue
+
+                if recovery_plan.get("action") == "pending":
+                    copy_pending_to_account(
+                        account_name=account_name,
+                        client=client,
+                        config=config,
+                        ticket=ticket,
+                        mt5_symbol=mt5_symbol,
+                        side=side,
+                        volume=float(lots),
+                        sl=sl,
+                        tp=tp,
+                        magic=magic,
+                        pending_type=recovery_plan.get("pending_type", "limit"),
+                        stop_price=float(recovery_plan.get("stop_price", 0.0) or 0.0),
+                        limit_price=float(recovery_plan.get("limit_price", 0.0) or 0.0),
+                        expiration_ms=_startup_pending_expiration_ms(config),
+                    )
+                    continue
 
             copy_open_to_account(
                 account_name=account_name,
