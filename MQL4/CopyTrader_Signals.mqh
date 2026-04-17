@@ -38,15 +38,20 @@ void SendOpenSignal(int ticket, bool startupSync = false)
    int    magic     = OrderMagicNumber();
 
    double contract_size = 0.0;
-   double vol_min = 0.0;
-   double vol_max = 0.0;
-   double vol_step = 0.0;
+   double vol_min       = 0.0;
+   double vol_max       = 0.0;
+   double vol_step      = 0.0;
    GetSymbolTradeMeta(symbol, contract_size, vol_min, vol_max, vol_step);
 
    string tradeType = (type == OP_BUY) ? "BUY" : "SELL";
+
    int priceDigits = (int)MarketInfo(symbol, MODE_DIGITS);
    if(priceDigits <= 0)
       priceDigits = Digits;
+
+   double currentBid = MarketInfo(symbol, MODE_BID);
+   double currentAsk = MarketInfo(symbol, MODE_ASK);
+   double pointSize  = MarketInfo(symbol, MODE_POINT);
 
    string startupSyncStr = startupSync ? "true" : "false";
    string syncOrigin     = startupSync ? "startup" : "live";
@@ -62,6 +67,10 @@ void SendOpenSignal(int ticket, bool startupSync = false)
       "\"price\":" + DoubleToString(openPrice, priceDigits) + ","
       "\"entry_price\":" + DoubleToString(openPrice, priceDigits) + ","
       "\"open_price\":" + DoubleToString(openPrice, priceDigits) + ","
+      "\"current_bid\":" + DoubleToString(currentBid, priceDigits) + ","
+      "\"current_ask\":" + DoubleToString(currentAsk, priceDigits) + ","
+      "\"point\":" + DoubleToString(pointSize, priceDigits) + ","
+      "\"digits\":" + IntegerToString(priceDigits) + ","
       "\"sl\":" + DoubleToString(sl, priceDigits) + ","
       "\"tp\":" + DoubleToString(tp, priceDigits) + ","
       "\"magic\":" + IntegerToString(magic) + ","
@@ -78,6 +87,8 @@ void SendOpenSignal(int ticket, bool startupSync = false)
    Print("Sent OPEN signal for ticket #", ticket,
          ": ", symbol, " ", tradeType, " ", DoubleToString(volume, 2),
          " openPrice=", DoubleToString(openPrice, priceDigits),
+         " bid=", DoubleToString(currentBid, priceDigits),
+         " ask=", DoubleToString(currentAsk, priceDigits),
          " startupSync=", startupSyncStr);
 }
 
