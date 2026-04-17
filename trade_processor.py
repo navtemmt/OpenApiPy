@@ -562,7 +562,71 @@ def _get_current_market_price(client, symbol_id: int, side: str):
     return ask if ask is not None else bid
 
 
-def _build_startup_recovery_plan(client, config, mt5_symbol: str, side: str, entry_price: float):
+def _extract_mt_current_market_price(data: dict, side: str):
+    side = str(side or "").strip().upper()
+
+    ask = _first_positive_float(
+        data.get("current_ask"),
+        data.get("ask"),
+        data.get("ask_price"),
+        data.get("mt5_ask"),
+        data.get("symbol_ask"),
+    )
+    bid = _first_positive_float(
+        data.get("current_bid"),
+        data.get("bid"),
+        data.get("bid_price"),
+        data.get("mt5_bid"),
+        data.get("symbol_bid"),
+    )
+    last = _first_positive_float(
+        data.get("current_price"),
+        data.get("price_current"),
+        data.get("market_price"),
+        data.get("last_price"),
+        data.get("last"),
+    )
+
+    if side == "BUY":
+        return ask if ask is not None else (last if last is not None else bid)
+    if side == "SELL":
+        return bid if bid is not None else (last if last is not None else ask)
+    return last if last is not None else (ask if ask is not None else bid)
+
+
+def _extract_mt_pip_size(data: dict) -> float:
+    direct = _first_positive_float(
+        data.get("pip_size"),
+        data.get("pipSize"),
+        data.get("point"),
+        data.get("Point"),
+        data.get("tick_size"),
+        data.get("tickSize"),
+    )
+    if direct is not None and direct > 0:
+        return float(direct)
+
+    pip_pos = data.get("pip_position", data.get("pipPosition", None))
+    try:
+        if pip_pos is not None and str(pip_pos) != "":
+            return float(10 ** (-int(float(pip_pos))))
+    except Exception:
+        pass
+
+    digits = data.get("digits", data.get("mt5_digits", data.get("symbol_digits", None)))
+    try:
+        if digits is not None and str(digits) != "":
+            d = int(float(digits))
+            if d > 0:
+                return float(10 ** (-d))
+    except Exception:
+        pass
+
+    return 0.0
+
+
+def _build_startup_recovery_plan(client, config, mt5_symbol: str, side: str, entry_price: float, data: dict = None):
+    data = data or {}
     mode = _startup_market_recovery_mode(config)
 
     if mode == "skip":
@@ -571,22 +635,29 @@ def _build_startup_recovery_plan(client, config, mt5_symbol: str, side: str, ent
     if mode == "market":
         return {"action": "market", "reason": "startup_market_recovery_mode=market"}
 
+    if float(entry_price or 0.0) <= 0:
+        return {"action": "skip", "reason": "startup recovery: missing entry_price"}
+
     symbol_id = _get_symbol_id_for_account(client, config, mt5_symbol)
     if symbol_id is None:
         return {"action": "skip", "reason": "startup recovery: no symbol_id"}
 
     symbol = _get_symbol_details(client, int(symbol_id))
-    if symbol is None:
-        return {"action": "skip", "reason": "startup recovery: no symbol details"}
 
-    if float(entry_price or 0.0) <= 0:
-        return {"action": "skip", "reason": "startup recovery: missing entry_price"}
+    current_price = _extract_mt_current_market_price(data, side)
+    current_price_source = "mt"
 
-    current_price = _get_current_market_price(client, int(symbol_id), side)
     if current_price is None or float(current_price) <= 0:
-        return {"action": "skip", "reason": "startup recovery: current market price unavailable"}
+        current_price = _get_current_market_price(client, int(symbol_id), side)
+        current_price_source = "ctrader"
 
-    pip_size = _symbol_pip_size(symbol)
+    if current_price is None or float(current_price) <= 0:
+        return {"action": "skip", "reason": "startup recovery: current market price unavailable from mt/cTrader"}
+
+    pip_size = _symbol_pip_size(symbol) if symbol is not None else 0.0
+    if pip_size <= 0:
+        pip_size = _extract_mt_pip_size(data)
+
     if pip_size <= 0:
         return {"action": "skip", "reason": "startup recovery: invalid pip size"}
 
@@ -597,7 +668,8 @@ def _build_startup_recovery_plan(client, config, mt5_symbol: str, side: str, ent
         return {
             "action": "market",
             "reason": (
-                f"startup recovery: current={float(current_price):.5f}, "
+                f"startup recovery ({current_price_source} quote): "
+                f"current={float(current_price):.5f}, "
                 f"entry={float(entry_price):.5f}, distance_pips={distance_pips:.2f} "
                 f"<= max_distance_pips={max_distance_pips:.2f}"
             ),
@@ -613,7 +685,8 @@ def _build_startup_recovery_plan(client, config, mt5_symbol: str, side: str, ent
                 "limit_price": float(entry_price),
                 "stop_price": 0.0,
                 "reason": (
-                    f"startup recovery BUY -> LIMIT at entry: current={float(current_price):.5f}, "
+                    f"startup recovery BUY -> LIMIT at entry ({current_price_source} quote): "
+                    f"current={float(current_price):.5f}, "
                     f"entry={float(entry_price):.5f}, distance_pips={distance_pips:.2f}"
                 ),
             }
@@ -623,7 +696,8 @@ def _build_startup_recovery_plan(client, config, mt5_symbol: str, side: str, ent
             "stop_price": float(entry_price),
             "limit_price": 0.0,
             "reason": (
-                f"startup recovery BUY -> STOP at entry: current={float(current_price):.5f}, "
+                f"startup recovery BUY -> STOP at entry ({current_price_source} quote): "
+                f"current={float(current_price):.5f}, "
                 f"entry={float(entry_price):.5f}, distance_pips={distance_pips:.2f}"
             ),
         }
@@ -636,7 +710,8 @@ def _build_startup_recovery_plan(client, config, mt5_symbol: str, side: str, ent
                 "limit_price": float(entry_price),
                 "stop_price": 0.0,
                 "reason": (
-                    f"startup recovery SELL -> LIMIT at entry: current={float(current_price):.5f}, "
+                    f"startup recovery SELL -> LIMIT at entry ({current_price_source} quote): "
+                    f"current={float(current_price):.5f}, "
                     f"entry={float(entry_price):.5f}, distance_pips={distance_pips:.2f}"
                 ),
             }
@@ -646,7 +721,8 @@ def _build_startup_recovery_plan(client, config, mt5_symbol: str, side: str, ent
             "stop_price": float(entry_price),
             "limit_price": 0.0,
             "reason": (
-                f"startup recovery SELL -> STOP at entry: current={float(current_price):.5f}, "
+                f"startup recovery SELL -> STOP at entry ({current_price_source} quote): "
+                f"current={float(current_price):.5f}, "
                 f"entry={float(entry_price):.5f}, distance_pips={distance_pips:.2f}"
             ),
         }
@@ -795,6 +871,7 @@ def handle_open_event(data, account_manager):
                     mt5_symbol=mt5_symbol,
                     side=side,
                     entry_price=entry_price,
+                    data=data,
                 )
 
                 logger.info(
