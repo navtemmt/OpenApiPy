@@ -6,6 +6,16 @@ bool IsMarketOrderType(int type)
    return (type == OP_BUY || type == OP_SELL);
 }
 
+bool IsTrackedTradeTicket(int ticket)
+{
+   for(int i = 0; i < g_lastTradeCount; i++)
+   {
+      if(g_lastTrades[i].ticket == ticket)
+         return true;
+   }
+   return false;
+}
+
 void UpdateTradeList()
 {
    int totalOrders = OrdersTotal();
@@ -26,13 +36,13 @@ void UpdateTradeList()
       if(MagicNumberFilter != "" && magic != StringToInteger(MagicNumberFilter))
          continue;
 
-      g_lastTrades[idx].ticket     = OrderTicket();
-      g_lastTrades[idx].symbol     = OrderSymbol();
-      g_lastTrades[idx].type       = type;
-      g_lastTrades[idx].volume     = OrderLots();
-      g_lastTrades[idx].openPrice  = OrderOpenPrice();
-      g_lastTrades[idx].stopLoss   = OrderStopLoss();
-      g_lastTrades[idx].takeProfit = OrderTakeProfit();
+      g_lastTrades[idx].ticket      = OrderTicket();
+      g_lastTrades[idx].symbol      = OrderSymbol();
+      g_lastTrades[idx].type        = type;
+      g_lastTrades[idx].volume      = OrderLots();
+      g_lastTrades[idx].openPrice   = OrderOpenPrice();
+      g_lastTrades[idx].stopLoss    = OrderStopLoss();
+      g_lastTrades[idx].takeProfit  = OrderTakeProfit();
       g_lastTrades[idx].magicNumber = magic;
 
       idx++;
@@ -40,6 +50,44 @@ void UpdateTradeList()
 
    g_lastTradeCount = idx;
    ArrayResize(g_lastTrades, g_lastTradeCount);
+}
+
+void StartupSyncOpenTrades()
+{
+   int totalOrders = OrdersTotal();
+   int syncedCount = 0;
+
+   for(int i = 0; i < totalOrders; i++)
+   {
+      if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+         continue;
+
+      int type = OrderType();
+      if(!IsMarketOrderType(type))
+         continue;
+
+      int ticket = OrderTicket();
+      long magic = OrderMagicNumber();
+
+      if(MagicNumberFilter != "" && magic != StringToInteger(MagicNumberFilter))
+         continue;
+
+      if(IsTrackedTradeTicket(ticket))
+         continue;
+
+      PrintFormat("Startup market sync: sending OPEN for existing ticket=%d symbol=%s lots=%.2f openPrice=%.5f",
+                  ticket, OrderSymbol(), OrderLots(), OrderOpenPrice());
+
+      // Requires CopyTrader_Signals.mqh to support:
+      // void SendOpenSignal(int ticket, bool startupSync=false)
+      SendOpenSignal(ticket, true);
+      syncedCount++;
+   }
+
+   PrintFormat("Startup market sync complete: syncedCount=%d", syncedCount);
+
+   // Refresh baseline after sending startup sync events
+   UpdateTradeList();
 }
 
 void CheckTradeChanges()
@@ -55,7 +103,7 @@ void CheckTradeChanges()
       if(!IsMarketOrderType(type))
          continue;
 
-      int ticket   = OrderTicket();
+      int ticket    = OrderTicket();
       string symbol = OrderSymbol();
       long magic    = OrderMagicNumber();
 
@@ -97,7 +145,13 @@ void CheckTradeChanges()
       }
 
       if(isNew)
-         SendOpenSignal(ticket);
+      {
+         PrintFormat("New market trade detected: ticket=%d symbol=%s lots=%.2f openPrice=%.5f",
+                     ticket, symbol, currentVol, OrderOpenPrice());
+
+         // Normal live open, not startup recovery
+         SendOpenSignal(ticket, false);
+      }
    }
 
    for(int i = 0; i < g_lastTradeCount; i++)
