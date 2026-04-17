@@ -540,11 +540,19 @@ def _get_current_market_price(client, symbol_id: int, side: str):
 
     symbol = _get_symbol_details(client, symbol_id)
     quote_obj = None
+
     try:
-        if hasattr(client, "symbol_quotes"):
-            quote_obj = client.symbol_quotes.get(int(symbol_id))
+        if hasattr(client, "spot_quotes"):
+            quote_obj = client.spot_quotes.get(int(symbol_id))
     except Exception:
         quote_obj = None
+
+    if quote_obj is None:
+        try:
+            if hasattr(client, "symbol_quotes"):
+                quote_obj = client.symbol_quotes.get(int(symbol_id))
+        except Exception:
+            quote_obj = None
 
     ask = _first_positive_float(
         _quote_value_from_obj(quote_obj, "ask", "askPrice", "bestAsk"),
