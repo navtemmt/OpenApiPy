@@ -4,12 +4,12 @@
 
 This system enables automatic copy trading from MetaTrader to cTrader using:
 
-- **MT4/MT5 CopyTrader EA**: Expert Advisor that monitors trades and sends HTTP/JSON trade events
-- **main.py**: Current runtime entrypoint that initializes accounts, starts the Twisted reactor, and launches the HTTP server
-- **bridge_server.py**: HTTP receiver that accepts trade events, normalizes payloads, de-duplicates events, and forwards them for processing
-- **trade_processor.py**: Business-logic layer that handles OPEN, PENDING_OPEN, PENDING_CANCEL, MODIFY, and CLOSE events
-- **trade_executor.py**: Executes the corresponding actions on follower cTrader accounts
-- **cTrader Open API**: Official API used for authentication, symbol access, and order execution
+- **MT4/MT5 CopyTrader EA**: Expert Advisor that monitors trades and sends HTTP/JSON trade events.
+- **main.py**: Current runtime entrypoint that initializes accounts, starts the Twisted reactor, and launches the HTTP server.
+- **bridge_server.py**: HTTP receiver that accepts trade events, normalizes payloads, de-duplicates events, and forwards them for processing.
+- **trade_processor.py**: Business-logic layer that handles OPEN, PENDING_OPEN, PENDING_CANCEL, MODIFY, and CLOSE events.
+- **trade_executor.py**: Executes the corresponding actions on follower cTrader accounts.
+- **cTrader Open API**: Official API used for authentication, symbol access, and order execution.
 
 ## Architecture
 
@@ -42,11 +42,11 @@ cTrader Account(s)
 
 ### 2. cTrader Open API Setup
 
-1. Go to https://openapi.ctrader.com/
-2. Log in with your cTrader ID
-3. Create a new application
-4. Save your Client ID and Client Secret
-5. Use the redirect URI required by the authentication helper in this repository
+1. Go to https://openapi.ctrader.com/ and sign in with your cTrader ID. [web:335]
+2. Create a new Open API application. [web:335]
+3. Save your **Client ID** and **Client Secret**. [web:324][web:335]
+4. Add the redirect URI required by the authentication helper used in this repository. [web:324][web:335]
+5. Make sure the app has the scope you need, typically `trading` if the bridge will place and manage orders. [web:324]
 
 ## Installation Steps
 
@@ -79,24 +79,42 @@ Copy the example file and edit it with your cTrader credentials:
 cp .env.example .env
 ```
 
-### Step 4: Configure Account Settings
+At minimum, you will usually need your Open API client credentials and one or more numeric cTrader trading account IDs in the runtime config used by this project. The Open API account-auth flow uses `ctidTraderAccountId`, so this must be the numeric **trading account ID**, not just your cTrader ID login. [web:324][web:339]
+
+### Step 4: Find Your cTrader Account ID
+
+If you do not know the numeric cTrader trading account ID required by `.env` or `accounts_config.ini`, run the repository test client first:
+
+```bash
+python test_client.py
+```
+
+Use its output to identify the authorized trading account ID and place that numeric value into your local configuration. This is important because a single cTrader ID can be linked to multiple trading accounts, and Open API account authorization is performed against a specific `ctidTraderAccountId`. [web:324][web:330]
+
+### Step 5: Configure Account Settings
 
 Set up your account and symbol settings in the repository config files used by the current runtime, then confirm the enabled accounts load correctly when starting the bridge.
 
-### Step 5: Install the CopyTrader EA
+Typical places to review:
 
-1. Copy the EA source file into your MT4 or MT5 Experts folder
-2. Open MetaEditor
-3. Compile the EA
-4. In MetaTrader, go to **Tools > Options > Expert Advisors**
-5. Enable **Allow WebRequest for listed URLs**
+- `.env`
+- `accounts_config.ini`
+- Any per-account symbol prefix, suffix, or custom symbol mapping settings used by your runtime
+
+### Step 6: Install the CopyTrader EA
+
+1. Copy the EA source file into your MT4 or MT5 `Experts` folder.
+2. Open MetaEditor.
+3. Compile the EA.
+4. In MetaTrader, go to **Tools > Options > Expert Advisors**.
+5. Enable **Allow WebRequest for listed URLs**.
 6. Add the exact bridge base URL you will use, for example:
 
 ```text
 http://127.0.0.1:3140
 ```
 
-### Step 6: Start the Bridge
+### Step 7: Start the Bridge
 
 Run the current entrypoint:
 
@@ -104,35 +122,36 @@ Run the current entrypoint:
 python main.py
 ```
 
-The bridge host and port are provided to `bridge_server.py` by `main.py`.  
-If you do not override them in config, the default startup values are:
+The bridge host and port are provided to `bridge_server.py` by `main.py`. If you do not override them in config, the default startup values are:
 
 ```text
 Host: 127.0.0.1
 Port: 3140
 ```
 
-### Step 7: Attach EA to Chart
+### Step 8: Attach EA to Chart
 
-1. Open any chart in MT4 or MT5
-2. Attach the CopyTrader EA
+1. Open any chart in MT4 or MT5.
+2. Attach the CopyTrader EA.
 3. Configure parameters:
    - **BridgeServerURL**: `http://127.0.0.1:3140`
    - **RequestTimeout**: `5000`
    - **MagicNumberFilter**: leave empty to copy all trades, or set a magic number filter
    - **CopyPendingOrders**: `true`
-4. Click OK
+4. Click OK.
 
 ## Usage
 
 1. Start the bridge:
+
    ```bash
    python main.py
    ```
-2. Attach the EA to a chart
-3. Open, modify, or close trades in MetaTrader
-4. The bridge receives the JSON event through `bridge_server.py`
-5. The event is processed and copied to the configured cTrader follower account(s)
+
+2. Attach the EA to a chart.
+3. Open, modify, or close trades in MetaTrader.
+4. The bridge receives the JSON event through `bridge_server.py`.
+5. The event is processed and copied to the configured cTrader follower account(s).
 
 ## Supported Event Flow
 
@@ -168,23 +187,31 @@ Do not use `mt5_bridge_server.py` as the main startup command in the current ref
 ### MetaTrader WebRequest errors
 
 **Problem**: `WebRequest error: 5200`  
-- Cause: URL format is invalid or not whitelisted
-- Fix: Use the exact same URL in both EA settings and MetaTrader WebRequest allow-list, for example `http://127.0.0.1:3140`
+- Cause: URL format is invalid or not whitelisted.
+- Fix: Use the exact same URL in both EA settings and MetaTrader WebRequest allow-list, for example `http://127.0.0.1:3140`.
 
 **Problem**: `WebRequest error: 5203`  
-- Cause: Request failed because the bridge is unreachable
-- Fix: Make sure `python main.py` is running and listening on the configured host and port
+- Cause: Request failed because the bridge is unreachable.
+- Fix: Make sure `python main.py` is running and listening on the configured host and port.
 
 **Problem**: EA not sending signals  
-- Fix: Confirm AutoTrading is enabled, the EA is attached correctly, and the bridge URL is allowed in MetaTrader
+- Fix: Confirm AutoTrading is enabled, the EA is attached correctly, and the bridge URL is allowed in MetaTrader.
+
+### cTrader authentication issues
+
+**Problem**: App authentication succeeds, but account operations fail.  
+- Fix: Confirm you are using the correct numeric trading account ID, not only your cTrader ID login, because account authorization uses `ctidTraderAccountId`. [web:324][web:339]
+
+**Problem**: You are unsure which account ID to use in config.  
+- Fix: Run `python test_client.py` and use the authorized account list or account details it returns to identify the correct account. [web:324]
 
 ### Bridge issues
 
 **Problem**: Bridge does not receive requests  
-- Fix: Confirm startup is done through `python main.py` and verify the configured host/port values
+- Fix: Confirm startup is done through `python main.py` and verify the configured host/port values.
 
 **Problem**: Trade event reaches the bridge but logs `Unknown event type`  
-- Fix: Confirm the payload is being normalized into canonical event names before processing
+- Fix: Confirm the payload is being normalized into canonical event names before processing.
 
 ## File Structure
 
@@ -196,6 +223,7 @@ OpenApiPy/
 ├── trade_executor.py
 ├── account_manager.py
 ├── config_loader.py
+├── test_client.py
 ├── MT5_CTRADER_SETUP.md
 ├── .env.example
 └── .env
@@ -203,7 +231,8 @@ OpenApiPy/
 
 ## Notes
 
-- `main.py` is the current startup entrypoint
-- `bridge_server.py` is the active HTTP server
-- `trade_processor.py` handles normalized canonical trade events
-- `mt5_bridge_server.py` is a legacy file and is not the active runtime path in the current refactor branch
+- `main.py` is the current startup entrypoint.
+- `bridge_server.py` is the active HTTP server.
+- `trade_processor.py` handles normalized canonical trade events.
+- `test_client.py` is useful for validating Open API connectivity and discovering the numeric trading account ID needed for local configuration.
+- `mt5_bridge_server.py` is a legacy file and is not the active runtime path in the current refactor branch.
