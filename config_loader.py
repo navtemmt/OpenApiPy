@@ -38,7 +38,7 @@ class AccountConfig:
     copy_sl: bool
     copy_tp: bool
 
-    # Risk sizing (NEW)
+    # Risk sizing
     risk_mode: str  # SOURCE_VOLUME | FIXED_LOT | PERCENT_EQUITY | FIXED_USD
     reject_if_no_sl: bool
     fixed_lot: float
@@ -46,6 +46,12 @@ class AccountConfig:
     fixed_usd_risk: float
     risk_percent: float
     risk_reference: str  # EQUITY | BALANCE
+
+    # Startup sync for missed live market positions
+    startup_sync_market_orders: bool
+    startup_market_recovery_mode: str  # market | market_or_pending | skip
+    startup_market_max_distance_pips: float
+    startup_pending_expiration_ms: int
 
     # Risk management
     max_daily_trades: int
@@ -167,7 +173,7 @@ class MultiAccountConfig:
         if blocked_str.strip():
             blocked_symbols = {s.strip().upper() for s in blocked_str.split(",") if s.strip()}
 
-        # NEW: risk sizing config
+        # Risk sizing config
         risk_mode = self.config.get(section, "risk_mode", fallback="SOURCE_VOLUME").strip().upper()
         reject_if_no_sl = self.config.getboolean(section, "reject_if_no_sl", fallback=False)
         fixed_lot = self.config.getfloat(section, "fixed_lot", fallback=0.0)
@@ -176,7 +182,21 @@ class MultiAccountConfig:
         risk_percent = self.config.getfloat(section, "risk_percent", fallback=0.0)
         risk_reference = self.config.get(section, "risk_reference", fallback="EQUITY").strip().upper()
 
-        # sanitize
+        # Startup sync config for missed live market positions
+        startup_sync_market_orders = self.config.getboolean(
+            section, "startup_sync_market_orders", fallback=False
+        )
+        startup_market_recovery_mode = self.config.get(
+            section, "startup_market_recovery_mode", fallback="skip"
+        ).strip().lower()
+        startup_market_max_distance_pips = self.config.getfloat(
+            section, "startup_market_max_distance_pips", fallback=10.0
+        )
+        startup_pending_expiration_ms = self.config.getint(
+            section, "startup_pending_expiration_ms", fallback=0
+        )
+
+        # Sanitize risk settings
         if risk_reference not in ("EQUITY", "BALANCE"):
             logger.warning(f"{section}: Invalid risk_reference={risk_reference}, defaulting to EQUITY")
             risk_reference = "EQUITY"
@@ -184,6 +204,28 @@ class MultiAccountConfig:
         if risk_mode not in ("SOURCE_VOLUME", "FIXED_LOT", "PERCENT_EQUITY", "FIXED_USD"):
             logger.warning(f"{section}: Invalid risk_mode={risk_mode}, defaulting to SOURCE_VOLUME")
             risk_mode = "SOURCE_VOLUME"
+
+        # Sanitize startup sync settings
+        if startup_market_recovery_mode not in ("market", "market_or_pending", "skip"):
+            logger.warning(
+                f"{section}: Invalid startup_market_recovery_mode="
+                f"{startup_market_recovery_mode}, defaulting to skip"
+            )
+            startup_market_recovery_mode = "skip"
+
+        if startup_market_max_distance_pips < 0:
+            logger.warning(
+                f"{section}: Invalid startup_market_max_distance_pips="
+                f"{startup_market_max_distance_pips}, defaulting to 10.0"
+            )
+            startup_market_max_distance_pips = 10.0
+
+        if startup_pending_expiration_ms < 0:
+            logger.warning(
+                f"{section}: Invalid startup_pending_expiration_ms="
+                f"{startup_pending_expiration_ms}, defaulting to 0"
+            )
+            startup_pending_expiration_ms = 0
 
         return AccountConfig(
             name=section.replace("Account_", ""),
@@ -208,6 +250,10 @@ class MultiAccountConfig:
             fixed_usd_risk=fixed_usd_risk,
             risk_percent=risk_percent,
             risk_reference=risk_reference,
+            startup_sync_market_orders=startup_sync_market_orders,
+            startup_market_recovery_mode=startup_market_recovery_mode,
+            startup_market_max_distance_pips=startup_market_max_distance_pips,
+            startup_pending_expiration_ms=startup_pending_expiration_ms,
             max_daily_trades=self.config.getint(section, "max_daily_trades", fallback=1000),
             max_concurrent_positions=self.config.getint(section, "max_concurrent_positions", fallback=100),
             magic_numbers=magic_numbers,
