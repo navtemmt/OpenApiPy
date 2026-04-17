@@ -21,7 +21,7 @@ bool GetSymbolTradeMeta(const string symbol,
    return true;
 }
 
-void SendOpenSignal(int ticket)
+void SendOpenSignal(int ticket, bool startupSync = false)
 {
    if(!OrderSelect(ticket, SELECT_BY_TICKET))
    {
@@ -37,22 +37,36 @@ void SendOpenSignal(int ticket)
    double tp        = OrderTakeProfit();
    int    magic     = OrderMagicNumber();
 
-   double contract_size, vol_min, vol_max, vol_step;
+   double contract_size = 0.0;
+   double vol_min = 0.0;
+   double vol_max = 0.0;
+   double vol_step = 0.0;
    GetSymbolTradeMeta(symbol, contract_size, vol_min, vol_max, vol_step);
 
    string tradeType = (type == OP_BUY) ? "BUY" : "SELL";
+   int priceDigits = (int)MarketInfo(symbol, MODE_DIGITS);
+   if(priceDigits <= 0)
+      priceDigits = Digits;
+
+   string startupSyncStr = startupSync ? "true" : "false";
+   string syncOrigin     = startupSync ? "startup" : "live";
 
    string jsonData = "{"
       "\"action\":\"OPEN\","
+      "\"event_type\":\"OPEN\","
       "\"ticket\":" + IntegerToString(ticket) + ","
       "\"symbol\":\"" + JsonEscape(symbol) + "\","
       "\"type\":\"" + tradeType + "\","
+      "\"side\":\"" + tradeType + "\","
       "\"volume\":" + DoubleToString(volume, 2) + ","
-      "\"price\":" + DoubleToString(openPrice, Digits) + ","
-      "\"entry_price\":" + DoubleToString(openPrice, Digits) + ","
-      "\"sl\":" + DoubleToString(sl, Digits) + ","
-      "\"tp\":" + DoubleToString(tp, Digits) + ","
+      "\"price\":" + DoubleToString(openPrice, priceDigits) + ","
+      "\"entry_price\":" + DoubleToString(openPrice, priceDigits) + ","
+      "\"open_price\":" + DoubleToString(openPrice, priceDigits) + ","
+      "\"sl\":" + DoubleToString(sl, priceDigits) + ","
+      "\"tp\":" + DoubleToString(tp, priceDigits) + ","
       "\"magic\":" + IntegerToString(magic) + ","
+      "\"startup_sync\":" + startupSyncStr + ","
+      "\"sync_origin\":\"" + syncOrigin + "\","
       "\"mt5_contract_size\":" + DoubleToString(contract_size, 2) + ","
       "\"mt5_volume_min\":" + DoubleToString(vol_min, 2) + ","
       "\"mt5_volume_max\":" + DoubleToString(vol_max, 2) + ","
@@ -60,7 +74,11 @@ void SendOpenSignal(int ticket)
    "}";
 
    SendToServer(jsonData);
-   Print("Sent OPEN signal for ticket #", ticket, ": ", symbol, " ", tradeType, " ", volume);
+
+   Print("Sent OPEN signal for ticket #", ticket,
+         ": ", symbol, " ", tradeType, " ", DoubleToString(volume, 2),
+         " openPrice=", DoubleToString(openPrice, priceDigits),
+         " startupSync=", startupSyncStr);
 }
 
 void SendCloseSignal(long ticket, string symbol, double closedVolume)
