@@ -4,24 +4,24 @@ Account Manager for Multiple cTrader Connections
 Manages multiple cTrader client connections for different accounts.
 """
 
+import inspect
 import logging
 from typing import Dict, Optional, Tuple
-import inspect
-import ctrader_client as ctr_mod
 
-from trade_processor import notify_position_update, _enforce_max_risk_on_fill
+import ctrader_client as ctr_mod
 from ctrader_client import CTraderClient
 from config_loader import AccountConfig
 from ctrader_open_api import Protobuf
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
+    ProtoOAExecutionEvent,
     ProtoOAReconcileReq,
     ProtoOAReconcileRes,
-    ProtoOAExecutionEvent,
 )
+from trade_processor import _enforce_max_risk_on_fill, notify_position_update
 
 logger = logging.getLogger(__name__)
 
-# One‑shot debug: confirm which _on_spot_event implementation is live
+# One-shot debug: confirm which _on_spot_event implementation is live
 try:
     logger.info(
         "DEBUG CTraderClient._on_spot_event SOURCE:\n%s",
@@ -52,6 +52,9 @@ class AccountManager:
 
         # Per-account mapping: MT5 ticket -> last MT5 payload (for risk checks)
         self.mt5_payloads: Dict[str, Dict[int, dict]] = {}
+
+        # Per-account reconcile guard
+        self.reconcile_requested: Dict[str, bool] = {}
 
     # ------------------------------------------------------------------
     # Helpers
@@ -115,7 +118,9 @@ class AccountManager:
             return 0
 
     @staticmethod
-    def _extract_account_equity_balance(reconcile_res) -> Tuple[Optional[float], Optional[float]]:
+    def _extract_account_equity_balance(
+        reconcile_res,
+    ) -> Tuple[Optional[float], Optional[float]]:
         """
         Best-effort extraction from ProtoOAReconcileRes.
 
@@ -128,9 +133,7 @@ class AccountManager:
             if acc_obj is None:
                 return None, None
 
-            # Could be a repeated field (iterable) or a single object
             if hasattr(acc_obj, "__iter__") and not isinstance(acc_obj, (bytes, str)):
-                # pick first matching account entry
                 acc0 = None
                 for a in acc_obj:
                     acc0 = a
@@ -158,6 +161,70 @@ class AccountManager:
             self.order_maps[acc_name] = {}
         if acc_name not in self.mt5_payloads:
             self.mt5_payloads[acc_name] = {}
+        if acc_name not in self.reconcile_requested:
+            self.reconcile_requested[acc_name] = False
+
+    def _send_reconcile_request(self, account_name: str):
+        client = self.get_client(account_name)
+        config = self.get_config(account_name)
+
+        if not client or not config:
+            logger.warning("[%s] Cannot send reconcile: missing client/config", account_name)
+            return
+
+        if self.reconcile_requested.get(account_name, False):
+            logger.info("[%s] Reconcile already requested for this connection", account_name)
+            return
+
+        try:
+            req = ProtoOAReconcileReq()
+            req.ctidTraderAccountId = int(config.account_id)
+
+            logger.info("[%s] Sending reconcile request...", account_name)
+            d = client.send(req)
+            self.reconcile_requested[account_name] = True
+
+            def _on_reconcile(result):
+                try:
+                    extracted = Protobuf.extract(result)
+                    if isinstance(extracted, ProtoOAReconcileRes):
+                        logger.info("[%s] Reconcile response processed", account_name)
+                    else:
+                        logger.info(
+                            "[%s] Reconcile callback received message type %s",
+                            account_name,
+                            type(extracted).__name__,
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "[%s] Failed to process reconcile response: %s",
+                        account_name,
+                        e,
+                    )
+
+            def _on_reconcile_err(failure):
+                self.reconcile_requested[account_name] = False
+                client._on_error(failure)
+
+            d.addCallback(_on_reconcile)
+            d.addErrback(_on_reconcile_err)
+        except Exception as e:
+            self.reconcile_requested[account_name] = False
+            logger.error("[%s] Failed to send reconcile request: %s", account_name, e)
+
+    def _attach_post_auth_reconcile(self, client: CTraderClient, account_name: str):
+        original = client._on_account_auth_success
+
+        def wrapped(result, _orig=original, _acc_name=account_name):
+            rv = _orig(result)
+            try:
+                logger.info("✓ Account %s connected and authenticated", _acc_name)
+                self._send_reconcile_request(_acc_name)
+            except Exception as e:
+                logger.error("[%s] Post-auth reconcile hook failed: %s", _acc_name, e)
+            return rv
+
+        client._on_account_auth_success = wrapped
 
     # ------------------------------------------------------------------
     # Account lifecycle
@@ -171,7 +238,6 @@ class AccountManager:
 
         logger.info("Initializing account: %s", account.name)
 
-        # Create cTrader client for this environment
         client = CTraderClient(env=account.environment)
 
         # Override client credentials with account-specific values FIRST
@@ -184,16 +250,16 @@ class AccountManager:
             access_token=account.access_token or "",
         )
 
-        # Store references
         self.clients[account.name] = client
         self.configs[account.name] = account
         self._ensure_account_maps(account.name)
 
-        # Hook message callback (handles execution events + reconcile + position updates)
+        # Ensure reconcile is sent only after account auth succeeds
+        self._attach_post_auth_reconcile(client, account.name)
+
         def on_message(message, acc_name=account.name):
             try:
                 self._ensure_account_maps(acc_name)
-
                 extracted = Protobuf.extract(message)
 
                 # 1) Execution events: fills / partial fills / accepts etc.
@@ -202,7 +268,6 @@ class AccountManager:
 
                     exec_type = getattr(extracted, "executionType", None)
 
-                    # capture pending orderId mapping from extracted.order
                     order = getattr(extracted, "order", None)
                     if order is not None:
                         order_id = int(getattr(order, "orderId", 0) or 0)
@@ -225,15 +290,14 @@ class AccountManager:
                             self.position_maps[acc_name][int(ticket)] = position_id
                             notify_position_update(acc_name, int(ticket), self)
 
-                        # store volume whenever available
                         vol = self._extract_position_volume(pos)
                         if position_id and vol > 0:
                             self.position_volumes[acc_name][position_id] = int(vol)
                             logger.info(
-                                f"[{acc_name}] (exec vol) positionId {position_id} volume={vol} (exec_type={exec_type})"
+                                f"[{acc_name}] (exec vol) positionId {position_id} "
+                                f"volume={vol} (exec_type={exec_type})"
                             )
 
-                        # Over-risk enforcement on fills (POSITION_STATUS_OPEN / exec_type == DEAL)
                         try:
                             if position_id and ticket is not None:
                                 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
@@ -248,7 +312,6 @@ class AccountManager:
                                 if is_open and is_fill:
                                     config = self.get_config(acc_name)
                                     if config:
-                                        # symbol details
                                         symbol_id = int(
                                             getattr(
                                                 getattr(pos, "tradeData", None) or pos,
@@ -262,7 +325,9 @@ class AccountManager:
                                         if client_obj and hasattr(client_obj, "symbol_details"):
                                             symbol = client_obj.symbol_details.get(symbol_id)
 
-                                        mt5_data = self.mt5_payloads.get(acc_name, {}).get(int(ticket), None)
+                                        mt5_data = self.mt5_payloads.get(acc_name, {}).get(
+                                            int(ticket), None
+                                        )
 
                                         if symbol is not None:
                                             _enforce_max_risk_on_fill(
@@ -272,8 +337,6 @@ class AccountManager:
                                                 account_manager=self,
                                                 position=pos,
                                                 symbol=symbol,
-                                                mt5_symbol=None,
-                                                mt5_data=mt5_data,
                                             )
                         except Exception as e:
                             logger.debug(f"[{acc_name}] over-risk enforce failed: {e}")
@@ -282,7 +345,6 @@ class AccountManager:
 
                 # 2) Reconcile response: preload ALL positions + cache equity/balance if present
                 if isinstance(extracted, ProtoOAReconcileRes):
-                    # cache funds if available
                     eq, bal = self._extract_account_equity_balance(extracted)
                     if eq is not None:
                         self.account_equity[acc_name] = float(eq)
@@ -313,7 +375,6 @@ class AccountManager:
                             notify_position_update(acc_name, int(ticket), self)
                             count += 1
 
-                    # also load pending orders from reconcile if available
                     try:
                         for o in getattr(extracted, "order", []):
                             order_id = int(getattr(o, "orderId", 0) or 0)
@@ -361,27 +422,12 @@ class AccountManager:
 
         client.set_message_callback(on_message)
 
-        # Connect the client (will auto-authorize account)
         def on_connected():
-            logger.info("✓ Account %s connected and authenticated", account.name)
-
-            try:
-                req = ProtoOAReconcileReq()
-                req.ctidTraderAccountId = int(account.account_id)
-                logger.info("[%s] Sending reconcile request...", account.name)
-                d = client.send(req)
-
-                def _on_reconcile(result):
-                    try:
-                        Protobuf.extract(result)
-                        logger.info("[%s] Reconcile response processed", account.name)
-                    except Exception as e:
-                        logger.warning("[%s] Failed to process reconcile response: %s", account.name, e)
-
-                d.addCallback(_on_reconcile)
-                d.addErrback(client._on_error)
-            except Exception as e:
-                logger.error("[%s] Failed to send reconcile request: %s", account.name, e)
+            self.reconcile_requested[account.name] = False
+            logger.info(
+                "✓ Account %s socket connected; waiting for app/account authorization",
+                account.name,
+            )
 
         client.connect(on_connect=on_connected)
 
@@ -406,7 +452,7 @@ class AccountManager:
         return pos_map.get(int(mt5_ticket))
 
     def get_order_id(self, account_name: str, mt5_ticket: int) -> Optional[int]:
-        """get cTrader orderId for a pending order by MT5 ticket."""
+        """Get cTrader orderId for a pending order by MT5 ticket."""
         omap = self.order_maps.get(account_name) or {}
         return omap.get(int(mt5_ticket))
 
