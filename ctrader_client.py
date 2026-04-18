@@ -49,6 +49,21 @@ class CTraderClient:
 
         self.client = Client(self.host, self.port, TcpProtocol)
 
+        # Timeout configuration
+        self.default_request_timeout = self._env_int("CTRADER_REQUEST_TIMEOUT_SEC", 30)
+        self.auth_timeout_sec = self._env_int("CTRADER_AUTH_TIMEOUT_SEC", 30)
+
+        # Expose reactor for helpers that call addTimeout(..., self.client.reactor)
+        try:
+            self.client.reactor = reactor
+        except Exception:
+            pass
+
+        # Keep original low-level send and patch client.send so even direct
+        # self.client.send(...) calls from helper modules use unified timeout logic.
+        self._raw_client_send = self.client.send
+        self.client.send = self._client_send_with_timeout
+
         self.is_connected = False
         self.is_app_authed = False
         self.is_account_authed = False
@@ -80,7 +95,68 @@ class CTraderClient:
         self.client.setDisconnectedCallback(self._handle_disconnected)
         self.client.setMessageReceivedCallback(self._handle_message)
 
-        logger.info("CTraderClient initialized (%s)", env)
+        logger.info(
+            "CTraderClient initialized (%s) host=%s port=%s request_timeout=%ss auth_timeout=%ss",
+            env,
+            self.host,
+            self.port,
+            self.default_request_timeout,
+            self.auth_timeout_sec,
+        )
+
+    @staticmethod
+    def _env_int(name: str, default: int) -> int:
+        try:
+            value = int(os.getenv(name, str(default)))
+            return value if value > 0 else default
+        except Exception:
+            return default
+
+    def _client_send_with_timeout(self, req, timeout=None):
+        """
+        Unified timeout-aware send wrapper for the low-level SDK client.
+
+        This method is assigned to self.client.send so any code path using
+        self.client.send(...) also benefits from timeout handling.
+        """
+        effective_timeout = timeout
+        if effective_timeout is None:
+            effective_timeout = self.default_request_timeout
+
+        req_name = type(req).__name__
+
+        # First, try low-level send(req, timeout=...)
+        if effective_timeout:
+            try:
+                return self._raw_client_send(req, timeout=effective_timeout)
+            except TypeError:
+                logger.debug(
+                    "Low-level client.send() does not accept timeout kwarg for %s; falling back",
+                    req_name,
+                )
+            except Exception:
+                logger.exception(
+                    "Low-level client.send(timeout=%s) failed for %s",
+                    effective_timeout,
+                    req_name,
+                )
+                raise
+
+        # Fallback: call raw send(req) and attach a Deferred timeout if possible
+        d = self._raw_client_send(req)
+
+        if effective_timeout and hasattr(d, "addTimeout"):
+            try:
+                d.addTimeout(effective_timeout, reactor)
+            except Exception:
+                logger.debug(
+                    "Unable to attach addTimeout(%s) for %s",
+                    effective_timeout,
+                    req_name,
+                    exc_info=True,
+                )
+
+        return d
 
     # ------------------------------------------------------------------
     # Internal connection handlers
@@ -96,8 +172,6 @@ class CTraderClient:
         reactor.callLater(5, self._start_heartbeat)
         reactor.callLater(5, self._start_health_check)
 
-        # If the user provided a connect callback, call it.
-        # (AccountManager uses this to immediately reconcile.)
         if self._on_connect_callback:
             try:
                 self._on_connect_callback()
@@ -122,7 +196,6 @@ class CTraderClient:
         try:
             extracted = Protobuf.extract(message)
             payload_type = getattr(extracted, "payloadType", None)
-            # was INFO, now DEBUG to avoid spam
             logger.debug(
                 "Received message payloadType=%s type=%s",
                 payload_type,
@@ -132,16 +205,13 @@ class CTraderClient:
             logger.debug("Received raw message (extract failed): %r", message)
             extracted = None
 
-        # Internal handling: route spot events by payloadType only
         try:
             if payload_type == PROTO_OA_SPOT_EVENT_TYPE:
-                # was INFO, now DEBUG
                 logger.debug("ROUTE: ProtoOASpotEvent by payloadType")
                 self._on_spot_event(extracted)
         except Exception:
             logger.debug("Failed to process spot event", exc_info=True)
 
-        # Forward raw message to user callback (AccountManager parses it)
         if self._on_message_callback:
             try:
                 self._on_message_callback(message)
@@ -151,7 +221,6 @@ class CTraderClient:
     def _on_spot_event(self, spot_event: ProtoOASpotEvent):
         spots = list(getattr(spot_event, "spot", []))
         if not spots:
-            # previously logged 0 entries; now silent
             return
 
         try:
@@ -167,24 +236,6 @@ class CTraderClient:
                 bid = float(bid_raw or 0.0)
                 ask = float(ask_raw or 0.0)
                 self.spot_quotes[symbol_id] = {"bid": bid, "ask": ask, "ts": ts}
-
-                # Optional debug-only quote logging left commented out
-                # symbol_name = None
-                # for name, sid in self.symbol_name_to_id.items():
-                #     if sid == symbol_id:
-                #         symbol_name = name
-                #         break
-                #
-                # if symbol_name:
-                #     logger.debug(
-                #         "QUOTE %s | bid=%.5f ask=%.5f ts=%s",
-                #         symbol_name, bid, ask, ts,
-                #     )
-                # else:
-                #     logger.debug(
-                #         "QUOTE symbolId=%s | bid=%.5f ask=%.5f ts=%s",
-                #         symbol_id, bid, ask, ts,
-                #     )
         except Exception:
             logger.debug("spot event parse error", exc_info=True)
 
@@ -298,9 +349,9 @@ class CTraderClient:
     def set_message_callback(self, callback: Callable):
         self._on_message_callback = callback
 
-    def send(self, req):
-        """Facade for low-level client.send(req) to reduce coupling."""
-        return self.client.send(req)
+    def send(self, req, timeout=None):
+        """Facade for timeout-aware low-level sending."""
+        return self.client.send(req, timeout=timeout)
 
     # ------------------------------------------------------------------
     # Trading (delegated to ctrader_trading_impl.py)
