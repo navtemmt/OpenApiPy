@@ -3,7 +3,7 @@
 //| MT5 to cTrader Copy Trading EA                                   |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025"
-#property version   "1.13"
+#property version   "1.14"
 #property strict
 
 input string BridgeServerURL   = "http://127.0.0.1:3140";
@@ -22,7 +22,11 @@ int OnInit()
 {
    Print("MT5 CopyTrader EA initialized. Bridge server: ", BridgeServerURL);
 
-   UpdateTradeList();
+   // Startup sync existing live market positions first.
+   // This recovers missed/reverse positions after EA restart/reinit.
+   StartupSyncOpenTrades();
+
+   // Build pending baseline afterward.
    UpdatePendingList();
 
    Print("Initial positions tracked: ", g_lastTradeCount,
@@ -44,7 +48,6 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest &request,
                         const MqlTradeResult &result)
 {
-   // TradeTransaction event handler for EAs. [web:17]
    PrintFormat("DEBUG OnTradeTransaction: type=%d order=%I64u deal=%I64u symbol=%s order_type=%d order_state=%d",
                (int)trans.type, (ulong)trans.order, (ulong)trans.deal,
                trans.symbol, (int)trans.order_type, (int)trans.order_state);
