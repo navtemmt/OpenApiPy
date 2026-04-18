@@ -1,6 +1,16 @@
 #ifndef COPYTRADER_TRADES_MQH
 #define COPYTRADER_TRADES_MQH
 
+bool IsTrackedTradeTicket(const long ticket)
+{
+   for(int i = 0; i < g_lastTradeCount; i++)
+   {
+      if(g_lastTrades[i].ticket == ticket)
+         return true;
+   }
+   return false;
+}
+
 void UpdateTradeList()
 {
    int totalPositions = PositionsTotal();
@@ -34,6 +44,31 @@ void UpdateTradeList()
 
    g_lastTradeCount = idx;
    ArrayResize(g_lastTrades, g_lastTradeCount);
+}
+
+void StartupSyncOpenTrades()
+{
+   int totalPositions = PositionsTotal();
+
+   for(int i = 0; i < totalPositions; i++)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+
+      long magic = PositionGetInteger(POSITION_MAGIC);
+
+      if(MagicNumberFilter != "" && magic != StringToInteger(MagicNumberFilter))
+         continue;
+
+      if(!IsTrackedTradeTicket((long)ticket))
+      {
+         PrintFormat("Startup sync OPEN: ticket=%I64u", ticket);
+         SendOpenSignal(ticket);
+      }
+   }
+
+   UpdateTradeList();
 }
 
 void CheckTradeChanges()
@@ -95,16 +130,16 @@ void CheckTradeChanges()
          ulong ticket = PositionGetTicket(j);
          if((long)ticket == g_lastTrades[i].ticket)
          {
-           exists = true;
-           break;
+            exists = true;
+            break;
          }
       }
 
       if(!exists)
       {
-         long   ticket  = g_lastTrades[i].ticket;
-         string symbol  = g_lastTrades[i].symbol;
-         double volume  = g_lastTrades[i].volume;
+         long   ticket = g_lastTrades[i].ticket;
+         string symbol = g_lastTrades[i].symbol;
+         double volume = g_lastTrades[i].volume;
 
          PrintFormat("Full close detected: ticket=%I64d symbol=%s lastVol=%.2f",
                      ticket, symbol, volume);
