@@ -20,6 +20,14 @@ bool GetSymbolTradeMeta(const string symbol,
    return true;
 }
 
+string JsonEscape(const string s)
+{
+   string out = s;
+   StringReplace(out, "\\", "\\\\");
+   StringReplace(out, "\"", "\\\"");
+   return out;
+}
+
 void SendOpenSignal(ulong ticket)
 {
    if(!PositionSelectByTicket(ticket))
@@ -36,6 +44,11 @@ void SendOpenSignal(ulong ticket)
    double tp        = PositionGetDouble(POSITION_TP);
    long   magic     = PositionGetInteger(POSITION_MAGIC);
 
+   double bid = 0.0;
+   double ask = 0.0;
+   SymbolInfoDouble(symbol, SYMBOL_BID, bid);
+   SymbolInfoDouble(symbol, SYMBOL_ASK, ask);
+
    double contract_size, vol_min, vol_max, vol_step;
    GetSymbolTradeMeta(symbol, contract_size, vol_min, vol_max, vol_step);
 
@@ -44,11 +57,13 @@ void SendOpenSignal(ulong ticket)
    string jsonData = "{"
       "\"action\":\"OPEN\","
       "\"ticket\":" + (string)ticket + ","
-      "\"symbol\":\"" + symbol + "\","
+      "\"symbol\":\"" + JsonEscape(symbol) + "\","
       "\"type\":\"" + tradeType + "\","
       "\"volume\":" + DoubleToString(volume, 2) + ","
       "\"price\":" + DoubleToString(openPrice, 5) + ","
-      "\"entry_price\":" + DoubleToString(openPrice, 5) + ","   // added for Python risk sizing
+      "\"entry_price\":" + DoubleToString(openPrice, 5) + ","
+      "\"current_bid\":" + DoubleToString(bid, 5) + ","
+      "\"current_ask\":" + DoubleToString(ask, 5) + ","
       "\"sl\":" + DoubleToString(sl, 5) + ","
       "\"tp\":" + DoubleToString(tp, 5) + ","
       "\"magic\":" + (string)magic + ","
@@ -73,7 +88,7 @@ void SendCloseSignal(long ticket, string symbol, double closedVolume)
       "\"ticket\":" + (string)ticket + ",";
 
    if(symbol != "")
-      jsonData += "\"symbol\":\"" + symbol + "\",";
+      jsonData += "\"symbol\":\"" + JsonEscape(symbol) + "\",";
 
    jsonData += "\"volume\":" + DoubleToString(closedVolume, 8);
 
@@ -109,7 +124,7 @@ void SendModifySignal(ulong ticket, double sl, double tp)
       "\"ticket\":" + (string)ticket + ",";
 
    if(symbol != "")
-      jsonData += "\"symbol\":\"" + symbol + "\",";
+      jsonData += "\"symbol\":\"" + JsonEscape(symbol) + "\",";
 
    jsonData +=
       "\"sl\":" + DoubleToString(sl, 5) + ","
