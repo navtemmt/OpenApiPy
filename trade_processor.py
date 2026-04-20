@@ -68,6 +68,27 @@ def _to_bool(value, default=False):
     return default
 
 
+def _pending_sltp_bucket(account_name: str) -> dict:
+    return PENDING_SLTP.setdefault(str(account_name), {})
+
+
+def _set_pending_sltp(account_name: str, ticket: int, symbol: str, sl: float, tp: float):
+    _pending_sltp_bucket(account_name)[int(ticket)] = {
+        "symbol": symbol,
+        "sl": float(sl or 0.0),
+        "tp": float(tp or 0.0),
+        "created_ms": _now_ms(),
+    }
+
+
+def _get_pending_sltp(account_name: str, ticket: int):
+    return _pending_sltp_bucket(account_name).get(int(ticket))
+
+
+def _clear_pending_sltp(account_name: str, ticket: int):
+    _pending_sltp_bucket(account_name).pop(int(ticket), None)
+
+
 def _canonical_event_type(data: dict) -> str:
     raw = str(
         data.get("event_type")
