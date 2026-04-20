@@ -9,7 +9,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global pending SL/TP map: ticket -> dict(symbol, sl, tp)
+# Global pending SL/TP map:
+# account_name -> {mt5_ticket -> dict(symbol, sl, tp, created_ms)}
 PENDING_SLTP = {}
 
 # --- PATCH: pending lifecycle support ---
