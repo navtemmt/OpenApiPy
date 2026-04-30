@@ -31,16 +31,13 @@ double GetMt5TickSize(const string symbol)
 
 double GetMt5TickValue(const string symbol)
 {
-   double v = MarketInfo(symbol, MODE_TICKVALUE);
-   return v;
+   return MarketInfo(symbol, MODE_TICKVALUE);
 }
 
 double GetQuoteToDepositRate(const string symbol)
 {
    // MT4 usually reports MODE_TICKVALUE in deposit currency already.
-   // Return 1.0 as a safe default so the server can still use
-   // contract-size conversion when deposit == quote or when broker
-   // already normalizes values.
+   // Keep 1.0 as default unless you add real cross-currency conversion logic.
    return 1.0;
 }
 
@@ -72,12 +69,12 @@ void SendOpenSignal(int ticket, bool startupSync = false)
    if(priceDigits <= 0)
       priceDigits = Digits;
 
-   double currentBid          = MarketInfo(symbol, MODE_BID);
-   double currentAsk          = MarketInfo(symbol, MODE_ASK);
-   double pointSize           = MarketInfo(symbol, MODE_POINT);
-   double tickSize            = GetMt5TickSize(symbol);
-   double tickValue           = GetMt5TickValue(symbol);
-   double quoteToDepositRate  = GetQuoteToDepositRate(symbol);
+   double currentBid         = MarketInfo(symbol, MODE_BID);
+   double currentAsk         = MarketInfo(symbol, MODE_ASK);
+   double pointSize          = MarketInfo(symbol, MODE_POINT);
+   double tickSize           = GetMt5TickSize(symbol);
+   double tickValue          = GetMt5TickValue(symbol);
+   double quoteToDepositRate = GetQuoteToDepositRate(symbol);
 
    string startupSyncStr = startupSync ? "true" : "false";
    string syncOrigin     = startupSync ? "startup" : "live";
