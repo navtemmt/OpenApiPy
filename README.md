@@ -1,3 +1,5 @@
+Notes: risk percent not working because did not get cache balance
+
 ---
 
 ## MT4/MT5 to cTrader Copy Trading System
