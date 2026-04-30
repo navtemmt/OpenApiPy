@@ -311,10 +311,10 @@ def _estimate_risk_ccy_per_1lot_from_mt5(data: dict, entry_price: float, sl_pric
     """
     Estimate money risk per 1.0 MT5 lot in account/deposit currency.
 
-    Priority:
-      1) MT5 tick-value path (best): ticks * tick_value
+    Strict MT5-only priority:
+      1) MT5 tick-value path: ticks * tick_value
       2) Contract-size path with explicit quote->deposit conversion
-      3) Raw contract-size fallback (least accurate)
+      3) No fallback: return 0.0
     """
     try:
         entry = float(entry_price or 0.0)
@@ -349,9 +349,6 @@ def _estimate_risk_ccy_per_1lot_from_mt5(data: dict, entry_price: float, sl_pric
                 return float(ticks) * float(tick_value)
 
         mt5_contract_size = float(data.get("mt5_contract_size", 0) or 0.0)
-        if mt5_contract_size <= 0:
-            return 0.0
-
         quote_to_deposit = _first_positive_float(
             data.get("quote_to_deposit_rate"),
             data.get("quote_to_account_rate"),
@@ -359,10 +356,10 @@ def _estimate_risk_ccy_per_1lot_from_mt5(data: dict, entry_price: float, sl_pric
             data.get("fx_conversion_rate"),
         )
 
-        if quote_to_deposit is not None and quote_to_deposit > 0:
+        if mt5_contract_size > 0 and quote_to_deposit is not None and quote_to_deposit > 0:
             return dist * mt5_contract_size * float(quote_to_deposit)
 
-        return dist * mt5_contract_size
+        return 0.0
     except Exception:
         return 0.0
 
@@ -380,6 +377,8 @@ def _enforce_max_risk_on_fill(
     """
     After a follower position is OPEN, trim excess volume if actual risk
     exceeds the intended risk for FIXED_USD / PERCENT_EQUITY.
+
+    Uses strict MT5-only pricing data if provided.
     """
     rm = _risk_mode(config)
     if rm not in ("FIXED_USD", "PERCENT_EQUITY"):
@@ -390,8 +389,25 @@ def _enforce_max_risk_on_fill(
     if entry <= 0 or sl <= 0:
         return
 
-    risk_per_1lot = _estimate_risk_ccy_per_1lot_from_symbol(symbol, entry, sl)
+    if not isinstance(mt5_data, dict):
+        logger.warning(
+            f"[{account_name}] Over-risk check skipped: missing mt5_data for strict MT5 risk mode"
+        )
+        return
+
+    risk_per_1lot = _estimate_risk_ccy_per_1lot_from_mt5(mt5_data, entry, sl)
+    logger.info(
+        f"[{account_name}] Over-risk calc source=mt5_only, "
+        f"symbol={mt5_symbol}, entry={entry:.5f}, sl={sl:.5f}, "
+        f"mt5_tick_size={mt5_data.get('mt5_tick_size')}, "
+        f"mt5_tick_value={mt5_data.get('mt5_tick_value')}, "
+        f"quote_to_deposit_rate={mt5_data.get('quote_to_deposit_rate')}, "
+        f"perLot={float(risk_per_1lot):.2f}"
+    )
     if risk_per_1lot <= 0:
+        logger.warning(
+            f"[{account_name}] Over-risk check skipped: cannot price MT5 risk strictly"
+        )
         return
 
     if rm == "FIXED_USD":
@@ -479,31 +495,18 @@ def _resolve_open_volume_for_account(data: dict, config, *, account_name=None, c
         return src_lots, "NO_SL_FALLBACK_SOURCE_VOLUME"
 
     if risk_mode in ("FIXED_USD", "PERCENT_EQUITY"):
-        if not (account_manager and client and account_name):
+        if not (account_manager and account_name):
             return None, f"REJECT_{risk_mode}_MISSING_CONTEXT"
 
         mt5_symbol = data.get("symbol")
-        symbol_id = _get_symbol_id_for_account(client, config, mt5_symbol)
-        if symbol_id is None:
-            return None, f"REJECT_{risk_mode}_NO_SYMBOL_ID"
-
-        symbol = _get_symbol_details(client, int(symbol_id))
-        if symbol is None:
-            return None, f"REJECT_{risk_mode}_NO_SYMBOL_DETAILS"
-
         entry_price = float(data.get("entry_price", 0) or 0.0)
         if entry_price <= 0:
             return None, f"REJECT_{risk_mode}_NO_ENTRY_PRICE_FROM_MT5"
 
-        risk_per_1lot = _estimate_risk_ccy_per_1lot_from_symbol(symbol, float(entry_price), float(sl))
-        risk_source = "ctrader_symbol"
-
-        if risk_per_1lot <= 0:
-            risk_per_1lot = _estimate_risk_ccy_per_1lot_from_mt5(data, float(entry_price), float(sl))
-            risk_source = "mt5_fallback"
+        risk_per_1lot = _estimate_risk_ccy_per_1lot_from_mt5(data, float(entry_price), float(sl))
 
         logger.info(
-            f"[{account_name}] Risk-per-lot calc: source={risk_source}, "
+            f"[{account_name}] Risk-per-lot calc: source=mt5_only, "
             f"symbol={mt5_symbol}, entry={float(entry_price):.5f}, sl={float(sl):.5f}, "
             f"mt5_tick_size={data.get('mt5_tick_size')}, "
             f"mt5_tick_value={data.get('mt5_tick_value')}, "
@@ -512,7 +515,7 @@ def _resolve_open_volume_for_account(data: dict, config, *, account_name=None, c
         )
 
         if risk_per_1lot <= 0:
-            return None, f"REJECT_{risk_mode}_CANNOT_PRICE_RISK"
+            return None, f"REJECT_{risk_mode}_CANNOT_PRICE_RISK_FROM_MT5"
 
         if risk_mode == "FIXED_USD":
             usd_risk = float(getattr(config, "fixed_usd_risk", 0) or 0)
@@ -531,7 +534,10 @@ def _resolve_open_volume_for_account(data: dict, config, *, account_name=None, c
         if lots <= 0:
             return None, f"REJECT_{risk_mode}_LOTS_NONPOSITIVE"
 
-        return lots, f"{risk_mode} usd={usd_risk:.2f} perLot={risk_per_1lot:.2f} entry={float(entry_price):.5f}"
+        return lots, (
+            f"{risk_mode} mt5_only usd={usd_risk:.2f} "
+            f"perLot={risk_per_1lot:.2f} entry={float(entry_price):.5f}"
+        )
 
     return src_lots, f"{risk_mode}_USING_SOURCE_VOLUME_FOR_NOW"
 
@@ -912,7 +918,7 @@ def handle_open_event(data, account_manager):
 
             logger.info(f"[{account_name}] OPEN sizing: {decision}, lots={float(lots):.4f}")
 
-            if (sl > 0) or (tp > 0):
+            if sl > 0 or tp > 0:
                 _set_pending_sltp(account_name, ticket, mt5_symbol, sl, tp)
             else:
                 _clear_pending_sltp(account_name, ticket)
@@ -1160,6 +1166,7 @@ def handle_close_event(data, account_manager):
             symbol_id = _get_symbol_id_for_account(client, config, mt5_symbol)
             rm = _risk_mode(config)
             follower_units = account_manager.get_position_volume(account_name, position_id)
+
             close_units = None
 
             if close_lots is not None and follower_units is not None and int(follower_units) > 0:
@@ -1169,16 +1176,15 @@ def handle_close_event(data, account_manager):
                         f"[{account_name}] Proportional CLOSE: risk_mode={rm}, "
                         f"master_close_lots={float(close_lots):.4f}, "
                         f"master_remaining_lots={master_remaining_lots:.4f}, "
-                        f"pct={proportional_pct:.4f}, "
-                        f"follower_units={int(follower_units)} -> close_units={close_units}"
+                        f"pct={proportional_pct:.4f}, follower_units={int(follower_units)} -> close_units={close_units}"
                     )
                 else:
                     if mt5_contract_size > 0:
                         close_units = _lots_to_ctrader_cents(float(close_lots), mt5_contract_size)
-                        logger.info(
-                            f"[{account_name}] Absolute CLOSE: risk_mode={rm}, close_lots={close_lots}, "
-                            f"mt5_contract_size={mt5_contract_size} -> close_units={close_units}"
-                        )
+                    logger.info(
+                        f"[{account_name}] Absolute CLOSE: risk_mode={rm}, close_lots={close_lots}, "
+                        f"mt5_contract_size={mt5_contract_size} -> close_units={close_units}"
+                    )
 
             if close_units is None or int(close_units) <= 0:
                 close_units = follower_units
@@ -1200,6 +1206,7 @@ def handle_close_event(data, account_manager):
                 volume=int(close_units),
                 symbol_id=symbol_id,
             )
+
             logger.info(
                 f"[{account_name}] Close sent for position {position_id} "
                 f"(ticket {ticket}) close_units={int(close_units)}"
