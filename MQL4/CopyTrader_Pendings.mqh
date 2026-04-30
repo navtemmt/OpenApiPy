@@ -232,6 +232,27 @@ void UpdatePendingList()
 }
 
 //======================================================
+// MT5 pricing helpers for strict risk sizing
+//======================================================
+double GetMt5TickSizePending(const string symbol)
+{
+   double v = MarketInfo(symbol, MODE_TICKSIZE);
+   if(v <= 0.0)
+      v = MarketInfo(symbol, MODE_POINT);
+   return v;
+}
+
+double GetMt5TickValuePending(const string symbol)
+{
+   return MarketInfo(symbol, MODE_TICKVALUE);
+}
+
+double GetQuoteToDepositRatePending(const string symbol)
+{
+   return 1.0;
+}
+
+//======================================================
 // JSON builders
 //======================================================
 void SendPendingOpenSignal(const int ticket)
@@ -250,7 +271,10 @@ void SendPendingOpenSignal(const int ticket)
    double tp       = OrderTakeProfit();
    datetime exp    = OrderExpiration();
 
-   double contract_size, vol_min, vol_max, vol_step;
+   double contract_size = 0.0;
+   double vol_min       = 0.0;
+   double vol_max       = 0.0;
+   double vol_step      = 0.0;
    GetSymbolTradeMeta(symbol, contract_size, vol_min, vol_max, vol_step);
 
    string side = "BUY";
@@ -266,6 +290,13 @@ void SendPendingOpenSignal(const int ticket)
       exp_ms = (long)exp * 1000;
 
    int priceDigits = (int)MarketInfo(symbol, MODE_DIGITS);
+   if(priceDigits <= 0)
+      priceDigits = Digits;
+
+   double pointSize          = MarketInfo(symbol, MODE_POINT);
+   double tickSize           = GetMt5TickSizePending(symbol);
+   double tickValue          = GetMt5TickValuePending(symbol);
+   double quoteToDepositRate = GetQuoteToDepositRatePending(symbol);
 
    string json = "{";
    json += "\"event_type\":\"PENDING_OPEN\",";
@@ -280,6 +311,12 @@ void SendPendingOpenSignal(const int ticket)
    else
       json += "\"stop_price\":" + DoubleToString(price, priceDigits) + ",";
 
+   json += "\"entry_price\":" + DoubleToString(price, priceDigits) + ",";
+   json += "\"point\":" + DoubleToString(pointSize, priceDigits) + ",";
+   json += "\"digits\":" + IntegerToString(priceDigits) + ",";
+   json += "\"mt5_tick_size\":" + DoubleToString(tickSize, priceDigits) + ",";
+   json += "\"mt5_tick_value\":" + DoubleToString(tickValue, 8) + ",";
+   json += "\"quote_to_deposit_rate\":" + DoubleToString(quoteToDepositRate, 8) + ",";
    json += "\"sl\":" + DoubleToString(sl, priceDigits) + ",";
    json += "\"tp\":" + DoubleToString(tp, priceDigits) + ",";
    json += "\"expiration_ms\":\"" + IntegerToString((int)exp_ms) + "\",";
@@ -290,6 +327,14 @@ void SendPendingOpenSignal(const int ticket)
    json += "}";
 
    SendToServer(json);
+
+   Print("Sent PENDING_OPEN signal for ticket #", ticket,
+         " symbol=", symbol,
+         " side=", side,
+         " pending_type=", pending_type,
+         " price=", DoubleToString(price, priceDigits),
+         " tickSize=", DoubleToString(tickSize, priceDigits),
+         " tickValue=", DoubleToString(tickValue, 8));
 }
 
 void SendPendingCloseSignal(const long ticket, const string symbol)
@@ -306,9 +351,6 @@ void SendPendingCloseSignal(const long ticket, const string symbol)
    SendToServer(json);
 }
 
-//======================================================
-// Detect new + removed pending orders
-//======================================================
 void CheckPendingChanges()
 {
    static long prevTickets[];
