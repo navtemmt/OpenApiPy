@@ -21,6 +21,29 @@ bool GetSymbolTradeMeta(const string symbol,
    return true;
 }
 
+double GetMt5TickSize(const string symbol)
+{
+   double v = MarketInfo(symbol, MODE_TICKSIZE);
+   if(v <= 0.0)
+      v = MarketInfo(symbol, MODE_POINT);
+   return v;
+}
+
+double GetMt5TickValue(const string symbol)
+{
+   double v = MarketInfo(symbol, MODE_TICKVALUE);
+   return v;
+}
+
+double GetQuoteToDepositRate(const string symbol)
+{
+   // MT4 usually reports MODE_TICKVALUE in deposit currency already.
+   // Return 1.0 as a safe default so the server can still use
+   // contract-size conversion when deposit == quote or when broker
+   // already normalizes values.
+   return 1.0;
+}
+
 void SendOpenSignal(int ticket, bool startupSync = false)
 {
    if(!OrderSelect(ticket, SELECT_BY_TICKET))
@@ -49,9 +72,12 @@ void SendOpenSignal(int ticket, bool startupSync = false)
    if(priceDigits <= 0)
       priceDigits = Digits;
 
-   double currentBid = MarketInfo(symbol, MODE_BID);
-   double currentAsk = MarketInfo(symbol, MODE_ASK);
-   double pointSize  = MarketInfo(symbol, MODE_POINT);
+   double currentBid          = MarketInfo(symbol, MODE_BID);
+   double currentAsk          = MarketInfo(symbol, MODE_ASK);
+   double pointSize           = MarketInfo(symbol, MODE_POINT);
+   double tickSize            = GetMt5TickSize(symbol);
+   double tickValue           = GetMt5TickValue(symbol);
+   double quoteToDepositRate  = GetQuoteToDepositRate(symbol);
 
    string startupSyncStr = startupSync ? "true" : "false";
    string syncOrigin     = startupSync ? "startup" : "live";
@@ -71,6 +97,9 @@ void SendOpenSignal(int ticket, bool startupSync = false)
       "\"current_ask\":" + DoubleToString(currentAsk, priceDigits) + ","
       "\"point\":" + DoubleToString(pointSize, priceDigits) + ","
       "\"digits\":" + IntegerToString(priceDigits) + ","
+      "\"mt5_tick_size\":" + DoubleToString(tickSize, priceDigits) + ","
+      "\"mt5_tick_value\":" + DoubleToString(tickValue, 8) + ","
+      "\"quote_to_deposit_rate\":" + DoubleToString(quoteToDepositRate, 8) + ","
       "\"sl\":" + DoubleToString(sl, priceDigits) + ","
       "\"tp\":" + DoubleToString(tp, priceDigits) + ","
       "\"magic\":" + IntegerToString(magic) + ","
@@ -89,6 +118,8 @@ void SendOpenSignal(int ticket, bool startupSync = false)
          " openPrice=", DoubleToString(openPrice, priceDigits),
          " bid=", DoubleToString(currentBid, priceDigits),
          " ask=", DoubleToString(currentAsk, priceDigits),
+         " tickSize=", DoubleToString(tickSize, priceDigits),
+         " tickValue=", DoubleToString(tickValue, 8),
          " startupSync=", startupSyncStr);
 }
 
