@@ -309,7 +309,12 @@ def _estimate_risk_ccy_per_1lot_from_symbol(symbol, entry_price: float, sl_price
 
 def _estimate_risk_ccy_per_1lot_from_mt5(data: dict, entry_price: float, sl_price: float) -> float:
     """
-    Estimate money risk per 1.0 MT5 lot using MT5 contract meta.
+    Estimate money risk per 1.0 MT5 lot in account/deposit currency.
+
+    Priority:
+      1) MT5 tick-value path (best): ticks * tick_value
+      2) Contract-size path with explicit quote->deposit conversion
+      3) Raw contract-size fallback (least accurate)
     """
     try:
         entry = float(entry_price or 0.0)
@@ -321,9 +326,41 @@ def _estimate_risk_ccy_per_1lot_from_mt5(data: dict, entry_price: float, sl_pric
         if dist <= 0:
             return 0.0
 
+        tick_size = _first_positive_float(
+            data.get("mt5_tick_size"),
+            data.get("tick_size"),
+            data.get("tickSize"),
+            data.get("point"),
+            data.get("Point"),
+            data.get("trade_tick_size"),
+        )
+
+        tick_value = _first_positive_float(
+            data.get("mt5_tick_value"),
+            data.get("tick_value"),
+            data.get("tickValue"),
+            data.get("trade_tick_value"),
+            data.get("tradeTickValue"),
+        )
+
+        if tick_size is not None and tick_value is not None and tick_size > 0 and tick_value > 0:
+            ticks = dist / float(tick_size)
+            if ticks > 0:
+                return float(ticks) * float(tick_value)
+
         mt5_contract_size = float(data.get("mt5_contract_size", 0) or 0.0)
         if mt5_contract_size <= 0:
             return 0.0
+
+        quote_to_deposit = _first_positive_float(
+            data.get("quote_to_deposit_rate"),
+            data.get("quote_to_account_rate"),
+            data.get("conversion_rate"),
+            data.get("fx_conversion_rate"),
+        )
+
+        if quote_to_deposit is not None and quote_to_deposit > 0:
+            return dist * mt5_contract_size * float(quote_to_deposit)
 
         return dist * mt5_contract_size
     except Exception:
@@ -459,8 +496,20 @@ def _resolve_open_volume_for_account(data: dict, config, *, account_name=None, c
             return None, f"REJECT_{risk_mode}_NO_ENTRY_PRICE_FROM_MT5"
 
         risk_per_1lot = _estimate_risk_ccy_per_1lot_from_symbol(symbol, float(entry_price), float(sl))
+        risk_source = "ctrader_symbol"
+
         if risk_per_1lot <= 0:
             risk_per_1lot = _estimate_risk_ccy_per_1lot_from_mt5(data, float(entry_price), float(sl))
+            risk_source = "mt5_fallback"
+
+        logger.info(
+            f"[{account_name}] Risk-per-lot calc: source={risk_source}, "
+            f"symbol={mt5_symbol}, entry={float(entry_price):.5f}, sl={float(sl):.5f}, "
+            f"mt5_tick_size={data.get('mt5_tick_size')}, "
+            f"mt5_tick_value={data.get('mt5_tick_value')}, "
+            f"quote_to_deposit_rate={data.get('quote_to_deposit_rate')}, "
+            f"perLot={float(risk_per_1lot):.2f}"
+        )
 
         if risk_per_1lot <= 0:
             return None, f"REJECT_{risk_mode}_CANNOT_PRICE_RISK"
