@@ -1,4 +1,4 @@
-Notes: risk percent not working because did not get cache balance
+Notes: risk percent not working because did not get cache balance, does not remap existing order when startup
 
 ---
 
