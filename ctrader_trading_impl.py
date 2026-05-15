@@ -242,7 +242,7 @@ def send_market_order(
                 fallback_symbol_id=symbol_id,
                 fallback_label=label,
             )
-            logger.info("Order response: %s payload=%r", _format_context(context), extracted)
+            logger.info("Order response: %s\n%s", _format_context(context), extracted)
         except Exception:
             logger.warning(
                 "Order response (raw): account_id=%s ticket=%s symbol=%s symbolId=%s label=%s raw=%r",
@@ -363,7 +363,7 @@ def send_pending_order(
                 fallback_symbol_id=symbol_id,
                 fallback_label=label,
             )
-            logger.info("Pending order response: %s payload=%r", _format_context(context), extracted)
+            logger.info("Pending order response: %s\n%s", _format_context(context), extracted)
         except Exception:
             logger.warning(
                 "Pending order response (raw): account_id=%s ticket=%s symbol=%s symbolId=%s label=%s raw=%r",
@@ -405,7 +405,7 @@ def cancel_pending_order(self, account_id: int, order_id: int):
             )
             if context.get("order_id") is None:
                 context["order_id"] = int(order_id)
-            logger.info("Cancel order response: %s payload=%r", _format_context(context), extracted)
+            logger.info("Cancel order response: %s\n%s", _format_context(context), extracted)
         except Exception:
             logger.warning(
                 "Cancel order response (raw): account_id=%s orderId=%s raw=%r",
@@ -479,7 +479,7 @@ def modify_position(
             )
             if context.get("position_id") is None:
                 context["position_id"] = int(position_id)
-            logger.info("Amend response: %s payload=%r", _format_context(context), extracted)
+            logger.info("Amend response: %s\n%s", _format_context(context), extracted)
         except Exception:
             logger.warning(
                 "Amend response (raw): account_id=%s positionId=%s symbol=%s symbolId=%s raw=%r",
@@ -561,7 +561,7 @@ def close_position(self, *args: Any, **kwargs: Any):
             )
             if context.get("position_id") is None:
                 context["position_id"] = int(position_id)
-            logger.info("Close response: %s payload=%r", _format_context(context), extracted)
+            logger.info("Close response: %s\n%s", _format_context(context), extracted)
         except Exception:
             logger.warning(
                 "Close response (raw): account_id=%s positionId=%s symbol=%s symbolId=%s volume=%s raw=%r",
