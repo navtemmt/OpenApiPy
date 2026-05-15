@@ -46,11 +46,36 @@ def _map_symbol_id(client, config, mt5_symbol: str):
     return mapper.get_symbol_id(mt5_symbol)
 
 
+def _resolve_ctrader_symbol_name(client, symbol_id: int, fallback: str = "") -> str:
+    """
+    Best-effort reverse lookup: symbolId -> cTrader symbol name.
+    """
+    try:
+        symbol = client.symbol_details.get(int(symbol_id)) if hasattr(client, "symbol_details") else None
+        name = getattr(symbol, "symbolName", None) if symbol is not None else None
+        if name:
+            return str(name)
+    except Exception:
+        pass
+
+    try:
+        broker_symbol_map = getattr(client, "symbol_name_to_id", {}) or {}
+        for name, sid in broker_symbol_map.items():
+            if int(sid) == int(symbol_id):
+                return str(name)
+    except Exception:
+        pass
+
+    return str(fallback or f"symbolId={symbol_id}")
+
+
 def _should_copy(account_name, config, mt5_symbol, magic, volume):
     multi_config = get_multi_account_config()
     should_copy, reason = multi_config.should_copy_trade(config, mt5_symbol, magic, volume)
     if not should_copy:
-        logger.info(f"[{account_name}] Skipping: {reason}")
+        logger.info(
+            f"[{account_name}] Skipping copy | symbol={mt5_symbol} magic={magic} volume={volume} reason={reason}"
+        )
         return False
     return True
 
@@ -60,9 +85,12 @@ def _calc_volume_units(account_name, client, config, symbol_id: int, mt5_symbol:
     Convert MT5 lots -> cTrader volume UNITS using cTrader symbol lotSize, then snap.
     """
     symbol = client.symbol_details.get(symbol_id) if hasattr(client, "symbol_details") else None
+    resolved_symbol = _resolve_ctrader_symbol_name(client, symbol_id, fallback=mt5_symbol)
+
     if symbol is None:
         logger.error(
-            f"[{account_name}] Missing cTrader symbol_details for {mt5_symbol} (symbolId={symbol_id}). "
+            f"[{account_name}] Missing cTrader symbol_details for mt5_symbol={mt5_symbol} "
+            f"resolved_symbol={resolved_symbol} symbolId={symbol_id}. "
             f"Wait for symbols to load before trading."
         )
         return 0
@@ -74,7 +102,8 @@ def _calc_volume_units(account_name, client, config, symbol_id: int, mt5_symbol:
 
     if lot_size <= 0 or min_units <= 0 or step_units <= 0:
         logger.error(
-            f"[{account_name}] Invalid cTrader symbol specs for {mt5_symbol} (symbolId={symbol_id}): "
+            f"[{account_name}] Invalid cTrader symbol specs for mt5_symbol={mt5_symbol} "
+            f"resolved_symbol={resolved_symbol} symbolId={symbol_id}: "
             f"lotSize={lot_size}, minVolume={min_units}, stepVolume={step_units}, maxVolume={max_units}"
         )
         return 0
@@ -83,9 +112,10 @@ def _calc_volume_units(account_name, client, config, symbol_id: int, mt5_symbol:
     snapped = _snap_volume_units(raw_units, min_units, max_units, step_units)
 
     logger.info(
-        f"[{account_name}] Volume conversion (cTrader specs): symbolId={symbol_id}, "
+        f"[{account_name}] Volume conversion (cTrader specs): "
+        f"symbol={resolved_symbol} symbolId={symbol_id}, mt5_symbol={mt5_symbol}, "
         f"mt5_lots={mt5_lots:.4f}, lotSize={lot_size}, "
-        f"min={min_units}, max={max_units}, step={step_units} -> units={snapped}"
+        f"min={min_units}, max={max_units}, step={step_units} -> raw_units={raw_units}, units={snapped}"
     )
     return int(snapped)
 
@@ -106,8 +136,13 @@ def copy_open_to_account(
 
     symbol_id = _map_symbol_id(client, config, mt5_symbol)
     if symbol_id is None:
-        logger.error(f"[{account_name}] Could not map MT5 symbol {mt5_symbol} to cTrader symbolId")
+        logger.error(
+            f"[{account_name}] Could not map MT5 symbol to cTrader symbolId | "
+            f"ticket={ticket} mt5_symbol={mt5_symbol}"
+        )
         return
+
+    resolved_symbol = _resolve_ctrader_symbol_name(client, symbol_id, fallback=mt5_symbol)
 
     if not _should_copy(account_name, config, mt5_symbol, magic, volume):
         return
@@ -128,15 +163,19 @@ def copy_open_to_account(
     )
 
     if volume_to_send <= 0:
-        logger.warning(f"[{account_name}] Skipping zero or negative volume for ticket {ticket}")
+        logger.warning(
+            f"[{account_name}] Skipping zero or negative volume | "
+            f"ticket={ticket} symbol={resolved_symbol} symbolId={symbol_id}"
+        )
         return
 
-    trade_side = "BUY" if side.upper() in ("BUY", "LONG") else "SELL"
+    trade_side = "BUY" if str(side or "").upper() in ("BUY", "LONG") else "SELL"
 
     logger.info(
-        f"[{account_name}] Opening {trade_side} {mt5_symbol} (symbolId={symbol_id}) | "
-        f"Volume: {volume_to_send} units | SL: {sl} | TP: {tp} | "
-        f"Label: MT5_{ticket}"
+        f"[{account_name}] Opening {trade_side} | "
+        f"ticket={ticket} symbol={resolved_symbol} symbolId={symbol_id} mt5_symbol={mt5_symbol} | "
+        f"Volume={volume_to_send} units ({adjusted_lots:.4f} lots before cTrader snap) | "
+        f"SL={sl} TP={tp} | Label=MT5_{ticket}"
     )
 
     try:
@@ -144,17 +183,23 @@ def copy_open_to_account(
             account_id=config.account_id,
             symbol_id=symbol_id,
             side=trade_side,
-            volume=volume_to_send,  # UNITS (as cTrader expects)
-            sl=None,  # SL/TP applied separately via pending mechanism (trade_processor.py)
+            volume=volume_to_send,
+            sl=None,
             tp=None,
             label=f"MT5_{ticket}",
         )
 
-        logger.info(f"[{account_name}] Order submitted for MT5 ticket {ticket}")
+        logger.info(
+            f"[{account_name}] Order submitted | "
+            f"ticket={ticket} symbol={resolved_symbol} symbolId={symbol_id} label=MT5_{ticket}"
+        )
         return response
 
     except Exception as e:
-        logger.error(f"[{account_name}] Failed to open position for ticket {ticket}: {e}")
+        logger.error(
+            f"[{account_name}] Failed to open position | "
+            f"ticket={ticket} symbol={resolved_symbol} symbolId={symbol_id} error={e}"
+        )
         raise
 
 
@@ -184,8 +229,13 @@ def copy_pending_to_account(
 
     symbol_id = _map_symbol_id(client, config, mt5_symbol)
     if symbol_id is None:
-        logger.error(f"[{account_name}] Could not map MT5 symbol {mt5_symbol} to cTrader symbolId")
+        logger.error(
+            f"[{account_name}] Could not map MT5 symbol to cTrader symbolId | "
+            f"ticket={ticket} mt5_symbol={mt5_symbol}"
+        )
         return
+
+    resolved_symbol = _resolve_ctrader_symbol_name(client, symbol_id, fallback=mt5_symbol)
 
     if not _should_copy(account_name, config, mt5_symbol, magic, volume):
         return
@@ -206,22 +256,34 @@ def copy_pending_to_account(
     )
 
     if volume_to_send <= 0:
-        logger.warning(f"[{account_name}] Skipping zero or negative pending volume for ticket {ticket}")
+        logger.warning(
+            f"[{account_name}] Skipping zero or negative pending volume | "
+            f"ticket={ticket} symbol={resolved_symbol} symbolId={symbol_id}"
+        )
         return
 
-    trade_side = "BUY" if side.upper() in ("BUY", "LONG") else "SELL"
+    trade_side = "BUY" if str(side or "").upper() in ("BUY", "LONG") else "SELL"
     ptype = (pending_type or "").strip().lower()
 
-    # Round all prices to symbol digits (prevents invalid precision rejects)
     sl_r = client.round_price_for_symbol(symbol_id, float(sl)) if sl and float(sl) > 0 else None
     tp_r = client.round_price_for_symbol(symbol_id, float(tp)) if tp and float(tp) > 0 else None
-    stop_r = client.round_price_for_symbol(symbol_id, float(stop_price)) if stop_price and float(stop_price) > 0 else 0.0
-    limit_r = client.round_price_for_symbol(symbol_id, float(limit_price)) if limit_price and float(limit_price) > 0 else 0.0
+    stop_r = (
+        client.round_price_for_symbol(symbol_id, float(stop_price))
+        if stop_price and float(stop_price) > 0
+        else 0.0
+    )
+    limit_r = (
+        client.round_price_for_symbol(symbol_id, float(limit_price))
+        if limit_price and float(limit_price) > 0
+        else 0.0
+    )
 
     logger.info(
-        f"[{account_name}] Creating pending {ptype.upper()} {trade_side} {mt5_symbol} (symbolId={symbol_id}) | "
-        f"Volume: {volume_to_send} units | stop={stop_r} limit={limit_r} SL={sl_r} TP={tp_r} | "
-        f"Label: MT5_{ticket} | expiry_ms={int(expiration_ms or 0)}"
+        f"[{account_name}] Creating pending {ptype.upper()} {trade_side} | "
+        f"ticket={ticket} symbol={resolved_symbol} symbolId={symbol_id} mt5_symbol={mt5_symbol} | "
+        f"Volume={volume_to_send} units ({adjusted_lots:.4f} lots before cTrader snap) | "
+        f"stop={stop_r} limit={limit_r} SL={sl_r} TP={tp_r} | "
+        f"Label=MT5_{ticket} | expiry_ms={int(expiration_ms or 0)}"
     )
 
     try:
@@ -238,9 +300,15 @@ def copy_pending_to_account(
             label=f"MT5_{ticket}",
             expiration_ms=int(expiration_ms or 0),
         )
-        logger.info(f"[{account_name}] Pending order submitted for MT5 ticket {ticket}")
+        logger.info(
+            f"[{account_name}] Pending order submitted | "
+            f"ticket={ticket} symbol={resolved_symbol} symbolId={symbol_id} label=MT5_{ticket}"
+        )
         return resp
 
     except Exception as e:
-        logger.error(f"[{account_name}] Failed to create pending order for ticket {ticket}: {e}")
+        logger.error(
+            f"[{account_name}] Failed to create pending order | "
+            f"ticket={ticket} symbol={resolved_symbol} symbolId={symbol_id} error={e}"
+        )
         raise
