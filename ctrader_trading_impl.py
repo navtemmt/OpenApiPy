@@ -18,7 +18,7 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOANewOrderReq,
     ProtoOAAmendPositionSLTPReq,
     ProtoOAClosePositionReq,
-    ProtoOACancelOrderReq,   # <-- ADDED
+    ProtoOACancelOrderReq,
 )
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
     ProtoOAOrderType,
@@ -48,6 +48,118 @@ def _parse_mt5_ticket_from_label(label: str) -> Optional[int]:
         return None
 
 
+def _read_attr_or_key(obj, name: str, default=None):
+    if obj is None:
+        return default
+    try:
+        if isinstance(obj, dict):
+            return obj.get(name, default)
+        return getattr(obj, name, default)
+    except Exception:
+        return default
+
+
+def _first_non_empty(*values):
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _resolve_symbol_name_from_id(self, symbol_id: Optional[int]) -> Optional[str]:
+    if symbol_id is None:
+        return None
+
+    try:
+        symbol = self.symbol_details.get(int(symbol_id)) if hasattr(self, "symbol_details") else None
+        name = getattr(symbol, "symbolName", None) if symbol is not None else None
+        if name:
+            return str(name)
+    except Exception:
+        pass
+
+    try:
+        broker_symbol_map = getattr(self, "symbol_name_to_id", {}) or {}
+        for name, sid in broker_symbol_map.items():
+            if int(sid) == int(symbol_id):
+                return str(name)
+    except Exception:
+        pass
+
+    return None
+
+
+def _extract_response_context(
+    self,
+    extracted,
+    fallback_account_id: Optional[int] = None,
+    fallback_symbol_id: Optional[int] = None,
+    fallback_label: Optional[str] = None,
+):
+    order = _read_attr_or_key(extracted, "order", None)
+    position = _read_attr_or_key(extracted, "position", None)
+    deal = _read_attr_or_key(extracted, "deal", None)
+
+    order_trade_data = _read_attr_or_key(order, "tradeData", None)
+    position_trade_data = _read_attr_or_key(position, "tradeData", None)
+
+    symbol_id = _first_non_empty(
+        _read_attr_or_key(order_trade_data, "symbolId", None),
+        _read_attr_or_key(position_trade_data, "symbolId", None),
+        _read_attr_or_key(deal, "symbolId", None),
+        fallback_symbol_id,
+    )
+
+    label = _first_non_empty(
+        _read_attr_or_key(order_trade_data, "label", None),
+        _read_attr_or_key(position_trade_data, "label", None),
+        fallback_label,
+    )
+
+    ticket = _parse_mt5_ticket_from_label(label) if label else None
+    symbol_name = _resolve_symbol_name_from_id(self, symbol_id) if symbol_id is not None else None
+
+    return {
+        "account_id": _first_non_empty(
+            _read_attr_or_key(extracted, "ctidTraderAccountId", None),
+            fallback_account_id,
+        ),
+        "ticket": ticket,
+        "symbol_id": symbol_id,
+        "symbol_name": symbol_name,
+        "label": label,
+        "execution_type": _read_attr_or_key(extracted, "executionType", None),
+        "order_id": _read_attr_or_key(order, "orderId", None),
+        "position_id": _read_attr_or_key(position, "positionId", None),
+        "deal_id": _read_attr_or_key(deal, "dealId", None),
+    }
+
+
+def _format_context(context: dict) -> str:
+    parts = []
+
+    if context.get("account_id") is not None:
+        parts.append(f"account_id={context['account_id']}")
+    if context.get("ticket") is not None:
+        parts.append(f"ticket={context['ticket']}")
+    if context.get("symbol_name"):
+        parts.append(f"symbol={context['symbol_name']}")
+    if context.get("symbol_id") is not None:
+        parts.append(f"symbolId={context['symbol_id']}")
+    if context.get("position_id") is not None:
+        parts.append(f"positionId={context['position_id']}")
+    if context.get("order_id") is not None:
+        parts.append(f"orderId={context['order_id']}")
+    if context.get("deal_id") is not None:
+        parts.append(f"dealId={context['deal_id']}")
+    if context.get("execution_type"):
+        parts.append(f"execType={context['execution_type']}")
+    if context.get("label"):
+        parts.append(f"label={context['label']}")
+
+    return " ".join(parts)
+
+
 def amend_position(
     self,
     account_id: int,
@@ -58,7 +170,6 @@ def amend_position(
     stop_loss: Optional[float] = None,
     take_profit: Optional[float] = None,
 ):
-    # Keep compatibility keywords used by app_state
     if stop_loss is not None:
         sl = stop_loss
     if take_profit is not None:
@@ -103,15 +214,45 @@ def send_market_order(
 
     req.label = label
 
-    logger.info("Sending market order: %s %s units of symbol %s", side, volume, symbol_id)
+    ticket = _parse_mt5_ticket_from_label(label)
+    symbol_name = _resolve_symbol_name_from_id(self, symbol_id) or "UNKNOWN"
+
+    logger.info(
+        "Sending market order: account_id=%s ticket=%s symbol=%s symbolId=%s side=%s volume=%s sl=%s tp=%s label=%s",
+        account_id,
+        ticket,
+        symbol_name,
+        symbol_id,
+        side,
+        volume,
+        sl,
+        tp,
+        label,
+    )
 
     d = self.send(req)
 
     def _on_resp(result):
         try:
-            logger.info("Order response: %r", Protobuf.extract(result))
+            extracted = Protobuf.extract(result)
+            context = _extract_response_context(
+                self,
+                extracted,
+                fallback_account_id=account_id,
+                fallback_symbol_id=symbol_id,
+                fallback_label=label,
+            )
+            logger.info("Order response: %s payload=%r", _format_context(context), extracted)
         except Exception:
-            logger.warning("Order response (raw): %r", result)
+            logger.warning(
+                "Order response (raw): account_id=%s ticket=%s symbol=%s symbolId=%s label=%s raw=%r",
+                account_id,
+                ticket,
+                symbol_name,
+                symbol_id,
+                label,
+                result,
+            )
 
     d.addCallback(_on_resp)
     d.addErrback(self._on_error)
@@ -144,7 +285,6 @@ def send_pending_order(
 
     volume = self.snap_volume_for_symbol(symbol_id, int(volume))
 
-    # Round all prices to symbol precision
     stop_price = float(stop_price or 0.0)
     limit_price = float(limit_price or 0.0)
     if stop_price > 0:
@@ -191,12 +331,18 @@ def send_pending_order(
         req.timeInForce = ProtoOATimeInForce.GOOD_TILL_DATE
         req.expirationTimestamp = int(expiration_ms)
 
+    ticket = _parse_mt5_ticket_from_label(label)
+    symbol_name = _resolve_symbol_name_from_id(self, symbol_id) or "UNKNOWN"
+
     logger.info(
-        "Sending pending order: type=%s side=%s vol=%s symbol=%s stop=%s limit=%s SL=%s TP=%s exp=%s label=%s",
+        "Sending pending order: account_id=%s ticket=%s symbol=%s symbolId=%s type=%s side=%s vol=%s stop=%s limit=%s SL=%s TP=%s exp=%s label=%s",
+        account_id,
+        ticket,
+        symbol_name,
+        symbol_id,
         ptype,
         side,
         volume,
-        symbol_id,
         stop_price,
         limit_price,
         sl,
@@ -210,17 +356,24 @@ def send_pending_order(
     def _on_resp(result):
         try:
             extracted = Protobuf.extract(result)
-            logger.info("Pending order response: %r", extracted)
-
-            # OPTIONAL: if you want to update a map here, you can:
-            # label = getattr(getattr(getattr(extracted, "order", None), "tradeData", None), "label", None)
-            # order_id = getattr(getattr(extracted, "order", None), "orderId", None)
-            # ticket = _parse_mt5_ticket_from_label(label or "")
-            # if ticket and order_id:
-            #     self.pending_order_ids_by_ticket[ticket] = int(order_id)
-
+            context = _extract_response_context(
+                self,
+                extracted,
+                fallback_account_id=account_id,
+                fallback_symbol_id=symbol_id,
+                fallback_label=label,
+            )
+            logger.info("Pending order response: %s payload=%r", _format_context(context), extracted)
         except Exception:
-            logger.warning("Pending order response (raw): %r", result)
+            logger.warning(
+                "Pending order response (raw): account_id=%s ticket=%s symbol=%s symbolId=%s label=%s raw=%r",
+                account_id,
+                ticket,
+                symbol_name,
+                symbol_id,
+                label,
+                result,
+            )
 
     d.addCallback(_on_resp)
     d.addErrback(self._on_error)
@@ -238,15 +391,28 @@ def cancel_pending_order(self, account_id: int, order_id: int):
     req.ctidTraderAccountId = int(account_id)
     req.orderId = int(order_id)
 
-    logger.info("Cancelling pending orderId=%s on account %s", order_id, account_id)
+    logger.info("Cancelling pending order: account_id=%s orderId=%s", account_id, order_id)
 
     d = self.send(req)
 
     def _on_resp(result):
         try:
-            logger.info("Cancel order response: %r", Protobuf.extract(result))
+            extracted = Protobuf.extract(result)
+            context = _extract_response_context(
+                self,
+                extracted,
+                fallback_account_id=account_id,
+            )
+            if context.get("order_id") is None:
+                context["order_id"] = int(order_id)
+            logger.info("Cancel order response: %s payload=%r", _format_context(context), extracted)
         except Exception:
-            logger.warning("Cancel order response (raw): %r", result)
+            logger.warning(
+                "Cancel order response (raw): account_id=%s orderId=%s raw=%r",
+                account_id,
+                order_id,
+                result,
+            )
 
     d.addCallback(_on_resp)
     d.addErrback(self._on_error)
@@ -271,6 +437,8 @@ def modify_position(
     if tp is not None and float(tp) <= 0.0:
         tp = None
 
+    symbol_name = _resolve_symbol_name_from_id(self, symbol_id) if symbol_id is not None else None
+
     if symbol_id is not None:
         if sl is not None:
             sl = self.round_price_for_symbol(symbol_id, sl)
@@ -287,8 +455,11 @@ def modify_position(
         req.takeProfit = float(tp)
 
     logger.info(
-        "Modifying position %s: SL %s→%s, TP %s→%s",
+        "Modifying position: account_id=%s positionId=%s symbol=%s symbolId=%s SL %s→%s TP %s→%s",
+        account_id,
         position_id,
+        symbol_name,
+        symbol_id,
         orig_sl,
         sl,
         orig_tp,
@@ -299,9 +470,25 @@ def modify_position(
 
     def _on_resp(result):
         try:
-            logger.info("Amend response: %r", Protobuf.extract(result))
+            extracted = Protobuf.extract(result)
+            context = _extract_response_context(
+                self,
+                extracted,
+                fallback_account_id=account_id,
+                fallback_symbol_id=symbol_id,
+            )
+            if context.get("position_id") is None:
+                context["position_id"] = int(position_id)
+            logger.info("Amend response: %s payload=%r", _format_context(context), extracted)
         except Exception:
-            logger.warning("Amend response (raw): %r", result)
+            logger.warning(
+                "Amend response (raw): account_id=%s positionId=%s symbol=%s symbolId=%s raw=%r",
+                account_id,
+                position_id,
+                symbol_name,
+                symbol_id,
+                result,
+            )
 
     d.addCallback(_on_resp)
     d.addErrback(self._on_error)
@@ -341,8 +528,10 @@ def close_position(self, *args: Any, **kwargs: Any):
     position_id = int(position_id)
     volume = int(volume)
 
+    symbol_name = None
     if symbol_id is not None:
         symbol_id = int(symbol_id)
+        symbol_name = _resolve_symbol_name_from_id(self, symbol_id)
         volume = self.snap_volume_for_symbol(symbol_id, volume)
 
     req = ProtoOAClosePositionReq()
@@ -350,8 +539,40 @@ def close_position(self, *args: Any, **kwargs: Any):
     req.positionId = position_id
     req.volume = volume
 
-    logger.info("Closing position %s: %s units", position_id, volume)
+    logger.info(
+        "Closing position: account_id=%s positionId=%s symbol=%s symbolId=%s volume=%s",
+        account_id,
+        position_id,
+        symbol_name,
+        symbol_id,
+        volume,
+    )
 
     d = self.send(req)
+
+    def _on_resp(result):
+        try:
+            extracted = Protobuf.extract(result)
+            context = _extract_response_context(
+                self,
+                extracted,
+                fallback_account_id=account_id,
+                fallback_symbol_id=symbol_id,
+            )
+            if context.get("position_id") is None:
+                context["position_id"] = int(position_id)
+            logger.info("Close response: %s payload=%r", _format_context(context), extracted)
+        except Exception:
+            logger.warning(
+                "Close response (raw): account_id=%s positionId=%s symbol=%s symbolId=%s volume=%s raw=%r",
+                account_id,
+                position_id,
+                symbol_name,
+                symbol_id,
+                volume,
+                result,
+            )
+
+    d.addCallback(_on_resp)
     d.addErrback(self._on_error)
     return d
