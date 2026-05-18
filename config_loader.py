@@ -1,15 +1,18 @@
+#!/usr/bin/env python3
 """Configuration Loader for Multi-Account Trading
 
 Loads configuration for multiple cTrader accounts.
 - Credentials loaded from .env file (private, never commit)
 - Trading settings loaded from accounts_config.ini (public, safe to commit)
 """
+
 import configparser
 import json
 import logging
 import os
 from typing import Dict, List, Optional, Set
 from dataclasses import dataclass
+
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
@@ -24,6 +27,8 @@ class AccountConfig:
     client_id: str
     client_secret: str
     access_token: str
+    refresh_token: str
+    token_state_file: str
     environment: str  # "demo" or "live"
 
     # Symbol mapping
@@ -71,18 +76,10 @@ class MultiAccountConfig:
     """Multi-account configuration manager."""
 
     def __init__(self, config_file: str = "accounts_config.ini"):
-        """Load configuration from INI file.
-
-        Args:
-            config_file: Path to configuration file
-        """
         load_dotenv()
 
         self.accounts: Dict[str, AccountConfig] = {}
 
-        # IMPORTANT: allow inline comments like:
-        # reject_if_no_sl = true ; comment
-        # so getboolean/getfloat/getint work.
         self.config = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
 
         if not os.path.exists(config_file):
@@ -97,8 +94,11 @@ class MultiAccountConfig:
         enabled_count = sum(1 for acc in self.accounts.values() if acc.enabled)
         logger.info(f"Loaded {len(self.accounts)} accounts, {enabled_count} enabled")
 
+    def _default_token_state_file(self, account_name: str) -> str:
+        token_dir = os.getenv("CTRADER_TOKEN_STATE_DIR", "runtime_tokens")
+        return os.path.join(token_dir, f"{account_name}.json")
+
     def _load_accounts(self):
-        """Load all account configurations."""
         for section in self.config.sections():
             if not section.startswith("Account_"):
                 logger.warning(f"Skipping non-account section: {section}")
@@ -120,23 +120,22 @@ class MultiAccountConfig:
                 logger.error(f"Failed to load account {section}: {e}", exc_info=True)
 
     def _load_account(self, section: str) -> AccountConfig:
-        """Load a single account configuration.
+        account_name_upper = section.replace("Account_", "").upper()
+        account_name = section.replace("Account_", "")
 
-        Credentials are loaded from environment variables (.env file).
-        Trading settings are loaded from accounts_config.ini.
-        """
-        account_name = section.replace("Account_", "").upper()
-
-        # Load credentials from environment variables
-        account_id_key = f"ACCOUNT_{account_name}_ACCOUNT_ID"
-        client_id_key = f"ACCOUNT_{account_name}_CLIENT_ID"
-        client_secret_key = f"ACCOUNT_{account_name}_CLIENT_SECRET"
-        access_token_key = f"ACCOUNT_{account_name}_ACCESS_TOKEN"
+        account_id_key = f"ACCOUNT_{account_name_upper}_ACCOUNT_ID"
+        client_id_key = f"ACCOUNT_{account_name_upper}_CLIENT_ID"
+        client_secret_key = f"ACCOUNT_{account_name_upper}_CLIENT_SECRET"
+        access_token_key = f"ACCOUNT_{account_name_upper}_ACCESS_TOKEN"
+        refresh_token_key = f"ACCOUNT_{account_name_upper}_REFRESH_TOKEN"
+        token_state_file_key = f"ACCOUNT_{account_name_upper}_TOKEN_STATE_FILE"
 
         account_id = int(os.getenv(account_id_key, "0"))
         client_id = os.getenv(client_id_key, "")
         client_secret = os.getenv(client_secret_key, "")
         access_token = os.getenv(access_token_key, "")
+        refresh_token = os.getenv(refresh_token_key, "")
+        token_state_file = os.getenv(token_state_file_key, "").strip() or self._default_token_state_file(account_name)
 
         if account_id == 0 or not client_id or not client_secret:
             logger.warning(
@@ -144,7 +143,6 @@ class MultiAccountConfig:
                 f"(keys: {account_id_key}, {client_id_key}, {client_secret_key})"
             )
 
-        # Parse custom symbols JSON
         custom_symbols_str = self.config.get(section, "custom_symbols", fallback="{}")
         try:
             custom_symbols = json.loads(custom_symbols_str)
@@ -152,7 +150,6 @@ class MultiAccountConfig:
             logger.warning(f"{section}: Invalid custom_symbols JSON, using empty")
             custom_symbols = {}
 
-        # Parse magic numbers
         magic_str = self.config.get(section, "magic_numbers", fallback="")
         magic_numbers = None
         if magic_str.strip():
@@ -161,19 +158,16 @@ class MultiAccountConfig:
             except ValueError:
                 logger.warning(f"{section}: Invalid magic_numbers format")
 
-        # Parse allowed symbols
         allowed_str = self.config.get(section, "allowed_symbols", fallback="")
         allowed_symbols = None
         if allowed_str.strip():
             allowed_symbols = {s.strip().upper() for s in allowed_str.split(",") if s.strip()}
 
-        # Parse blocked symbols
         blocked_str = self.config.get(section, "blocked_symbols", fallback="")
         blocked_symbols = set()
         if blocked_str.strip():
             blocked_symbols = {s.strip().upper() for s in blocked_str.split(",") if s.strip()}
 
-        # Risk sizing config
         risk_mode = self.config.get(section, "risk_mode", fallback="SOURCE_VOLUME").strip().upper()
         reject_if_no_sl = self.config.getboolean(section, "reject_if_no_sl", fallback=False)
         fixed_lot = self.config.getfloat(section, "fixed_lot", fallback=0.0)
@@ -182,7 +176,6 @@ class MultiAccountConfig:
         risk_percent = self.config.getfloat(section, "risk_percent", fallback=0.0)
         risk_reference = self.config.get(section, "risk_reference", fallback="EQUITY").strip().upper()
 
-        # Startup sync config for missed live market positions
         startup_sync_market_orders = self.config.getboolean(
             section, "startup_sync_market_orders", fallback=False
         )
@@ -196,7 +189,6 @@ class MultiAccountConfig:
             section, "startup_pending_expiration_ms", fallback=0
         )
 
-        # Sanitize risk settings
         if risk_reference not in ("EQUITY", "BALANCE"):
             logger.warning(f"{section}: Invalid risk_reference={risk_reference}, defaulting to EQUITY")
             risk_reference = "EQUITY"
@@ -205,7 +197,6 @@ class MultiAccountConfig:
             logger.warning(f"{section}: Invalid risk_mode={risk_mode}, defaulting to SOURCE_VOLUME")
             risk_mode = "SOURCE_VOLUME"
 
-        # Sanitize startup sync settings
         if startup_market_recovery_mode not in ("market", "market_or_pending", "skip"):
             logger.warning(
                 f"{section}: Invalid startup_market_recovery_mode="
@@ -227,13 +218,23 @@ class MultiAccountConfig:
             )
             startup_pending_expiration_ms = 0
 
+        logger.info(
+            "%s: token config loaded access_present=%s refresh_present=%s token_state_file=%s",
+            section,
+            bool(access_token),
+            bool(refresh_token),
+            token_state_file,
+        )
+
         return AccountConfig(
-            name=section.replace("Account_", ""),
+            name=account_name,
             enabled=self.config.getboolean(section, "enabled", fallback=True),
             account_id=account_id,
             client_id=client_id,
             client_secret=client_secret,
             access_token=access_token,
+            refresh_token=refresh_token,
+            token_state_file=token_state_file,
             environment=self.config.get(section, "environment", fallback="demo"),
             symbol_prefix=self.config.get(section, "symbol_prefix", fallback=""),
             symbol_suffix=self.config.get(section, "symbol_suffix", fallback=""),
@@ -262,21 +263,9 @@ class MultiAccountConfig:
         )
 
     def get_enabled_accounts(self) -> List[AccountConfig]:
-        """Get list of enabled accounts."""
         return [acc for acc in self.accounts.values() if acc.enabled]
 
     def should_copy_trade(self, account: AccountConfig, symbol: str, magic: int, lots: float) -> tuple[bool, str]:
-        """Check if a trade should be copied to this account.
-
-        Args:
-            account: Account configuration
-            symbol: MT5 symbol name
-            magic: Magic number
-            lots: Lot size
-
-        Returns:
-            (should_copy, reason) tuple
-        """
         symbol_upper = symbol.upper()
 
         if account.daily_trade_count >= account.max_daily_trades:
@@ -300,11 +289,10 @@ class MultiAccountConfig:
         return True, "OK"
 
 
-_config_instance: Optional[MultiAccountConfig] = None
+_config_instance: Optional["MultiAccountConfig"] = None
 
 
 def get_multi_account_config() -> MultiAccountConfig:
-    """Get or create global multi-account config instance."""
     global _config_instance
     if _config_instance is None:
         _config_instance = MultiAccountConfig()
