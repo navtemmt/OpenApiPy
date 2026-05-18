@@ -5,14 +5,20 @@ Authentication helpers extracted from ctrader_client.py.
 Move-only refactor: keep CTraderClient attribute names unchanged.
 Uses:
   - self.client_id, self.client_secret
-  - self.account_id, self.access_token
+  - self.account_id, self.access_token, self.refresh_token
   - self.client (low-level OpenApiPy Client)
   - self.is_app_authed, self.is_account_authed
   - self._on_error, self._load_symbol_map
   - self._on_connect_callback
 """
 
+import json
 import logging
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
 from twisted.internet.defer import TimeoutError as TwistedTimeoutError
 
 from ctrader_open_api import Protobuf
@@ -26,6 +32,7 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_AUTH_TIMEOUT_SEC = 15
+TOKEN_REFRESH_URL = "https://openapi.ctrader.com/apps/token"
 
 
 def _get_auth_timeout_sec(self) -> int:
@@ -34,6 +41,181 @@ def _get_auth_timeout_sec(self) -> int:
         return v if v > 0 else DEFAULT_AUTH_TIMEOUT_SEC
     except Exception:
         return DEFAULT_AUTH_TIMEOUT_SEC
+
+
+def _mask_token(token: str) -> str:
+    if not token:
+        return "<empty>"
+    if len(token) <= 12:
+        return token[:4] + "..."
+    return f"{token[:6]}...{token[-4:]}"
+
+
+def _failure_text(failure) -> str:
+    try:
+        return failure.getErrorMessage() or str(failure)
+    except Exception:
+        return str(failure)
+
+
+def _mark_auth_dead(self, reason: str) -> None:
+    self.is_account_authed = False
+    self.auth_failed = True
+    self.auth_failure_reason = reason
+    logger.critical(
+        "[%s] Account auth unrecoverable. Bot is NOT authorized and will not copy trades "
+        "until credentials are fixed. account_id=%s reason=%s",
+        getattr(self, "account_name", None) or getattr(self, "account_id", None),
+        getattr(self, "account_id", None),
+        reason,
+    )
+
+
+def _refresh_access_token(self, reason: str = "") -> bool:
+    refresh_token = getattr(self, "refresh_token", "") or ""
+    if not refresh_token:
+        logger.warning(
+            "[%s] Cannot refresh token: refresh_token missing. reason=%s",
+            getattr(self, "account_name", None) or getattr(self, "account_id", None),
+            reason,
+        )
+        return False
+
+    client_id = getattr(self, "client_id", "") or ""
+    client_secret = getattr(self, "client_secret", "") or ""
+    if not client_id or not client_secret:
+        logger.error(
+            "[%s] Cannot refresh token: client_id/client_secret missing",
+            getattr(self, "account_name", None) or getattr(self, "account_id", None),
+        )
+        return False
+
+    timeout_sec = _get_auth_timeout_sec(self)
+
+    params = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": client_id,
+        "client_secret": client_secret,
+    }
+    url = f"{TOKEN_REFRESH_URL}?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(
+        url,
+        data=b"",
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    logger.warning(
+        "[%s] Attempting token refresh. account_id=%s token_source=%s refresh_token=%s reason=%s",
+        getattr(self, "account_name", None) or getattr(self, "account_id", None),
+        getattr(self, "account_id", None),
+        getattr(self, "current_token_source", None),
+        _mask_token(refresh_token),
+        reason,
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            raw = resp.read().decode("utf-8")
+        payload = json.loads(raw)
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="ignore")
+        except Exception:
+            pass
+        logger.error(
+            "[%s] Token refresh HTTPError status=%s body=%s",
+            getattr(self, "account_name", None) or getattr(self, "account_id", None),
+            getattr(e, "code", None),
+            body,
+        )
+        return False
+    except Exception as e:
+        logger.exception(
+            "[%s] Token refresh request failed: %s",
+            getattr(self, "account_name", None) or getattr(self, "account_id", None),
+            e,
+        )
+        return False
+
+    new_access_token = payload.get("accessToken") or payload.get("access_token") or ""
+    new_refresh_token = payload.get("refreshToken") or payload.get("refresh_token") or ""
+    expires_in = payload.get("expiresIn") or payload.get("expires_in") or 0
+
+    try:
+        expires_in = int(expires_in or 0)
+    except Exception:
+        expires_in = 0
+
+    if not new_access_token:
+        logger.error(
+            "[%s] Token refresh response missing access token payload=%s",
+            getattr(self, "account_name", None) or getattr(self, "account_id", None),
+            payload,
+        )
+        return False
+
+    expires_at = int(time.time()) + expires_in if expires_in > 0 else None
+
+    self._apply_runtime_tokens(
+        access_token=new_access_token,
+        refresh_token=new_refresh_token or refresh_token,
+        expires_at=expires_at,
+        source="refresh",
+        persist=True,
+    )
+
+    logger.info(
+        "[%s] Token refresh success. account_id=%s access_token=%s refresh_token=%s expires_in=%s expires_at=%s",
+        getattr(self, "account_name", None) or getattr(self, "account_id", None),
+        getattr(self, "account_id", None),
+        _mask_token(new_access_token),
+        _mask_token(new_refresh_token or refresh_token),
+        expires_in,
+        expires_at,
+    )
+    return True
+
+
+def _recover_account_auth(self, reason: str) -> None:
+    steps = getattr(self, "_auth_recovery_steps", set())
+
+    if "refresh" not in steps and getattr(self, "refresh_token", None):
+        steps.add("refresh")
+        self._auth_recovery_steps = steps
+        if _refresh_access_token(self, reason=reason):
+            logger.warning(
+                "[%s] Retrying account authorization after successful refresh",
+                getattr(self, "account_name", None) or getattr(self, "account_id", None),
+            )
+            authorize_account(self)
+            return
+        logger.warning(
+            "[%s] Refresh recovery failed; will try .env fallback next",
+            getattr(self, "account_name", None) or getattr(self, "account_id", None),
+        )
+
+    if "env" not in steps:
+        steps.add("env")
+        self._auth_recovery_steps = steps
+        if self._use_bootstrap_tokens(source="env_fallback"):
+            logger.warning(
+                "[%s] Retrying account authorization with .env fallback tokens",
+                getattr(self, "account_name", None) or getattr(self, "account_id", None),
+            )
+            authorize_account(self)
+            return
+        logger.warning(
+            "[%s] .env fallback unavailable or unchanged",
+            getattr(self, "account_name", None) or getattr(self, "account_id", None),
+        )
+
+    _mark_auth_dead(self, reason)
 
 
 # ----------------------------------------------------------------------
@@ -106,7 +288,7 @@ def on_app_auth_success(self, result) -> None:
     logger.info("Application authenticated successfully")
     self.is_app_authed = True
 
-    if self.account_id and self.access_token:
+    if self.account_id and (self.access_token or self.refresh_token or self.bootstrap_access_token or self.bootstrap_refresh_token):
         authorize_account(self)
     else:
         logger.warning(
@@ -125,14 +307,24 @@ def authorize_account(self) -> None:
         logger.warning("Cannot authorize account before app authentication")
         return
 
-    if not self.account_id or not self.access_token:
-        logger.error("Account ID or access token missing")
+    if not self.account_id:
+        logger.error("Account ID missing")
+        return
+
+    if not self.access_token:
+        logger.warning(
+            "[%s] Access token missing before account auth. Trying recovery path.",
+            getattr(self, "account_name", None) or getattr(self, "account_id", None),
+        )
+        _recover_account_auth(self, "access token missing before authorize_account")
         return
 
     logger.info(
-        "Authorizing account %s... token_present=%s timeout=%ss",
+        "Authorizing account %s... token_source=%s token_present=%s refresh_present=%s timeout=%ss",
         self.account_id,
+        getattr(self, "current_token_source", None),
         bool(self.access_token),
+        bool(getattr(self, "refresh_token", None)),
         timeout_sec,
     )
 
@@ -150,24 +342,29 @@ def authorize_account(self) -> None:
             logger.debug("Unable to attach addTimeout() to account auth deferred", exc_info=True)
     except Exception:
         logger.exception("Failed to send account auth request")
+        _recover_account_auth(self, "send account auth request failed")
         return
 
     def _ok(result):
         return on_account_auth_success(self, result)
 
     def _err(failure):
+        reason = _failure_text(failure)
         if failure.check(TwistedTimeoutError):
             logger.error(
                 "Account auth timed out after %ss for account_id=%s",
                 timeout_sec,
                 self.account_id,
             )
+            reason = f"account auth timeout after {timeout_sec}s"
         else:
             logger.error(
                 "Account auth failed for account_id=%s: %s",
                 self.account_id,
                 failure,
             )
+
+        _recover_account_auth(self, reason)
         return self._on_error(failure)
 
     d.addCallback(_ok)
@@ -183,10 +380,22 @@ def on_account_auth_success(self, result) -> None:
 
     if not isinstance(payload, ProtoOAAccountAuthRes):
         logger.error("Unexpected account auth response type: %s", type(payload))
+        _recover_account_auth(self, f"unexpected account auth response type {type(payload)}")
         return
 
-    logger.info("Account %s authorized successfully", self.account_id)
+    self.auth_failed = False
+    self.auth_failure_reason = None
+    self._auth_recovery_steps = set()
+
+    logger.info(
+        "Account %s authorized successfully (token_source=%s)",
+        self.account_id,
+        getattr(self, "current_token_source", None),
+    )
     self.is_account_authed = True
+
+    if getattr(self, "current_token_source", None) == "env_fallback":
+        self._save_token_state(source="env_fallback_recovered")
 
     try:
         self._load_symbol_map()
