@@ -1,23 +1,26 @@
-Notes: risk percent not working because did not get cache balance, does not remap existing order when startup
-
----
-
 ## MT4/MT5 to cTrader Copy Trading System
 
-This repository includes a copy trading bridge that forwards master trade events from MetaTrader to cTrader accounts through the cTrader Open API. The current runtime uses `main.py` as the entrypoint and `bridge_server.py` as the HTTP receiver. Legacy file `mt5_bridge_server.py` is no longer the active server path.
+This repository contains a copy trading bridge that forwards master trade events from MetaTrader to cTrader accounts through the cTrader Open API. The active runtime uses `main.py` as the entrypoint and `bridge_server.py` as the HTTP receiver. Legacy file `mt5_bridge_server.py` is not the primary startup path.
 
-### Quick Start
+### Current status
+
+- Startup reconcile restores existing pending-order mappings on reconnect.
+- Pending cancel events can now resolve startup-restored `orderId` mappings correctly.
+- Percent-risk sizing still depends on cached account funds.
+- If reconcile does not provide `equity` or `balance`, percent-based sizing may not work until funds are obtained from another account-state source.
+
+### Quick start
 
 See [MT5_CTRADER_SETUP.md](MT5_CTRADER_SETUP.md) for full setup and account configuration details.
 
-### Runtime Components
+### Runtime components
 
-1. **MT4/MT5 CopyTrader EA** - Sends trade events by HTTP/JSON
-2. **main.py** - Starts the Twisted reactor, loads accounts, and launches the HTTP listener(s)
-3. **bridge_server.py** - Receives HTTP trade events, normalizes payloads, de-duplicates events, and forwards them for processing
-4. **trade_processor.py** - Applies business logic for OPEN, PENDING_OPEN, PENDING_CANCEL, MODIFY, and CLOSE events
-5. **trade_executor.py** - Sends the corresponding actions to cTrader accounts
-6. **account_manager.py** - Tracks account clients, mappings, and runtime state
+1. **MT4/MT5 CopyTrader EA** - Sends trade events by HTTP/JSON.
+2. **main.py** - Starts the Twisted reactor, loads accounts, and launches the HTTP listener(s).
+3. **bridge_server.py** - Receives HTTP trade events, normalizes payloads, de-duplicates events, and forwards them for processing.
+4. **trade_processor.py** - Applies business logic for OPEN, PENDING_OPEN, PENDING_CANCEL, MODIFY, and CLOSE events.
+5. **trade_executor.py** - Sends the corresponding actions to cTrader accounts.
+6. **account_manager.py** - Tracks account clients, startup reconcile state, mappings, and cached runtime account data.
 
 ### Architecture
 
@@ -61,10 +64,12 @@ Recommended local setup:
 - **MT5 allowed WebRequest URL**: `http://127.0.0.1:3140`
 
 Reason:
-- MT4 `WebRequest()` is commonly used with protocol-default ports, so `http://127.0.0.1` is the safer MT4 setting.
-- MT5 may continue using `http://127.0.0.1:3140` if that path is already working in your environment.
+
+- MT4 `WebRequest()` commonly uses protocol-default ports, so `http://127.0.0.1` is the safer MT4 setting.
+- MT5 can continue using `http://127.0.0.1:3140` if that path already works in your environment.
 
 Important:
+
 - Set only the **base URL** in the EA input.
 - Do **not** append `/trade_signal` manually in the EA settings, because the EA code appends that path automatically.
 
@@ -86,15 +91,16 @@ Important:
 ### Notes
 
 - `bridge_server.py` is the active HTTP server in the current refactor branch.
-- `main.py` should be the startup entrypoint.
+- `main.py` is the intended startup entrypoint.
 - `mt5_bridge_server.py` is a legacy file and should not be used as the main startup command unless you intentionally maintain the old path.
-- Incoming MT4/MT5 payload differences should be normalized before processing so downstream logic works with one canonical schema.
-- If you enable dual listeners, MT4 can use port `80` while MT5 continues using port `3140`.
+- Incoming MT4/MT5 payload differences should be normalized before processing so downstream logic can operate on one canonical schema.
+- If dual listeners are enabled, MT4 can use port `80` while MT5 continues using port `3140`.
+- Startup reconcile can restore existing pending-order mappings, but percent-risk sizing still requires valid cached funds.
 
 ### Security
 
-- Credentials are loaded from `.env`
-- cTrader authentication uses OAuth/Open API credentials
-- Sensitive secrets should never be committed to the repository
+- Credentials are loaded from `.env`.
+- cTrader authentication uses OAuth/Open API credentials.
+- Sensitive secrets should never be committed to the repository.
 
 For detailed setup, troubleshooting, and account configuration, see [MT5_CTRADER_SETUP.md](MT5_CTRADER_SETUP.md).
