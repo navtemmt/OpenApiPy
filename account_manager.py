@@ -13,6 +13,7 @@ from ctrader_client import CTraderClient
 from config_loader import AccountConfig
 from ctrader_open_api import Protobuf
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
+    ProtoOAAccountAuthRes,
     ProtoOAExecutionEvent,
     ProtoOAReconcileReq,
     ProtoOAReconcileRes,
@@ -55,6 +56,7 @@ class AccountManager:
 
         # Per-account reconcile guard
         self.reconcile_requested: Dict[str, bool] = {}
+        self.auth_seen: Dict[str, bool] = {}
 
     # ------------------------------------------------------------------
     # Helpers
@@ -179,6 +181,8 @@ class AccountManager:
             self.mt5_payloads[acc_name] = {}
         if acc_name not in self.reconcile_requested:
             self.reconcile_requested[acc_name] = False
+        if acc_name not in self.auth_seen:
+            self.auth_seen[acc_name] = False
 
     def _send_reconcile_request(self, account_name: str):
         client = self.get_client(account_name)
@@ -233,20 +237,6 @@ class AccountManager:
             self.reconcile_requested[account_name] = False
             logger.error("[%s] Failed to send reconcile request: %s", account_name, e)
 
-    def _attach_post_auth_reconcile(self, client: CTraderClient, account_name: str):
-        original = client._on_account_auth_success
-
-        def wrapped(result, _orig=original, _acc_name=account_name):
-            rv = _orig(result)
-            try:
-                logger.info("✓ Account %s connected and authenticated", _acc_name)
-                self._send_reconcile_request(_acc_name)
-            except Exception as e:
-                logger.error("[%s] Post-auth reconcile hook failed: %s", _acc_name, e)
-            return rv
-
-        client._on_account_auth_success = wrapped
-
     # ------------------------------------------------------------------
     # Account lifecycle
     # ------------------------------------------------------------------
@@ -261,11 +251,9 @@ class AccountManager:
 
         client = CTraderClient(env=account.environment)
 
-        # Override client credentials with account-specific values FIRST
         client.client_id = account.client_id
         client.client_secret = account.client_secret
 
-        # Now set account credentials (account_id and access_token)
         client.set_account_credentials(
             account_id=self._config_account_id(account),
             access_token=account.access_token or "",
@@ -278,15 +266,20 @@ class AccountManager:
         self.configs[account.name] = account
         self._ensure_account_maps(account.name)
 
-        # Ensure reconcile is sent only after account auth succeeds
-        self._attach_post_auth_reconcile(client, account.name)
-
         def on_message(message, acc_name=account.name):
             try:
                 self._ensure_account_maps(acc_name)
                 extracted = Protobuf.extract(message)
 
-                # 1) Execution events: fills / partial fills / accepts etc.
+                # 0) Account auth success -> trigger reconcile here
+                if isinstance(extracted, ProtoOAAccountAuthRes):
+                    if not self.auth_seen.get(acc_name, False):
+                        self.auth_seen[acc_name] = True
+                        logger.info("✓ Account %s connected and authenticated", acc_name)
+                    self._send_reconcile_request(acc_name)
+                    return
+
+                # 1) Execution events
                 if isinstance(extracted, ProtoOAExecutionEvent):
                     logger.info(f"[{acc_name}] RAW EXECUTION: {extracted}")
 
@@ -373,7 +366,7 @@ class AccountManager:
 
                     return
 
-                # 2) Reconcile response: preload ALL positions + cache equity/balance if present
+                # 2) Reconcile response
                 if isinstance(extracted, ProtoOAReconcileRes):
                     eq, bal = self._extract_account_equity_balance(extracted)
                     if eq is not None:
@@ -467,6 +460,7 @@ class AccountManager:
         def on_connected():
             self._ensure_account_maps(account.name)
             self.reconcile_requested[account.name] = False
+            self.auth_seen[account.name] = False
             logger.info(
                 "✓ Account %s socket connected; waiting for app/account authorization",
                 account.name,
@@ -495,7 +489,6 @@ class AccountManager:
         return pos_map.get(int(mt5_ticket))
 
     def get_order_id(self, account_name: str, mt5_ticket: int) -> Optional[int]:
-        """Get cTrader orderId for a pending order by MT5 ticket."""
         omap = self.order_maps.get(account_name) or {}
         return omap.get(int(mt5_ticket))
 
@@ -504,14 +497,12 @@ class AccountManager:
         return vol_map.get(int(position_id))
 
     def get_ticket_volume(self, account_name: str, mt5_ticket: int) -> Optional[int]:
-        """Convenience: get volume by MT5 ticket (via positionId mapping)."""
         pid = self.get_position_id(account_name, mt5_ticket)
         if not pid:
             return None
         return self.get_position_volume(account_name, pid)
 
     def remove_mapping(self, account_name: str, mt5_ticket: int):
-        """Remove ticket->positionId mapping."""
         try:
             self.position_maps.get(account_name, {}).pop(int(mt5_ticket), None)
             self.order_maps.get(account_name, {}).pop(int(mt5_ticket), None)
@@ -522,10 +513,7 @@ class AccountManager:
     def get_all_accounts(self) -> Dict[str, Tuple[CTraderClient, AccountConfig]]:
         return {name: (self.clients[name], self.configs[name]) for name in self.clients.keys()}
 
-    # ------------------------------------------------------------------
-    # Compatibility aliases for callers using older method names
-    # ------------------------------------------------------------------
-
+    # compatibility aliases
     def getpositionid(self, account_name: str, mt5_ticket: int) -> Optional[int]:
         return self.get_position_id(account_name, mt5_ticket)
 
