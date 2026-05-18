@@ -248,6 +248,9 @@ class AccountManager:
         client.set_account_credentials(
             account_id=account.account_id,
             access_token=account.access_token or "",
+            refresh_token=account.refresh_token or "",
+            token_state_file=account.token_state_file,
+            account_name=account.name,
         )
 
         self.clients[account.name] = client
