@@ -4,6 +4,7 @@ CTrader Open API Client Wrapper for MT5→cTrader Copy Trading
 Provides high-level trading methods wrapping the low-level OpenApiPy SDK.
 """
 
+import json
 import os
 import time
 import logging
@@ -28,7 +29,6 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# Cache numeric payloadType for spot events
 PROTO_OA_SPOT_EVENT_TYPE = ProtoOASpotEvent().payloadType
 
 
@@ -49,18 +49,14 @@ class CTraderClient:
 
         self.client = Client(self.host, self.port, TcpProtocol)
 
-        # Timeout configuration
         self.default_request_timeout = self._env_int("CTRADER_REQUEST_TIMEOUT_SEC", 30)
         self.auth_timeout_sec = self._env_int("CTRADER_AUTH_TIMEOUT_SEC", 30)
 
-        # Expose reactor for helpers that call addTimeout(..., self.client.reactor)
         try:
             self.client.reactor = reactor
         except Exception:
             pass
 
-        # Keep original low-level send and patch client.send so even direct
-        # self.client.send(...) calls from helper modules use unified timeout logic.
         self._raw_client_send = self.client.send
         self.client.send = self._client_send_with_timeout
 
@@ -69,28 +65,35 @@ class CTraderClient:
         self.is_account_authed = False
 
         self.account_id: Optional[int] = None
-        self.access_token: Optional[str] = None
+        self.account_name: Optional[str] = None
 
-        # Symbol maps (populated after account auth)
+        self.access_token: Optional[str] = None
+        self.refresh_token: Optional[str] = None
+        self.token_expires_at: Optional[int] = None
+        self.current_token_source: Optional[str] = None
+
+        self.bootstrap_access_token: Optional[str] = None
+        self.bootstrap_refresh_token: Optional[str] = None
+        self.token_state_file: Optional[str] = None
+
+        self.auth_failed = False
+        self.auth_failure_reason: Optional[str] = None
+        self._auth_recovery_steps = set()
+
         self.symbol_name_to_id: Dict[str, int] = {}
         self.symbol_details: Dict[int, object] = {}
 
-        # Spot quote cache: symbolId -> {"bid": float, "ask": float, "ts": int}
-        # Filled only if you subscribe to spots.
         self.spot_quotes: Dict[int, Dict[str, Any]] = {}
 
-        # Health monitoring
         self.heartbeat_task = None
         self.health_check_task = None
         self.heartbeat_interval = 30
         self.last_message_time = time.time()
         self.max_idle_time = 120
 
-        # Callbacks
         self._on_connect_callback: Optional[Callable] = None
         self._on_message_callback: Optional[Callable] = None
 
-        # Wire SDK callbacks
         self.client.setConnectedCallback(self._handle_connected)
         self.client.setDisconnectedCallback(self._handle_disconnected)
         self.client.setMessageReceivedCallback(self._handle_message)
@@ -112,20 +115,228 @@ class CTraderClient:
         except Exception:
             return default
 
-    def _client_send_with_timeout(self, req, timeout=None):
-        """
-        Unified timeout-aware send wrapper for the low-level SDK client.
+    @staticmethod
+    def _env_bool(name: str, default: bool = False) -> bool:
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        return str(raw).strip().lower() in ("1", "true", "yes", "y", "on")
 
-        This method is assigned to self.client.send so any code path using
-        self.client.send(...) also benefits from timeout handling.
-        """
+    @staticmethod
+    def _mask_token(token: Optional[str]) -> str:
+        if not token:
+            return "<empty>"
+        if len(token) <= 12:
+            return token[:4] + "..."
+        return f"{token[:6]}...{token[-4:]}"
+
+    def _default_token_state_file(self) -> str:
+        token_dir = os.getenv("CTRADER_TOKEN_STATE_DIR", "runtime_tokens")
+        base_name = (self.account_name or str(self.account_id or "unknown")).strip()
+        return os.path.join(token_dir, f"{base_name}.json")
+
+    def _apply_runtime_tokens(
+        self,
+        access_token: Optional[str],
+        refresh_token: Optional[str] = None,
+        expires_at: Optional[int] = None,
+        source: str = "runtime",
+        persist: bool = False,
+    ) -> None:
+        self.access_token = access_token or ""
+        self.refresh_token = refresh_token or self.refresh_token or ""
+        self.token_expires_at = int(expires_at) if expires_at else None
+        self.current_token_source = source
+        self.auth_failed = False
+        self.auth_failure_reason = None
+
+        logger.info(
+            "[%s] Runtime tokens updated source=%s access_token=%s refresh_present=%s expires_at=%s",
+            self.account_name or self.account_id,
+            source,
+            self._mask_token(self.access_token),
+            bool(self.refresh_token),
+            self.token_expires_at,
+        )
+
+        if persist:
+            self._save_token_state(source=source)
+
+    def _load_token_state(self) -> Optional[dict]:
+        if not self.token_state_file:
+            return None
+
+        try:
+            with open(self.token_state_file, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if not isinstance(payload, dict):
+                raise ValueError("token state payload is not a JSON object")
+            return payload
+        except FileNotFoundError:
+            return None
+        except Exception as e:
+            logger.exception(
+                "[%s] Failed to read token state file %s: %s",
+                self.account_name or self.account_id,
+                self.token_state_file,
+                e,
+            )
+            return None
+
+    def _save_token_state(self, source: str = "runtime") -> None:
+        if not self.token_state_file:
+            return
+
+        try:
+            parent = os.path.dirname(self.token_state_file)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+
+            payload = {
+                "account_id": self.account_id,
+                "account_name": self.account_name,
+                "access_token": self.access_token or "",
+                "refresh_token": self.refresh_token or "",
+                "expires_at": self.token_expires_at,
+                "updated_at": int(time.time()),
+                "source": source,
+            }
+
+            tmp_path = self.token_state_file + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, self.token_state_file)
+
+            logger.info(
+                "[%s] Token state saved file=%s source=%s access_token=%s refresh_present=%s",
+                self.account_name or self.account_id,
+                self.token_state_file,
+                source,
+                self._mask_token(self.access_token),
+                bool(self.refresh_token),
+            )
+        except Exception as e:
+            logger.exception(
+                "[%s] Failed to save token state file %s: %s",
+                self.account_name or self.account_id,
+                self.token_state_file,
+                e,
+            )
+
+    def _use_bootstrap_tokens(self, source: str = "env_fallback") -> bool:
+        access_token = self.bootstrap_access_token or ""
+        refresh_token = self.bootstrap_refresh_token or ""
+
+        if not access_token and not refresh_token:
+            logger.warning(
+                "[%s] No bootstrap .env tokens available for fallback",
+                self.account_name or self.account_id,
+            )
+            return False
+
+        same_access = (access_token or "") == (self.access_token or "")
+        same_refresh = (refresh_token or "") == (self.refresh_token or "")
+        if same_access and same_refresh:
+            logger.warning(
+                "[%s] Bootstrap .env tokens are identical to current runtime tokens; skipping fallback",
+                self.account_name or self.account_id,
+            )
+            return False
+
+        self._apply_runtime_tokens(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_at=None,
+            source=source,
+            persist=False,
+        )
+        return True
+
+    def _load_startup_tokens(self) -> None:
+        force_env = self._env_bool("CTRADER_FORCE_ENV_TOKENS", False)
+        clear_state = self._env_bool("CTRADER_CLEAR_TOKEN_STATE_ON_START", False)
+
+        if not self.token_state_file:
+            self.token_state_file = self._default_token_state_file()
+
+        if clear_state and self.token_state_file and os.path.exists(self.token_state_file):
+            try:
+                os.remove(self.token_state_file)
+                logger.warning(
+                    "[%s] Deleted token state file on startup due to CTRADER_CLEAR_TOKEN_STATE_ON_START=1 file=%s",
+                    self.account_name or self.account_id,
+                    self.token_state_file,
+                )
+            except Exception:
+                logger.exception(
+                    "[%s] Failed to delete token state file on startup: %s",
+                    self.account_name or self.account_id,
+                    self.token_state_file,
+                )
+
+        if force_env:
+            logger.warning(
+                "[%s] FORCE_ENV_TOKENS enabled; ignoring token state file and using .env bootstrap tokens",
+                self.account_name or self.account_id,
+            )
+            self._apply_runtime_tokens(
+                access_token=self.bootstrap_access_token or "",
+                refresh_token=self.bootstrap_refresh_token or "",
+                expires_at=None,
+                source="env",
+                persist=False,
+            )
+            return
+
+        state = self._load_token_state()
+        if state:
+            state_access = state.get("access_token") or ""
+            state_refresh = state.get("refresh_token") or self.bootstrap_refresh_token or ""
+            expires_at = state.get("expires_at")
+            try:
+                expires_at = int(expires_at) if expires_at else None
+            except Exception:
+                expires_at = None
+
+            self._apply_runtime_tokens(
+                access_token=state_access or self.bootstrap_access_token or "",
+                refresh_token=state_refresh,
+                expires_at=expires_at,
+                source="state_file",
+                persist=False,
+            )
+            logger.info(
+                "[%s] Loaded tokens from state file file=%s access_token=%s refresh_present=%s expires_at=%s",
+                self.account_name or self.account_id,
+                self.token_state_file,
+                self._mask_token(self.access_token),
+                bool(self.refresh_token),
+                self.token_expires_at,
+            )
+            return
+
+        self._apply_runtime_tokens(
+            access_token=self.bootstrap_access_token or "",
+            refresh_token=self.bootstrap_refresh_token or "",
+            expires_at=None,
+            source="env",
+            persist=False,
+        )
+        logger.info(
+            "[%s] Token state file missing/unusable; using .env bootstrap tokens file=%s access_token=%s refresh_present=%s",
+            self.account_name or self.account_id,
+            self.token_state_file,
+            self._mask_token(self.access_token),
+            bool(self.refresh_token),
+        )
+
+    def _client_send_with_timeout(self, req, timeout=None):
         effective_timeout = timeout
         if effective_timeout is None:
             effective_timeout = self.default_request_timeout
 
         req_name = type(req).__name__
 
-        # First, try low-level send(req, timeout=...)
         if effective_timeout:
             try:
                 return self._raw_client_send(req, timeout=effective_timeout)
@@ -142,7 +353,6 @@ class CTraderClient:
                 )
                 raise
 
-        # Fallback: call raw send(req) and attach a Deferred timeout if possible
         d = self._raw_client_send(req)
 
         if effective_timeout and hasattr(d, "addTimeout"):
@@ -179,7 +389,11 @@ class CTraderClient:
                 logger.exception("on_connect callback crashed")
 
     def _handle_disconnected(self, client, reason):
-        logger.warning("Disconnected from cTrader: %s", reason)
+        logger.warning(
+            "[%s] Disconnected from cTrader: %s",
+            self.account_name or self.account_id,
+            reason,
+        )
         self.is_connected = False
         self.is_app_authed = False
         self.is_account_authed = False
@@ -187,6 +401,13 @@ class CTraderClient:
         self.symbol_details.clear()
         self.spot_quotes.clear()
         self._stop_periodic_tasks()
+
+        if self.auth_failed:
+            logger.critical(
+                "[%s] Bot remains stopped for trading due to auth failure. reason=%s",
+                self.account_name or self.account_id,
+                self.auth_failure_reason,
+            )
 
     def _handle_message(self, client, message):
         self.last_message_time = time.time()
@@ -302,10 +523,6 @@ class CTraderClient:
     # ------------------------------------------------------------------
 
     def subscribe_spots(self, account_id: int, symbol_ids: Iterable[int]):
-        """
-        Subscribe to spot prices for given symbolIds.
-        After this, you'll receive ProtoOASpotEvent updates and self.spot_quotes will fill.
-        """
         req = ProtoOASubscribeSpotsReq()
         req.ctidTraderAccountId = int(account_id)
         req.symbolId.extend([int(x) for x in symbol_ids if int(x) > 0])
@@ -318,7 +535,6 @@ class CTraderClient:
         return self.send(req)
 
     def get_last_quote(self, symbol_id: int) -> Optional[Dict[str, Any]]:
-        """Returns {'bid': float, 'ask': float, 'ts': int} if available."""
         return self.spot_quotes.get(int(symbol_id))
 
     # ------------------------------------------------------------------
@@ -336,10 +552,32 @@ class CTraderClient:
     # Public API
     # ------------------------------------------------------------------
 
-    def set_account_credentials(self, account_id: int, access_token: str):
+    def set_account_credentials(
+        self,
+        account_id: int,
+        access_token: str,
+        refresh_token: str = "",
+        token_state_file: Optional[str] = None,
+        account_name: Optional[str] = None,
+    ):
         self.account_id = int(account_id)
-        self.access_token = access_token
-        logger.info("Account credentials set: %s", account_id)
+        self.account_name = account_name or str(account_id)
+
+        self.bootstrap_access_token = access_token or ""
+        self.bootstrap_refresh_token = refresh_token or ""
+        self.token_state_file = token_state_file or self._default_token_state_file()
+
+        self._load_startup_tokens()
+
+        logger.info(
+            "[%s] Account credentials set account_id=%s token_source=%s state_file=%s bootstrap_access=%s bootstrap_refresh_present=%s",
+            self.account_name,
+            self.account_id,
+            self.current_token_source,
+            self.token_state_file,
+            self._mask_token(self.bootstrap_access_token),
+            bool(self.bootstrap_refresh_token),
+        )
 
     def connect(self, on_connect: Optional[Callable] = None):
         self._on_connect_callback = on_connect
@@ -350,7 +588,6 @@ class CTraderClient:
         self._on_message_callback = callback
 
     def send(self, req, timeout=None):
-        """Facade for timeout-aware low-level sending."""
         return self.client.send(req, timeout=timeout)
 
     # ------------------------------------------------------------------
@@ -388,9 +625,6 @@ class CTraderClient:
         tp: Optional[float] = None,
         label: str = "MT5_Copy",
     ):
-        """
-        Market order sender.
-        """
         return trading_impl.send_market_order(
             self,
             account_id=account_id,
@@ -403,16 +637,9 @@ class CTraderClient:
         )
 
     def send_pending_order(self, *args: Any, **kwargs: Any):
-        """
-        Passthrough for pending orders (LIMIT/STOP/STOP_LIMIT).
-        Required by trade_executor.copy_pending_to_account().
-        """
         return trading_impl.send_pending_order(self, *args, **kwargs)
 
     def cancel_pending_order(self, account_id: int, order_id: int):
-        """
-        Cancel an existing pending order by cTrader orderId.
-        """
         return trading_impl.cancel_pending_order(self, account_id=account_id, order_id=order_id)
 
     def modify_position(
