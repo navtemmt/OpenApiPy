@@ -152,6 +152,22 @@ class AccountManager:
         except Exception:
             return None, None
 
+    @staticmethod
+    def _config_account_id(config: AccountConfig) -> Optional[int]:
+        try:
+            v = getattr(config, "account_id", None)
+            if v is not None:
+                return int(v)
+        except Exception:
+            pass
+        try:
+            v = getattr(config, "accountid", None)
+            if v is not None:
+                return int(v)
+        except Exception:
+            pass
+        return None
+
     def _ensure_account_maps(self, acc_name: str):
         if acc_name not in self.position_maps:
             self.position_maps[acc_name] = {}
@@ -172,13 +188,18 @@ class AccountManager:
             logger.warning("[%s] Cannot send reconcile: missing client/config", account_name)
             return
 
+        account_id = self._config_account_id(config)
+        if not account_id:
+            logger.warning("[%s] Cannot send reconcile: missing account_id", account_name)
+            return
+
         if self.reconcile_requested.get(account_name, False):
             logger.info("[%s] Reconcile already requested for this connection", account_name)
             return
 
         try:
             req = ProtoOAReconcileReq()
-            req.ctidTraderAccountId = int(config.account_id)
+            req.ctidTraderAccountId = int(account_id)
 
             logger.info("[%s] Sending reconcile request...", account_name)
             d = client.send(req)
@@ -246,7 +267,7 @@ class AccountManager:
 
         # Now set account credentials (account_id and access_token)
         client.set_account_credentials(
-            account_id=account.account_id,
+            account_id=self._config_account_id(account),
             access_token=account.access_token or "",
             refresh_token=account.refresh_token or "",
             token_state_file=account.token_state_file,
@@ -292,6 +313,10 @@ class AccountManager:
                         if position_id and ticket is not None:
                             self.position_maps[acc_name][int(ticket)] = position_id
                             notify_position_update(acc_name, int(ticket), self)
+                            logger.info(
+                                f"[{acc_name}] (exec pos) MT5 ticket {int(ticket)} -> "
+                                f"cTrader positionId {position_id}"
+                            )
 
                         vol = self._extract_position_volume(pos)
                         if position_id and vol > 0:
@@ -340,6 +365,8 @@ class AccountManager:
                                                 account_manager=self,
                                                 position=pos,
                                                 symbol=symbol,
+                                                mt5_symbol=None,
+                                                mt5_data=mt5_data,
                                             )
                         except Exception as e:
                             logger.debug(f"[{acc_name}] over-risk enforce failed: {e}")
@@ -361,7 +388,8 @@ class AccountManager:
                         )
 
                     count = 0
-                    for pos in extracted.position:
+                    pos_list = list(getattr(extracted, "position", []) or [])
+                    for pos in pos_list:
                         position_id = int(getattr(pos, "positionId", 0) or 0)
                         if not position_id:
                             continue
@@ -376,21 +404,32 @@ class AccountManager:
                         if ticket is not None:
                             self.position_maps[acc_name][int(ticket)] = position_id
                             notify_position_update(acc_name, int(ticket), self)
+                            logger.info(
+                                f"[{acc_name}] (reconcile pos) MT5 ticket {int(ticket)} -> "
+                                f"cTrader positionId {position_id} volume={vol}"
+                            )
                             count += 1
 
+                    order_count = 0
                     try:
-                        for o in getattr(extracted, "order", []):
+                        for o in list(getattr(extracted, "order", []) or []):
                             order_id = int(getattr(o, "orderId", 0) or 0)
                             olabel = self._extract_order_label(o)
                             oticket = self._label_to_ticket(olabel)
                             if order_id and oticket is not None:
                                 self.order_maps[acc_name][int(oticket)] = int(order_id)
+                                logger.info(
+                                    f"[{acc_name}] (reconcile order) MT5 ticket {int(oticket)} -> "
+                                    f"cTrader orderId {int(order_id)}"
+                                )
+                                order_count += 1
                     except Exception:
-                        pass
+                        logger.debug("[%s] Failed parsing reconcile orders", acc_name, exc_info=True)
 
                     logger.info(
                         f"[{acc_name}] Reconcile complete: {count} MT5 positions "
-                        f"({len(self.position_volumes[acc_name])} with volume)"
+                        f"({len(self.position_volumes[acc_name])} positions with volume cached), "
+                        f"{order_count} orders mapped"
                     )
                     return
 
@@ -421,11 +460,12 @@ class AccountManager:
                 )
 
             except Exception as e:
-                logger.debug(f"[{acc_name}] Failed to parse message: {e}")
+                logger.debug(f"[{acc_name}] Failed to parse message: {e}", exc_info=True)
 
         client.set_message_callback(on_message)
 
         def on_connected():
+            self._ensure_account_maps(account.name)
             self.reconcile_requested[account.name] = False
             logger.info(
                 "✓ Account %s socket connected; waiting for app/account authorization",
@@ -481,6 +521,25 @@ class AccountManager:
 
     def get_all_accounts(self) -> Dict[str, Tuple[CTraderClient, AccountConfig]]:
         return {name: (self.clients[name], self.configs[name]) for name in self.clients.keys()}
+
+    # ------------------------------------------------------------------
+    # Compatibility aliases for callers using older method names
+    # ------------------------------------------------------------------
+
+    def getpositionid(self, account_name: str, mt5_ticket: int) -> Optional[int]:
+        return self.get_position_id(account_name, mt5_ticket)
+
+    def getorderid(self, account_name: str, mt5_ticket: int) -> Optional[int]:
+        return self.get_order_id(account_name, mt5_ticket)
+
+    def getpositionvolume(self, account_name: str, position_id: int) -> Optional[int]:
+        return self.get_position_volume(account_name, position_id)
+
+    def removemapping(self, account_name: str, mt5_ticket: int):
+        self.remove_mapping(account_name, mt5_ticket)
+
+    def getallaccounts(self) -> Dict[str, Tuple[CTraderClient, AccountConfig]]:
+        return self.get_all_accounts()
 
 
 # Global instance
