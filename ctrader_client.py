@@ -133,7 +133,12 @@ class CTraderClient:
     def _default_token_state_file(self) -> str:
         token_dir = os.getenv("CTRADER_TOKEN_STATE_DIR", "runtime_tokens")
         base_name = (self.account_name or str(self.account_id or "unknown")).strip()
-        return os.path.join(token_dir, f"{base_name}.json")
+        return os.path.normpath(os.path.join(token_dir, f"{base_name}.json"))
+
+    def _normalize_token_state_file(self, path: Optional[str]) -> Optional[str]:
+        if not path:
+            return None
+        return os.path.normpath(path)
 
     def _apply_runtime_tokens(
         self,
@@ -258,6 +263,8 @@ class CTraderClient:
 
         if not self.token_state_file:
             self.token_state_file = self._default_token_state_file()
+        else:
+            self.token_state_file = self._normalize_token_state_file(self.token_state_file)
 
         if clear_state and self.token_state_file and os.path.exists(self.token_state_file):
             try:
@@ -284,7 +291,7 @@ class CTraderClient:
                 refresh_token=self.bootstrap_refresh_token or "",
                 expires_at=None,
                 source="env",
-                persist=False,
+                persist=True,
             )
             return
 
@@ -320,7 +327,7 @@ class CTraderClient:
             refresh_token=self.bootstrap_refresh_token or "",
             expires_at=None,
             source="env",
-            persist=False,
+            persist=True,
         )
         logger.info(
             "[%s] Token state file missing/unusable; using .env bootstrap tokens file=%s access_token=%s refresh_present=%s",
@@ -565,7 +572,9 @@ class CTraderClient:
 
         self.bootstrap_access_token = access_token or ""
         self.bootstrap_refresh_token = refresh_token or ""
-        self.token_state_file = token_state_file or self._default_token_state_file()
+        self.token_state_file = self._normalize_token_state_file(
+            token_state_file or self._default_token_state_file()
+        )
 
         self._load_startup_tokens()
 
