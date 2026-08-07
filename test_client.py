@@ -4,27 +4,16 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAGetAccountListByAccessTokenReq,
 )
 from twisted.internet import reactor
-from twisted.python import log
-from dotenv import load_dotenv
-
-import os
 import sys
-
-
-# ---------------------------------------------------------------------
-# Logging and .env loading
-# ---------------------------------------------------------------------
-
-log.startLogging(sys.stderr)
+import os
+from dotenv import load_dotenv
 
 print("Starting test_client.py...", file=sys.stderr, flush=True)
 
 load_dotenv(override=True)
 
-
-# ---------------------------------------------------------------------
-# Environment / account selection
-# ---------------------------------------------------------------------
+HOST = EndPoints.PROTOBUF_DEMO_HOST
+PORT = EndPoints.PROTOBUF_PORT
 
 ACCOUNT_ALIAS = (
     os.getenv("TEST_ACCOUNT_ALIAS")
@@ -32,17 +21,8 @@ ACCOUNT_ALIAS = (
     or "DEMO"
 ).strip().upper()
 
-# Set CTRADER_HOST=live.ctraderapi.com to test a live endpoint.
-HOST = (
-    os.getenv("CTRADER_HOST")
-    or EndPoints.PROTOBUF_DEMO_HOST
-).strip()
-
-PORT = int(os.getenv("CTRADER_PORT") or EndPoints.PROTOBUF_PORT)
-
 
 def _env(*names):
-    """Return the first non-empty environment variable in names."""
     for name in names:
         value = os.getenv(name)
         if value is not None:
@@ -81,8 +61,6 @@ ACCOUNT_ID = _env(
 )
 
 print(f"DEBUG: ACCOUNT_ALIAS = {ACCOUNT_ALIAS}", file=sys.stderr, flush=True)
-print(f"DEBUG: HOST = {HOST}", file=sys.stderr, flush=True)
-print(f"DEBUG: PORT = {PORT}", file=sys.stderr, flush=True)
 print(f"DEBUG: CLIENT_ID loaded = {bool(CLIENT_ID)}", file=sys.stderr, flush=True)
 print(f"DEBUG: CLIENT_SECRET loaded = {bool(CLIENT_SECRET)}", file=sys.stderr, flush=True)
 print(f"DEBUG: ACCESS_TOKEN loaded = {bool(ACCESS_TOKEN)}", file=sys.stderr, flush=True)
@@ -90,56 +68,59 @@ print(f"DEBUG: ACCOUNT_ID loaded = {ACCOUNT_ID}", file=sys.stderr, flush=True)
 
 if not CLIENT_ID or not CLIENT_SECRET:
     raise RuntimeError(
-        f"Missing cTrader app credentials for account alias '{ACCOUNT_ALIAS}'. "
+        f"Missing credentials for account alias '{ACCOUNT_ALIAS}'. "
         f"Expected ACCOUNT_{ACCOUNT_ALIAS}_CLIENT_ID and "
-        f"ACCOUNT_{ACCOUNT_ALIAS}_CLIENT_SECRET in .env."
+        f"ACCOUNT_{ACCOUNT_ALIAS}_CLIENT_SECRET in .env"
     )
 
 if not ACCESS_TOKEN:
     raise RuntimeError(
-        f"Missing access token for account alias '{ACCOUNT_ALIAS}'. "
-        f"Expected ACCOUNT_{ACCOUNT_ALIAS}_ACCESS_TOKEN in .env."
+        f"Missing token for account alias '{ACCOUNT_ALIAS}'. "
+        f"Expected ACCOUNT_{ACCOUNT_ALIAS}_ACCESS_TOKEN in .env"
     )
-
-
-# ---------------------------------------------------------------------
-# cTrader client callbacks
-# ---------------------------------------------------------------------
 
 client = Client(HOST, PORT, TcpProtocol)
 
 timeout_call = None
-app_authenticated = False
-account_list_received = False
+shutdown_scheduled = False
 
 
-def stop_reactor(reason=None):
-    """Stop the client service and Twisted reactor safely."""
+def stop_cleanly(reason):
+    """Stop after callbacks/output have finished."""
     global timeout_call
+
+    print(f"\nStopping: {reason}", file=sys.stderr, flush=True)
 
     if timeout_call is not None and timeout_call.active():
         timeout_call.cancel()
 
-    if reason:
-        print(f"\nStopping: {reason}", file=sys.stderr, flush=True)
-
     try:
         client.stopService()
     except Exception as exc:
-        print(f"DEBUG: client.stopService failed: {exc}", file=sys.stderr, flush=True)
+        print(f"DEBUG: client.stopService error: {exc}", file=sys.stderr, flush=True)
 
     if reactor.running:
         reactor.stop()
 
 
+def schedule_exit(reason, delay=0.5):
+    """Schedule one clean exit; never stop reactor mid-message callback."""
+    global shutdown_scheduled
+
+    if shutdown_scheduled:
+        return
+
+    shutdown_scheduled = True
+    reactor.callLater(delay, stop_cleanly, reason)
+
+
 def on_error(failure):
-    print("\n=== cTrader request error ===", file=sys.stderr, flush=True)
+    print("\n=== REQUEST ERROR ===", file=sys.stderr, flush=True)
     print(failure, file=sys.stderr, flush=True)
 
 
 def on_connected(c):
-    print("\n=== TCP/TLS CONNECTED ===", flush=True)
-    print("Sending ProtoOAApplicationAuthReq...", flush=True)
+    print("Connected", flush=True)
 
     try:
         req = ProtoOAApplicationAuthReq()
@@ -150,31 +131,22 @@ def on_connected(c):
         deferred.addErrback(on_error)
 
     except Exception as exc:
-        print(f"Failed to send application authentication request: {exc}", file=sys.stderr)
-        stop_reactor("application auth request construction/send failed")
+        print(f"Application authentication send failed: {exc}", file=sys.stderr, flush=True)
+        schedule_exit("application authentication send failed", delay=0)
 
 
 def on_disconnected(c, reason):
-    print("\n=== DISCONNECTED ===", file=sys.stderr, flush=True)
-    print(f"Reason: {reason}", file=sys.stderr, flush=True)
+    print("Disconnected:", reason, file=sys.stderr, flush=True)
 
 
 def on_message(c, message):
-    global app_authenticated
-    global account_list_received
-
     msg_type = message.payloadType
     msg_data = Protobuf.extract(message)
 
-    print(f"\n=== MESSAGE RECEIVED: payloadType={msg_type} ===", flush=True)
-    print(msg_data, flush=True)
-
-    # ProtoOAApplicationAuthRes
+    # Print only meaningful responses. This avoids endless blank "Message:" logs.
     if msg_type == 2101:
-        app_authenticated = True
-
         print("\n=== APPLICATION AUTHENTICATED ===", flush=True)
-        print(f"Requesting account list for alias: {ACCOUNT_ALIAS}", flush=True)
+        print(f"Requesting account list for alias {ACCOUNT_ALIAS}...", flush=True)
 
         try:
             req = ProtoOAGetAccountListByAccessTokenReq()
@@ -184,137 +156,100 @@ def on_message(c, message):
             deferred.addErrback(on_error)
 
         except Exception as exc:
-            print(f"Failed to request account list: {exc}", file=sys.stderr, flush=True)
-            stop_reactor("account-list request failed")
+            print(f"Account-list request failed: {exc}", file=sys.stderr, flush=True)
+            schedule_exit("account-list request failed", delay=0)
 
-    # ProtoOAGetAccountListByAccessTokenRes
     elif msg_type == 2142:
-        account_list_received = True
+        print("\n========== AVAILABLE ACCOUNTS ==========", flush=True)
 
-        print("\n========== AVAILABLE CTRADER ACCOUNTS ==========")
         matched = False
-        account_count = 0
+        count = 0
 
         if hasattr(msg_data, "ctidTraderAccount"):
             for account in msg_data.ctidTraderAccount:
-                account_count += 1
+                count += 1
 
-                account_id = getattr(account, "ctidTraderAccountId", None)
+                acct_id = getattr(account, "ctidTraderAccountId", None)
                 is_live = getattr(account, "isLive", None)
                 trader_login = getattr(account, "traderLogin", None)
                 broker_name = getattr(account, "brokerName", None)
                 balance = getattr(account, "balance", None)
 
-                print(f"\nAccount ID: {account_id}")
-                print(f"  Type: {'LIVE' if is_live else 'DEMO'}")
+                print(f"\nAccount ID: {acct_id}", flush=True)
+                print(f"  Account Type: {'LIVE' if is_live else 'DEMO'}", flush=True)
 
                 if trader_login is not None:
-                    print(f"  Trader Login: {trader_login}")
+                    print(f"  Trader Login: {trader_login}", flush=True)
 
                 if broker_name is not None:
-                    print(f"  Broker: {broker_name}")
+                    print(f"  Broker: {broker_name}", flush=True)
 
                 if balance is not None:
-                    print(f"  Balance: {balance / 100:.2f}")
+                    print(f"  Balance: {balance / 100:.2f}", flush=True)
 
                 if (
                     ACCOUNT_ID
                     and ACCOUNT_ID != "your_account_id_here"
-                    and str(account_id) == str(ACCOUNT_ID)
+                    and str(acct_id) == str(ACCOUNT_ID)
                 ):
                     matched = True
-                    print("  >>> MATCHES ACCOUNT_ID IN .env")
+                    print("  >>> MATCHES ACCOUNT_ID IN .env", flush=True)
 
-        print("\n===============================================")
+        print("\n========================================", flush=True)
 
-        if account_count == 0:
-            print("No accounts were returned by this access token.")
+        if count == 0:
+            print("No accounts returned by this token.", flush=True)
 
         elif not ACCOUNT_ID or ACCOUNT_ID == "your_account_id_here":
             print(
-                f"\nCopy the target numeric ID above into:\n"
-                f"ACCOUNT_{ACCOUNT_ALIAS}_ACCOUNT_ID=<account_id>"
+                f"Set one real ID in .env:\n"
+                f"ACCOUNT_{ACCOUNT_ALIAS}_ACCOUNT_ID=<account_id>",
+                flush=True,
             )
 
         elif matched:
             print(
-                f"\nConfigured ACCOUNT_{ACCOUNT_ALIAS}_ACCOUNT_ID "
-                f"matches an account returned by this access token."
+                f"Configured ACCOUNT_{ACCOUNT_ALIAS}_ACCOUNT_ID matches.",
+                flush=True,
             )
 
         else:
             print(
-                f"\nWARNING: configured ACCOUNT_{ACCOUNT_ALIAS}_ACCOUNT_ID="
-                f"{ACCOUNT_ID} was not returned by this access token."
+                f"Configured ACCOUNT_{ACCOUNT_ALIAS}_ACCOUNT_ID={ACCOUNT_ID} "
+                f"was not found in the returned accounts.",
+                flush=True,
             )
 
-        stop_reactor("account list received successfully")
+        print("\nConnection test completed. Exiting...", flush=True)
+
+        # Important: exits automatically after the account list is printed.
+        schedule_exit("account list received", delay=0.5)
 
     else:
-        print(
-            f"\nINFO: Received unhandled payload type {msg_type}. "
-            f"Waiting for the expected account-list response...",
-            file=sys.stderr,
-            flush=True,
-        )
+        # Ignore heartbeats/unrelated frames instead of flooding console.
+        pass
 
-
-# ---------------------------------------------------------------------
-# Connection diagnostics
-# ---------------------------------------------------------------------
 
 def timeout_check():
-    status = (
-        f"app_authenticated={app_authenticated}, "
-        f"account_list_received={account_list_received}"
-    )
-
     print(
-        f"\nWARNING: Timed out after 30 seconds ({status}).",
+        "\nWARNING: Timed out after 30 seconds without receiving an account list.",
         file=sys.stderr,
         flush=True,
     )
+    schedule_exit("timeout", delay=0)
 
-    if not app_authenticated:
-        print(
-            "No application-auth response was received. "
-            "Check Twisted logs above for TLS/connection errors.",
-            file=sys.stderr,
-            flush=True,
-        )
-    elif not account_list_received:
-        print(
-            "Application authentication completed, but no account-list response arrived. "
-            "Check the access token and application authorization.",
-            file=sys.stderr,
-            flush=True,
-        )
-
-    stop_reactor("timeout")
-
-
-# ---------------------------------------------------------------------
-# Start
-# ---------------------------------------------------------------------
 
 client.setConnectedCallback(on_connected)
 client.setDisconnectedCallback(on_disconnected)
 client.setMessageReceivedCallback(on_message)
 
 print(f"Connecting to {HOST}:{PORT}...", file=sys.stderr, flush=True)
+print("About to start service...", file=sys.stderr, flush=True)
 
 timeout_call = reactor.callLater(30, timeout_check)
 
-try:
-    start_result = client.startService()
-    print(
-        f"DEBUG: client.startService() returned: {start_result!r}",
-        file=sys.stderr,
-        flush=True,
-    )
-except Exception as exc:
-    print(f"Failed to start cTrader client service: {exc}", file=sys.stderr, flush=True)
-    raise
+client.startService()
 
 print("Service started, running reactor...", file=sys.stderr, flush=True)
+
 reactor.run()
