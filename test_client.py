@@ -83,6 +83,7 @@ client = Client(HOST, PORT, TcpProtocol)
 
 timeout_call = None
 shutdown_scheduled = False
+stage = "connecting"
 
 
 def stop_cleanly(reason):
@@ -112,6 +113,15 @@ def schedule_exit(reason, delay=0.5):
     reactor.callLater(delay, stop_cleanly, reason)
 
 
+def reset_timeout(seconds):
+    global timeout_call
+
+    if timeout_call is not None and timeout_call.active():
+        timeout_call.cancel()
+
+    timeout_call = reactor.callLater(seconds, timeout_check)
+
+
 def on_error(failure):
     print("\n=== REQUEST ERROR ===", file=sys.stderr, flush=True)
     print(failure, file=sys.stderr, flush=True)
@@ -119,7 +129,11 @@ def on_error(failure):
 
 
 def on_connected(c):
+    global stage
+    stage = "waiting_app_auth"
+
     print("Connected", flush=True)
+    reset_timeout(30)
 
     try:
         req = ProtoOAApplicationAuthReq()
@@ -139,24 +153,21 @@ def on_disconnected(c, reason):
 
 
 def on_message(c, message):
-    global timeout_call
-
+    global stage
     msg_type = message.payloadType
     msg_data = Protobuf.extract(message)
 
     if msg_type == 2101:
+        stage = "waiting_account_list"
+
         print("\n=== APPLICATION AUTHENTICATED ===", flush=True)
         print(f"Requesting account list for alias {ACCOUNT_ALIAS}...", flush=True)
 
-        if timeout_call is not None and timeout_call.active():
-            timeout_call.cancel()
-        timeout_call = reactor.callLater(90, timeout_check)
+        reset_timeout(90)
 
         try:
             req = ProtoOAGetAccountListByAccessTokenReq()
             req.accessToken = str(ACCESS_TOKEN).strip()
-
-            print("DEBUG: sending ProtoOAGetAccountListByAccessTokenReq", file=sys.stderr, flush=True)
 
             deferred = c.send(req)
             deferred.addErrback(on_error)
@@ -166,6 +177,8 @@ def on_message(c, message):
             schedule_exit("account-list request failed", delay=0)
 
     elif msg_type == 2142:
+        stage = "done"
+
         print("\n========== AVAILABLE ACCOUNTS ==========", flush=True)
 
         matched = False
@@ -226,16 +239,18 @@ def on_message(c, message):
         print("\nConnection test completed. Exiting...", flush=True)
         schedule_exit("account list received", delay=0.5)
 
-    else:
-        pass
-
 
 def timeout_check():
-    print(
-        "\nWARNING: Timed out waiting for the next expected response.",
-        file=sys.stderr,
-        flush=True,
-    )
+    if stage == "connecting":
+        msg = "Timed out while waiting for initial connection."
+    elif stage == "waiting_app_auth":
+        msg = "Timed out while waiting for application auth response."
+    elif stage == "waiting_account_list":
+        msg = "Timed out while waiting for account list response."
+    else:
+        msg = "Timed out waiting for the next expected response."
+
+    print(f"\nWARNING: {msg}", file=sys.stderr, flush=True)
     schedule_exit("timeout", delay=0)
 
 
@@ -246,7 +261,7 @@ client.setMessageReceivedCallback(on_message)
 print(f"Connecting to {HOST}:{PORT}...", file=sys.stderr, flush=True)
 print("About to start service...", file=sys.stderr, flush=True)
 
-timeout_call = reactor.callLater(30, timeout_check)
+reset_timeout(30)
 
 client.startService()
 
