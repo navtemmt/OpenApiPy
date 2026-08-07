@@ -140,17 +140,23 @@ def on_disconnected(c, reason):
 
 
 def on_message(c, message):
+    global timeout_call
     msg_type = message.payloadType
     msg_data = Protobuf.extract(message)
 
-    # Print only meaningful responses. This avoids endless blank "Message:" logs.
     if msg_type == 2101:
         print("\n=== APPLICATION AUTHENTICATED ===", flush=True)
         print(f"Requesting account list for alias {ACCOUNT_ALIAS}...", flush=True)
 
+        if timeout_call is not None and timeout_call.active():
+            timeout_call.cancel()
+        timeout_call = reactor.callLater(90, timeout_check)
+
         try:
             req = ProtoOAGetAccountListByAccessTokenReq()
             req.accessToken = str(ACCESS_TOKEN).strip()
+
+            print("DEBUG: sending ProtoOAGetAccountListByAccessTokenReq", file=sys.stderr, flush=True)
 
             deferred = c.send(req)
             deferred.addErrback(on_error)
@@ -160,75 +166,7 @@ def on_message(c, message):
             schedule_exit("account-list request failed", delay=0)
 
     elif msg_type == 2142:
-        print("\n========== AVAILABLE ACCOUNTS ==========", flush=True)
-
-        matched = False
-        count = 0
-
-        if hasattr(msg_data, "ctidTraderAccount"):
-            for account in msg_data.ctidTraderAccount:
-                count += 1
-
-                acct_id = getattr(account, "ctidTraderAccountId", None)
-                is_live = getattr(account, "isLive", None)
-                trader_login = getattr(account, "traderLogin", None)
-                broker_name = getattr(account, "brokerName", None)
-                balance = getattr(account, "balance", None)
-
-                print(f"\nAccount ID: {acct_id}", flush=True)
-                print(f"  Account Type: {'LIVE' if is_live else 'DEMO'}", flush=True)
-
-                if trader_login is not None:
-                    print(f"  Trader Login: {trader_login}", flush=True)
-
-                if broker_name is not None:
-                    print(f"  Broker: {broker_name}", flush=True)
-
-                if balance is not None:
-                    print(f"  Balance: {balance / 100:.2f}", flush=True)
-
-                if (
-                    ACCOUNT_ID
-                    and ACCOUNT_ID != "your_account_id_here"
-                    and str(acct_id) == str(ACCOUNT_ID)
-                ):
-                    matched = True
-                    print("  >>> MATCHES ACCOUNT_ID IN .env", flush=True)
-
-        print("\n========================================", flush=True)
-
-        if count == 0:
-            print("No accounts returned by this token.", flush=True)
-
-        elif not ACCOUNT_ID or ACCOUNT_ID == "your_account_id_here":
-            print(
-                f"Set one real ID in .env:\n"
-                f"ACCOUNT_{ACCOUNT_ALIAS}_ACCOUNT_ID=<account_id>",
-                flush=True,
-            )
-
-        elif matched:
-            print(
-                f"Configured ACCOUNT_{ACCOUNT_ALIAS}_ACCOUNT_ID matches.",
-                flush=True,
-            )
-
-        else:
-            print(
-                f"Configured ACCOUNT_{ACCOUNT_ALIAS}_ACCOUNT_ID={ACCOUNT_ID} "
-                f"was not found in the returned accounts.",
-                flush=True,
-            )
-
-        print("\nConnection test completed. Exiting...", flush=True)
-
-        # Important: exits automatically after the account list is printed.
-        schedule_exit("account list received", delay=0.5)
-
-    else:
-        # Ignore heartbeats/unrelated frames instead of flooding console.
-        pass
-
+        ...
 
 def timeout_check():
     print(
