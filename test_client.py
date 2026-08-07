@@ -2,6 +2,7 @@ from ctrader_open_api import Client, Protobuf, TcpProtocol, EndPoints
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAApplicationAuthReq,
     ProtoOAGetAccountListByAccessTokenReq,
+    ProtoHeartbeatEvent,
 )
 from twisted.internet import reactor
 import sys
@@ -82,17 +83,22 @@ if not ACCESS_TOKEN:
 client = Client(HOST, PORT, TcpProtocol)
 
 timeout_call = None
+heartbeat_call = None
 shutdown_scheduled = False
 stage = "connecting"
+connected_client = None
 
 
 def stop_cleanly(reason):
-    global timeout_call
+    global timeout_call, heartbeat_call
 
     print(f"\nStopping: {reason}", file=sys.stderr, flush=True)
 
     if timeout_call is not None and timeout_call.active():
         timeout_call.cancel()
+
+    if heartbeat_call is not None and heartbeat_call.active():
+        heartbeat_call.cancel()
 
     try:
         client.stopService()
@@ -122,6 +128,30 @@ def reset_timeout(seconds):
     timeout_call = reactor.callLater(seconds, timeout_check)
 
 
+def send_heartbeat():
+    global heartbeat_call
+
+    if shutdown_scheduled or connected_client is None:
+        return
+
+    try:
+        hb = ProtoHeartbeatEvent()
+        d = connected_client.send(hb)
+        d.addErrback(on_error)
+        print("DEBUG: heartbeat sent", file=sys.stderr, flush=True)
+    except Exception as exc:
+        print(f"DEBUG: heartbeat send failed: {exc}", file=sys.stderr, flush=True)
+
+    heartbeat_call = reactor.callLater(10, send_heartbeat)
+
+
+def start_heartbeat():
+    global heartbeat_call
+
+    if heartbeat_call is None or not heartbeat_call.active():
+        heartbeat_call = reactor.callLater(10, send_heartbeat)
+
+
 def on_error(failure):
     print("\n=== REQUEST ERROR ===", file=sys.stderr, flush=True)
     print(failure, file=sys.stderr, flush=True)
@@ -129,11 +159,13 @@ def on_error(failure):
 
 
 def on_connected(c):
-    global stage
+    global stage, connected_client
     stage = "waiting_app_auth"
+    connected_client = c
 
     print("Connected", flush=True)
     reset_timeout(30)
+    start_heartbeat()
 
     try:
         req = ProtoOAApplicationAuthReq()
@@ -163,11 +195,13 @@ def on_message(c, message):
         print("\n=== APPLICATION AUTHENTICATED ===", flush=True)
         print(f"Requesting account list for alias {ACCOUNT_ALIAS}...", flush=True)
 
-        reset_timeout(90)
+        reset_timeout(180)
 
         try:
             req = ProtoOAGetAccountListByAccessTokenReq()
             req.accessToken = str(ACCESS_TOKEN).strip()
+
+            print("DEBUG: sending ProtoOAGetAccountListByAccessTokenReq", file=sys.stderr, flush=True)
 
             deferred = c.send(req)
             deferred.addErrback(on_error)
@@ -238,6 +272,9 @@ def on_message(c, message):
 
         print("\nConnection test completed. Exiting...", flush=True)
         schedule_exit("account list received", delay=0.5)
+
+    else:
+        pass
 
 
 def timeout_check():
