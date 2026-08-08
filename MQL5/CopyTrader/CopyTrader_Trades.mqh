@@ -104,13 +104,13 @@ void CheckTradeChanges()
                PrintFormat("Partial close detected: ticket=%I64u symbol=%s oldVol=%.2f newVol=%.2f closedPart=%.2f",
                            ticket, symbol, g_lastTrades[j].volume, currentVol, closedPart);
 
-               SendCloseSignal((long)ticket, symbol, closedPart);
+               SendCloseSignal((long)ticket, symbol, closedPart, magic);
                g_lastTrades[j].volume = currentVol;
             }
 
             if(currentSL != g_lastTrades[j].stopLoss || currentTP != g_lastTrades[j].takeProfit)
             {
-               SendModifySignal(ticket, currentSL, currentTP);
+               SendModifySignal(ticket, currentSL, currentTP, magic);
                g_lastTrades[j].stopLoss   = currentSL;
                g_lastTrades[j].takeProfit = currentTP;
             }
@@ -140,11 +140,12 @@ void CheckTradeChanges()
          long   ticket = g_lastTrades[i].ticket;
          string symbol = g_lastTrades[i].symbol;
          double volume = g_lastTrades[i].volume;
+         long   magic  = g_lastTrades[i].magicNumber;
 
          PrintFormat("Full close detected: ticket=%I64d symbol=%s lastVol=%.2f",
                      ticket, symbol, volume);
 
-         SendCloseSignal(ticket, symbol, volume);
+         SendCloseSignal(ticket, symbol, volume, magic);
       }
    }
 
