@@ -62,7 +62,8 @@ class AccountConfig:
     max_daily_trades: int
     max_concurrent_positions: int
 
-    # Filtering
+    # Routing / filtering
+    route_magic_number: Optional[int]
     magic_numbers: Optional[Set[int]]
     allowed_symbols: Optional[Set[str]]
     blocked_symbols: Set[str]
@@ -90,6 +91,7 @@ class MultiAccountConfig:
         logger.info(f"Loaded configuration from {config_file}")
 
         self._load_accounts()
+        self._validate_route_magic_numbers()
 
         enabled_count = sum(1 for acc in self.accounts.values() if acc.enabled)
         logger.info(f"Loaded {len(self.accounts)} accounts, {enabled_count} enabled")
@@ -111,7 +113,8 @@ class MultiAccountConfig:
                 if account.enabled:
                     logger.info(
                         f"✓ Loaded account: {account.name} "
-                        f"(ID: {account.account_id}, {account.environment})"
+                        f"(ID: {account.account_id}, {account.environment}, "
+                        f"route_magic_number={account.route_magic_number})"
                     )
                 else:
                     logger.info(f"○ Loaded account: {account.name} (DISABLED)")
@@ -150,6 +153,14 @@ class MultiAccountConfig:
             logger.warning(f"{section}: Invalid custom_symbols JSON, using empty")
             custom_symbols = {}
 
+        route_magic_number = None
+        route_magic_str = self.config.get(section, "route_magic_number", fallback="").strip()
+        if route_magic_str:
+            try:
+                route_magic_number = int(route_magic_str)
+            except ValueError:
+                logger.warning(f"{section}: Invalid route_magic_number={route_magic_str}, ignoring")
+
         magic_str = self.config.get(section, "magic_numbers", fallback="")
         magic_numbers = None
         if magic_str.strip():
@@ -157,6 +168,12 @@ class MultiAccountConfig:
                 magic_numbers = {int(m.strip()) for m in magic_str.split(",") if m.strip()}
             except ValueError:
                 logger.warning(f"{section}: Invalid magic_numbers format")
+
+        if route_magic_number is not None:
+            if magic_numbers is None:
+                magic_numbers = {route_magic_number}
+            else:
+                magic_numbers.add(route_magic_number)
 
         allowed_str = self.config.get(section, "allowed_symbols", fallback="")
         allowed_symbols = None
@@ -257,13 +274,35 @@ class MultiAccountConfig:
             startup_pending_expiration_ms=startup_pending_expiration_ms,
             max_daily_trades=self.config.getint(section, "max_daily_trades", fallback=1000),
             max_concurrent_positions=self.config.getint(section, "max_concurrent_positions", fallback=100),
+            route_magic_number=route_magic_number,
             magic_numbers=magic_numbers,
             allowed_symbols=allowed_symbols,
             blocked_symbols=blocked_symbols,
         )
 
+    def _validate_route_magic_numbers(self) -> None:
+        seen: Dict[int, str] = {}
+        for account in self.get_enabled_accounts():
+            if account.route_magic_number is None:
+                continue
+            if account.route_magic_number in seen:
+                logger.warning(
+                    "Duplicate route_magic_number=%s on accounts %s and %s",
+                    account.route_magic_number,
+                    seen[account.route_magic_number],
+                    account.name,
+                )
+            else:
+                seen[account.route_magic_number] = account.name
+
     def get_enabled_accounts(self) -> List[AccountConfig]:
         return [acc for acc in self.accounts.values() if acc.enabled]
+
+    def get_account_by_magic(self, magic: int) -> Optional[AccountConfig]:
+        for account in self.get_enabled_accounts():
+            if account.route_magic_number is not None and account.route_magic_number == magic:
+                return account
+        return None
 
     def should_copy_trade(self, account: AccountConfig, symbol: str, magic: int, lots: float) -> tuple[bool, str]:
         symbol_upper = symbol.upper()
