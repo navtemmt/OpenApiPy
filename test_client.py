@@ -169,7 +169,6 @@ def on_message(c, message):
         print("\n=== APPLICATION AUTHENTICATED ===", flush=True)
         print(f"Requesting account list for alias {ACCOUNT_ALIAS}...", flush=True)
 
-        # Allow enough time to diagnose account-list issues.
         reset_timeout(180)
 
         try:
@@ -194,7 +193,7 @@ def on_message(c, message):
             schedule_exit("account-list request failed", delay=0)
 
     # ProtoOAGetAccountListByAccessTokenRes
-    elif msg_type == 2142:
+    elif msg_type == 2150:
         stage = "done"
 
         print("\n========== AVAILABLE ACCOUNTS ==========", flush=True)
@@ -263,7 +262,10 @@ def on_message(c, message):
         print("\nConnection test completed. Exiting...", flush=True)
         schedule_exit("account list received", delay=0.5)
 
-    # Print anything else, especially a ProtoErrorRes.
+    # Ignore heartbeat traffic
+    elif msg_type == 51:
+        pass
+
     else:
         print(
             f"\n=== UNEXPECTED MESSAGE: payloadType={msg_type} ===",
