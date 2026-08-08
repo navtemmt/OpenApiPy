@@ -265,6 +265,7 @@ void SendPendingOpenSignal(const int ticket)
 
    string symbol   = OrderSymbol();
    int ord_type    = OrderType();
+   long magic      = OrderMagicNumber();
    double volume   = OrderLots();
    double price    = OrderOpenPrice();
    double sl       = OrderStopLoss();
@@ -320,6 +321,7 @@ void SendPendingOpenSignal(const int ticket)
    json += "\"sl\":" + DoubleToString(sl, priceDigits) + ",";
    json += "\"tp\":" + DoubleToString(tp, priceDigits) + ",";
    json += "\"expiration_ms\":\"" + IntegerToString((int)exp_ms) + "\",";
+   json += "\"magic\":" + IntegerToString((int)magic) + ",";
    json += "\"mt5_contract_size\":" + DoubleToString(contract_size, 2) + ",";
    json += "\"mt5_volume_min\":" + DoubleToString(vol_min, 2) + ",";
    json += "\"mt5_volume_max\":" + DoubleToString(vol_max, 2) + ",";
@@ -333,15 +335,17 @@ void SendPendingOpenSignal(const int ticket)
          " side=", side,
          " pending_type=", pending_type,
          " price=", DoubleToString(price, priceDigits),
+         " magic=", magic,
          " tickSize=", DoubleToString(tickSize, priceDigits),
          " tickValue=", DoubleToString(tickValue, 8));
 }
 
-void SendPendingCloseSignal(const long ticket, const string symbol)
+void SendPendingCloseSignal(const long ticket, const string symbol, const long magic)
 {
    string json = "{";
    json += "\"event_type\":\"PENDING_CLOSE\",";
-   json += "\"ticket\":" + IntegerToString((int)ticket);
+   json += "\"ticket\":" + IntegerToString((int)ticket) + ",";
+   json += "\"magic\":" + IntegerToString((int)magic);
 
    if(symbol != "")
       json += ",\"symbol\":\"" + JsonEscape(symbol) + "\"";
@@ -419,8 +423,18 @@ void CheckPendingChanges()
          }
          else
          {
-            PrintFormat("DEBUG PENDING_CLOSE: ticket=%d", (int)t);
-            SendPendingCloseSignal(t, "");
+            long magic = 0;
+            string symbol = "";
+
+            int snapIdx = FindPendSnapIndex(t);
+            if(snapIdx >= 0)
+            {
+               magic = g_pendSnap[snapIdx].magicNumber;
+               symbol = g_pendSnap[snapIdx].symbol;
+            }
+
+            PrintFormat("DEBUG PENDING_CLOSE: ticket=%d magic=%d", (int)t, (int)magic);
+            SendPendingCloseSignal(t, symbol, magic);
             RememberClosedTicket(t);
          }
 
