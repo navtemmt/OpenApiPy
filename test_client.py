@@ -144,7 +144,11 @@ def on_connected(c):
         deferred.addErrback(on_error)
 
     except Exception as exc:
-        print(f"Application authentication send failed: {exc}", file=sys.stderr, flush=True)
+        print(
+            f"Application authentication send failed: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
         schedule_exit("application authentication send failed", delay=0)
 
 
@@ -154,30 +158,42 @@ def on_disconnected(c, reason):
 
 def on_message(c, message):
     global stage
+
     msg_type = message.payloadType
     msg_data = Protobuf.extract(message)
 
+    # ProtoOAApplicationAuthRes
     if msg_type == 2101:
         stage = "waiting_account_list"
 
         print("\n=== APPLICATION AUTHENTICATED ===", flush=True)
         print(f"Requesting account list for alias {ACCOUNT_ALIAS}...", flush=True)
 
+        # Allow enough time to diagnose account-list issues.
         reset_timeout(180)
 
         try:
             req = ProtoOAGetAccountListByAccessTokenReq()
             req.accessToken = str(ACCESS_TOKEN).strip()
 
-            print("DEBUG: sending ProtoOAGetAccountListByAccessTokenReq", file=sys.stderr, flush=True)
+            print(
+                "DEBUG: sending ProtoOAGetAccountListByAccessTokenReq",
+                file=sys.stderr,
+                flush=True,
+            )
 
             deferred = c.send(req)
             deferred.addErrback(on_error)
 
         except Exception as exc:
-            print(f"Account-list request failed: {exc}", file=sys.stderr, flush=True)
+            print(
+                f"Account-list request failed: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
             schedule_exit("account-list request failed", delay=0)
 
+    # ProtoOAGetAccountListByAccessTokenRes
     elif msg_type == 2142:
         stage = "done"
 
@@ -197,7 +213,10 @@ def on_message(c, message):
                 balance = getattr(account, "balance", None)
 
                 print(f"\nAccount ID: {acct_id}", flush=True)
-                print(f"  Account Type: {'LIVE' if is_live else 'DEMO'}", flush=True)
+                print(
+                    f"  Account Type: {'LIVE' if is_live else 'DEMO'}",
+                    flush=True,
+                )
 
                 if trader_login is not None:
                     print(f"  Trader Login: {trader_login}", flush=True)
@@ -220,17 +239,20 @@ def on_message(c, message):
 
         if count == 0:
             print("No accounts returned by this token.", flush=True)
+
         elif not ACCOUNT_ID or ACCOUNT_ID == "your_account_id_here":
             print(
                 f"Set one real ID in .env:\n"
                 f"ACCOUNT_{ACCOUNT_ALIAS}_ACCOUNT_ID=<account_id>",
                 flush=True,
             )
+
         elif matched:
             print(
                 f"Configured ACCOUNT_{ACCOUNT_ALIAS}_ACCOUNT_ID matches.",
                 flush=True,
             )
+
         else:
             print(
                 f"Configured ACCOUNT_{ACCOUNT_ALIAS}_ACCOUNT_ID={ACCOUNT_ID} "
@@ -240,6 +262,15 @@ def on_message(c, message):
 
         print("\nConnection test completed. Exiting...", flush=True)
         schedule_exit("account list received", delay=0.5)
+
+    # Print anything else, especially a ProtoErrorRes.
+    else:
+        print(
+            f"\n=== UNEXPECTED MESSAGE: payloadType={msg_type} ===",
+            file=sys.stderr,
+            flush=True,
+        )
+        print(msg_data, file=sys.stderr, flush=True)
 
 
 def timeout_check():
