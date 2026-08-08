@@ -75,8 +75,8 @@ void StartupSyncOpenTrades()
       if(IsTrackedTradeTicket(ticket))
          continue;
 
-      PrintFormat("Startup market sync: sending OPEN for existing ticket=%d symbol=%s lots=%.2f openPrice=%.5f",
-                  ticket, OrderSymbol(), OrderLots(), OrderOpenPrice());
+      PrintFormat("Startup market sync: sending OPEN for existing ticket=%d symbol=%s lots=%.2f openPrice=%.5f magic=%d",
+                  ticket, OrderSymbol(), OrderLots(), OrderOpenPrice(), (int)magic);
 
       // Requires CopyTrader_Signals.mqh to support:
       // void SendOpenSignal(int ticket, bool startupSync=false)
@@ -126,16 +126,16 @@ void CheckTradeChanges()
             {
                double closedPart = g_lastTrades[j].volume - currentVol;
 
-               PrintFormat("Partial close detected: ticket=%d symbol=%s oldVol=%.2f newVol=%.2f closedPart=%.2f",
-                           ticket, symbol, g_lastTrades[j].volume, currentVol, closedPart);
+               PrintFormat("Partial close detected: ticket=%d symbol=%s oldVol=%.2f newVol=%.2f closedPart=%.2f magic=%d",
+                           ticket, symbol, g_lastTrades[j].volume, currentVol, closedPart, (int)g_lastTrades[j].magicNumber);
 
-               SendCloseSignal(ticket, symbol, closedPart);
+               SendCloseSignal(ticket, symbol, closedPart, g_lastTrades[j].magicNumber);
                g_lastTrades[j].volume = currentVol;
             }
 
             if(currentSL != g_lastTrades[j].stopLoss || currentTP != g_lastTrades[j].takeProfit)
             {
-               SendModifySignal(ticket, currentSL, currentTP);
+               SendModifySignal(ticket, currentSL, currentTP, g_lastTrades[j].magicNumber);
                g_lastTrades[j].stopLoss = currentSL;
                g_lastTrades[j].takeProfit = currentTP;
             }
@@ -146,8 +146,8 @@ void CheckTradeChanges()
 
       if(isNew)
       {
-         PrintFormat("New market trade detected: ticket=%d symbol=%s lots=%.2f openPrice=%.5f",
-                     ticket, symbol, currentVol, OrderOpenPrice());
+         PrintFormat("New market trade detected: ticket=%d symbol=%s lots=%.2f openPrice=%.5f magic=%d",
+                     ticket, symbol, currentVol, OrderOpenPrice(), (int)magic);
 
          // Normal live open, not startup recovery
          SendOpenSignal(ticket, false);
@@ -167,6 +167,10 @@ void CheckTradeChanges()
          if(!IsMarketOrderType(type))
             continue;
 
+         long magic = OrderMagicNumber();
+         if(MagicNumberFilter != "" && magic != StringToInteger(MagicNumberFilter))
+            continue;
+
          if(OrderTicket() == g_lastTrades[i].ticket)
          {
             exists = true;
@@ -179,11 +183,12 @@ void CheckTradeChanges()
          long ticket   = g_lastTrades[i].ticket;
          string symbol = g_lastTrades[i].symbol;
          double volume = g_lastTrades[i].volume;
+         long magic    = g_lastTrades[i].magicNumber;
 
-         PrintFormat("Full close detected: ticket=%d symbol=%s lastVol=%.2f",
-                     (int)ticket, symbol, volume);
+         PrintFormat("Full close detected: ticket=%d symbol=%s lastVol=%.2f magic=%d",
+                     (int)ticket, symbol, volume, (int)magic);
 
-         SendCloseSignal(ticket, symbol, volume);
+         SendCloseSignal(ticket, symbol, volume, magic);
       }
    }
 
