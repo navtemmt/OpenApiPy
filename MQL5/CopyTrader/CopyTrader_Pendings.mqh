@@ -229,9 +229,9 @@ void UpdatePendingList()
 }
 
 //======================================================
-// JSON builders (NO MAGIC)
+// JSON builders
 // NOTE: removed PrintFormat("DEBUG JSON -> %s", json) to avoid double logging,
-// because CopyTrader_HTTP.mqh already prints JSON in SendToServer(). [page:670]
+// because CopyTrader_HTTP.mqh already prints JSON in SendToServer().
 //======================================================
 void SendPendingOpenSignal(const ulong ticket)
 {
@@ -243,6 +243,7 @@ void SendPendingOpenSignal(const ulong ticket)
 
    string symbol = OrderGetString(ORDER_SYMBOL);
    int ord_type  = (int)OrderGetInteger(ORDER_TYPE);
+   long magic    = (long)OrderGetInteger(ORDER_MAGIC);
 
    double volume          = OrderGetDouble(ORDER_VOLUME_CURRENT);
    double price_open      = OrderGetDouble(ORDER_PRICE_OPEN);
@@ -288,6 +289,7 @@ void SendPendingOpenSignal(const ulong ticket)
    json += "\"sl\":" + DoubleToString(sl, 5) + ",";
    json += "\"tp\":" + DoubleToString(tp, 5) + ",";
    json += "\"expiration_ms\":" + (string)exp_ms + ",";
+   json += "\"magic\":" + (string)magic + ",";
    json += "\"mt5_contract_size\":" + DoubleToString(contract_size, 2) + ",";
    json += "\"mt5_volume_min\":" + DoubleToString(vol_min, 2) + ",";
    json += "\"mt5_volume_max\":" + DoubleToString(vol_max, 2) + ",";
@@ -297,11 +299,12 @@ void SendPendingOpenSignal(const ulong ticket)
    SendToServer(json);
 }
 
-void SendPendingCloseSignal(const long ticket, const string symbol)
+void SendPendingCloseSignal(const long ticket, const string symbol, const long magic)
 {
    string json = "{";
    json += "\"event_type\":\"PENDING_CLOSE\",";
-   json += "\"ticket\":" + (string)ticket;
+   json += "\"ticket\":" + (string)ticket + ",";
+   json += "\"magic\":" + (string)magic;
 
    if(symbol != "")
       json += ",\"symbol\":\"" + JsonEscape(symbol) + "\"";
@@ -338,16 +341,18 @@ void Pendings_OnTradeTransaction(const MqlTradeTransaction &trans)
 
    long t = (long)trans.order;
    string sym = trans.symbol;
+   long magic = (long)trans.magic;
 
-   PrintFormat("DEBUG PENDING_CLOSE (trans): ticket=%I64d symbol=%s order_type=%s order_state=%s price=%.5f volume=%.2f",
+   PrintFormat("DEBUG PENDING_CLOSE (trans): ticket=%I64d symbol=%s order_type=%s order_state=%s price=%.5f volume=%.2f magic=%I64d",
                t,
                sym,
                EnumToString((ENUM_ORDER_TYPE)trans.order_type),
                EnumToString(os),
                trans.price,
-               trans.volume);
+               trans.volume,
+               magic);
 
-   SendPendingCloseSignal(t, sym);
+   SendPendingCloseSignal(t, sym, magic);
    RememberClosedTicket(t);
    RemovePendSnap(t);
 }
@@ -418,8 +423,13 @@ void CheckPendingChanges()
          }
          else
          {
-            PrintFormat("DEBUG PENDING_CLOSE (polling): ticket=%I64d", t);
-            SendPendingCloseSignal(t, "");
+            long magic = 0;
+            int snapIdx = FindPendSnapIndex(t);
+            if(snapIdx >= 0)
+               magic = g_pendSnap[snapIdx].magicNumber;
+
+            PrintFormat("DEBUG PENDING_CLOSE (polling): ticket=%I64d magic=%I64d", t, magic);
+            SendPendingCloseSignal(t, "", magic);
             RememberClosedTicket(t);
          }
 
