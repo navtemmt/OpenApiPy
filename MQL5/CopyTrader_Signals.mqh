@@ -20,13 +20,6 @@ bool GetSymbolTradeMeta(const string symbol,
    return true;
 }
 
-string JsonEscape(const string s)
-{
-   string out = s;
-   StringReplace(out, "\\", "\\\\");
-   StringReplace(out, "\"", "\\\"");
-   return out;
-}
 
 void SendOpenSignal(ulong ticket)
 {
