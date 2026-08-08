@@ -20,7 +20,6 @@ bool GetSymbolTradeMeta(const string symbol,
    return true;
 }
 
-
 void SendOpenSignal(ulong ticket)
 {
    if(!PositionSelectByTicket(ticket))
@@ -70,7 +69,7 @@ void SendOpenSignal(ulong ticket)
    Print("Sent OPEN signal for ticket #", ticket, ": ", symbol, " ", tradeType, " ", volume);
 }
 
-void SendCloseSignal(long ticket, string symbol, double closedVolume)
+void SendCloseSignal(long ticket, string symbol, double closedVolume, long magic)
 {
    double contract_size = 0.0, vol_min = 0.0, vol_max = 0.0, vol_step = 0.0;
    if(symbol != "")
@@ -84,6 +83,7 @@ void SendCloseSignal(long ticket, string symbol, double closedVolume)
       jsonData += "\"symbol\":\"" + JsonEscape(symbol) + "\",";
 
    jsonData += "\"volume\":" + DoubleToString(closedVolume, 8);
+   jsonData += ",\"magic\":" + (string)magic;
 
    if(symbol != "" && contract_size > 0.0)
    {
@@ -97,10 +97,10 @@ void SendCloseSignal(long ticket, string symbol, double closedVolume)
 
    SendToServer(jsonData);
    Print("Sent CLOSE signal for ticket #", ticket,
-         " symbol=", symbol, " closedVolume=", closedVolume);
+         " symbol=", symbol, " closedVolume=", closedVolume, " magic=", magic);
 }
 
-void SendModifySignal(ulong ticket, double sl, double tp)
+void SendModifySignal(ulong ticket, double sl, double tp, long magic)
 {
    string symbol = "";
    for(int i = 0; i < g_lastTradeCount; i++)
@@ -121,11 +121,13 @@ void SendModifySignal(ulong ticket, double sl, double tp)
 
    jsonData +=
       "\"sl\":" + DoubleToString(sl, 5) + ","
-      "\"tp\":" + DoubleToString(tp, 5) +
+      "\"tp\":" + DoubleToString(tp, 5) + ","
+      "\"magic\":" + (string)magic +
       "}";
 
    SendToServer(jsonData);
-   Print("Sent MODIFY signal for ticket #", ticket, ": ", symbol, " SL=", sl, " TP=", tp);
+   Print("Sent MODIFY signal for ticket #", ticket, ": ", symbol,
+         " SL=", sl, " TP=", tp, " magic=", magic);
 }
 
 #endif // COPYTRADER_SIGNALS_MQH
