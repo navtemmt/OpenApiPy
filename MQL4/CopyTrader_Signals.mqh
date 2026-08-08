@@ -117,10 +117,11 @@ void SendOpenSignal(int ticket, bool startupSync = false)
          " ask=", DoubleToString(currentAsk, priceDigits),
          " tickSize=", DoubleToString(tickSize, priceDigits),
          " tickValue=", DoubleToString(tickValue, 8),
+         " magic=", IntegerToString(magic),
          " startupSync=", startupSyncStr);
 }
 
-void SendCloseSignal(long ticket, string symbol, double closedVolume)
+void SendCloseSignal(long ticket, string symbol, double closedVolume, long magic)
 {
    double contract_size = 0.0, vol_min = 0.0, vol_max = 0.0, vol_step = 0.0;
 
@@ -135,6 +136,7 @@ void SendCloseSignal(long ticket, string symbol, double closedVolume)
       jsonData += "\"symbol\":\"" + JsonEscape(symbol) + "\",";
 
    jsonData += "\"volume\":" + DoubleToString(closedVolume, 8);
+   jsonData += ",\"magic\":" + IntegerToString((int)magic);
 
    if(symbol != "" && contract_size > 0.0)
    {
@@ -148,10 +150,10 @@ void SendCloseSignal(long ticket, string symbol, double closedVolume)
 
    SendToServer(jsonData);
    Print("Sent CLOSE signal for ticket #", ticket,
-         " symbol=", symbol, " closedVolume=", closedVolume);
+         " symbol=", symbol, " closedVolume=", closedVolume, " magic=", magic);
 }
 
-void SendModifySignal(int ticket, double sl, double tp)
+void SendModifySignal(int ticket, double sl, double tp, long magic)
 {
    string symbol = "";
 
@@ -177,11 +179,13 @@ void SendModifySignal(int ticket, double sl, double tp)
 
    jsonData +=
       "\"sl\":" + DoubleToString(sl, priceDigits) + ","
-      "\"tp\":" + DoubleToString(tp, priceDigits) +
+      "\"tp\":" + DoubleToString(tp, priceDigits) + ","
+      "\"magic\":" + IntegerToString((int)magic) +
    "}";
 
    SendToServer(jsonData);
-   Print("Sent MODIFY signal for ticket #", ticket, ": ", symbol, " SL=", sl, " TP=", tp);
+   Print("Sent MODIFY signal for ticket #", ticket, ": ", symbol,
+         " SL=", sl, " TP=", tp, " magic=", magic);
 }
 
 #endif // COPYTRADER_SIGNALS_MQH
