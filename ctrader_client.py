@@ -35,14 +35,22 @@ PROTO_OA_SPOT_EVENT_TYPE = ProtoOASpotEvent().payloadType
 class CTraderClient:
     """High-level wrapper for cTrader Open API trading operations."""
 
-    def __init__(self, env: str = "demo"):
+    def __init__(
+        self,
+        env: str = "demo",
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None,
+    ):
         load_dotenv()
 
-        self.client_id = os.getenv("CTRADER_CLIENT_ID")
-        self.client_secret = os.getenv("CTRADER_CLIENT_SECRET")
+        self.client_id = client_id or os.getenv("CTRADER_CLIENT_ID")
+        self.client_secret = client_secret or os.getenv("CTRADER_CLIENT_SECRET")
 
         if not self.client_id or not self.client_secret:
-            raise ValueError("CTRADER_CLIENT_ID and CTRADER_CLIENT_SECRET must be set in .env")
+            raise ValueError(
+                "client_id and client_secret must be provided "
+                "(either via constructor or CTRADER_CLIENT_ID / CTRADER_CLIENT_SECRET in .env)"
+            )
 
         self.host = EndPoints.PROTOBUF_LIVE_HOST if env == "live" else EndPoints.PROTOBUF_DEMO_HOST
         self.port = EndPoints.PROTOBUF_PORT
@@ -99,12 +107,14 @@ class CTraderClient:
         self.client.setMessageReceivedCallback(self._handle_message)
 
         logger.info(
-            "CTraderClient initialized (%s) host=%s port=%s request_timeout=%ss auth_timeout=%ss",
+            "CTraderClient initialized (%s) host=%s port=%s request_timeout=%ss auth_timeout=%ss client_id_present=%s client_secret_present=%s",
             env,
             self.host,
             self.port,
             self.default_request_timeout,
             self.auth_timeout_sec,
+            bool(self.client_id),
+            bool(self.client_secret),
         )
 
     @staticmethod
@@ -375,10 +385,6 @@ class CTraderClient:
 
         return d
 
-    # ------------------------------------------------------------------
-    # Internal connection handlers
-    # ------------------------------------------------------------------
-
     def _handle_connected(self, client):
         logger.info("Connected to cTrader Open API")
         self.is_connected = True
@@ -467,10 +473,6 @@ class CTraderClient:
         except Exception:
             logger.debug("spot event parse error", exc_info=True)
 
-    # ------------------------------------------------------------------
-    # Heartbeat / health (delegated to ctrader_monitor_impl.py)
-    # ------------------------------------------------------------------
-
     def _start_heartbeat(self):
         return monitor_impl.start_heartbeat(self)
 
@@ -486,10 +488,6 @@ class CTraderClient:
     def _stop_periodic_tasks(self):
         return monitor_impl.stop_periodic_tasks(self)
 
-    # ------------------------------------------------------------------
-    # Authentication (delegated to ctrader_auth_impl.py)
-    # ------------------------------------------------------------------
-
     def _authenticate_app(self):
         return auth_impl.authenticate_app(self)
 
@@ -502,19 +500,11 @@ class CTraderClient:
     def _on_account_auth_success(self, result):
         return auth_impl.on_account_auth_success(self, result)
 
-    # ------------------------------------------------------------------
-    # Symbols (delegated to ctrader_symbols_impl.py)
-    # ------------------------------------------------------------------
-
     def _load_symbol_map(self):
         return symbols_impl.load_symbol_map(self)
 
     def _on_symbols_list(self, result):
         return symbols_impl.on_symbols_list(self, result)
-
-    # ------------------------------------------------------------------
-    # Public helpers (delegated to ctrader_symbols_impl.py)
-    # ------------------------------------------------------------------
 
     def get_symbol_id_by_name(self, name: str) -> Optional[int]:
         return symbols_impl.get_symbol_id_by_name(self, name)
@@ -524,10 +514,6 @@ class CTraderClient:
 
     def snap_volume_for_symbol(self, symbol_id: int, volume_cents: int) -> int:
         return symbols_impl.snap_volume_for_symbol(self, symbol_id, volume_cents)
-
-    # ------------------------------------------------------------------
-    # Quotes (spot subscriptions)
-    # ------------------------------------------------------------------
 
     def subscribe_spots(self, account_id: int, symbol_ids: Iterable[int]):
         req = ProtoOASubscribeSpotsReq()
@@ -544,20 +530,12 @@ class CTraderClient:
     def get_last_quote(self, symbol_id: int) -> Optional[Dict[str, Any]]:
         return self.spot_quotes.get(int(symbol_id))
 
-    # ------------------------------------------------------------------
-    # Error handling
-    # ------------------------------------------------------------------
-
     def _on_error(self, failure):
         logger.error("Deferred error: %s", failure)
         try:
             failure.printTraceback()
         except Exception:
             pass
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def set_account_credentials(
         self,
@@ -598,10 +576,6 @@ class CTraderClient:
 
     def send(self, req, timeout=None):
         return self.client.send(req, timeout=timeout)
-
-    # ------------------------------------------------------------------
-    # Trading (delegated to ctrader_trading_impl.py)
-    # ------------------------------------------------------------------
 
     def amend_position(
         self,
@@ -670,10 +644,6 @@ class CTraderClient:
 
     def close_position(self, *args: Any, **kwargs: Any):
         return trading_impl.close_position(self, *args, **kwargs)
-
-    # ------------------------------------------------------------------
-    # Reactor control
-    # ------------------------------------------------------------------
 
     def run(self):
         logger.info("Starting reactor...")
