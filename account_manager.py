@@ -58,6 +58,9 @@ class AccountManager:
         self.reconcile_requested: Dict[str, bool] = {}
         self.auth_seen: Dict[str, bool] = {}
 
+        # Routing map: MT5 magic -> account name
+        self.route_magic_map: Dict[int, str] = {}
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -170,6 +173,22 @@ class AccountManager:
             pass
         return None
 
+    @staticmethod
+    def _config_route_magic(config: AccountConfig) -> Optional[int]:
+        try:
+            v = getattr(config, "route_magic_number", None)
+            if v is not None and str(v).strip() != "":
+                return int(v)
+        except Exception:
+            pass
+        try:
+            v = getattr(config, "magic_number", None)
+            if v is not None and str(v).strip() != "":
+                return int(v)
+        except Exception:
+            pass
+        return None
+
     def _ensure_account_maps(self, acc_name: str):
         if acc_name not in self.position_maps:
             self.position_maps[acc_name] = {}
@@ -183,6 +202,29 @@ class AccountManager:
             self.reconcile_requested[acc_name] = False
         if acc_name not in self.auth_seen:
             self.auth_seen[acc_name] = False
+
+    def _register_route_magic(self, account: AccountConfig):
+        route_magic = self._config_route_magic(account)
+        if route_magic is None:
+            logger.info(
+                "[%s] No route_magic_number configured; magic-based routing unavailable",
+                account.name,
+            )
+            return
+
+        existing = self.route_magic_map.get(int(route_magic))
+        if existing and existing != account.name:
+            raise ValueError(
+                f"Duplicate route_magic_number={int(route_magic)} for accounts "
+                f"{existing!r} and {account.name!r}"
+            )
+
+        self.route_magic_map[int(route_magic)] = account.name
+        logger.info(
+            "[%s] Registered route magic %s",
+            account.name,
+            int(route_magic),
+        )
 
     def _send_reconcile_request(self, account_name: str):
         client = self.get_client(account_name)
@@ -249,7 +291,6 @@ class AccountManager:
 
         logger.info("Initializing account: %s", account.name)
 
-        # Credentials are passed before CTraderClient.__init__ validates them.
         client = CTraderClient(
             env=account.environment,
             client_id=account.client_id,
@@ -267,13 +308,13 @@ class AccountManager:
         self.clients[account.name] = client
         self.configs[account.name] = account
         self._ensure_account_maps(account.name)
+        self._register_route_magic(account)
 
         def on_message(message, acc_name=account.name):
             try:
                 self._ensure_account_maps(acc_name)
                 extracted = Protobuf.extract(message)
 
-                # 0) Account auth success -> trigger reconcile here
                 if isinstance(extracted, ProtoOAAccountAuthRes):
                     if not self.auth_seen.get(acc_name, False):
                         self.auth_seen[acc_name] = True
@@ -281,7 +322,6 @@ class AccountManager:
                     self._send_reconcile_request(acc_name)
                     return
 
-                # 1) Execution events
                 if isinstance(extracted, ProtoOAExecutionEvent):
                     logger.info(f"[{acc_name}] RAW EXECUTION: {extracted}")
 
@@ -371,7 +411,6 @@ class AccountManager:
 
                     return
 
-                # 2) Reconcile response
                 if isinstance(extracted, ProtoOAReconcileRes):
                     eq, bal = self._extract_account_equity_balance(extracted)
                     if eq is not None:
@@ -436,7 +475,6 @@ class AccountManager:
                     )
                     return
 
-                # 3) Single-position updates with a .position field
                 if not hasattr(extracted, "position"):
                     return
 
@@ -515,6 +553,39 @@ class AccountManager:
             return None
         return self.get_position_volume(account_name, pid)
 
+    def get_account_name_by_magic(self, magic: int) -> Optional[str]:
+        try:
+            return self.route_magic_map.get(int(magic))
+        except Exception:
+            return None
+
+    def get_account_context_by_magic(
+        self, magic: int
+    ) -> Tuple[Optional[str], Optional[CTraderClient], Optional[AccountConfig]]:
+        account_name = self.get_account_name_by_magic(magic)
+        if not account_name:
+            return None, None, None
+        return account_name, self.get_client(account_name), self.get_config(account_name)
+
+    def store_mt5_payload(self, account_name: str, mt5_ticket: int, payload: dict):
+        try:
+            self._ensure_account_maps(account_name)
+            self.mt5_payloads[account_name][int(mt5_ticket)] = dict(payload or {})
+        except Exception:
+            logger.debug(
+                "[%s] Failed to store MT5 payload for ticket %s",
+                account_name,
+                mt5_ticket,
+                exc_info=True,
+            )
+
+    def store_mt5_payload_by_magic(self, magic: int, mt5_ticket: int, payload: dict) -> bool:
+        account_name = self.get_account_name_by_magic(magic)
+        if not account_name:
+            return False
+        self.store_mt5_payload(account_name, mt5_ticket, payload)
+        return True
+
     def remove_mapping(self, account_name: str, mt5_ticket: int):
         try:
             self.position_maps.get(account_name, {}).pop(int(mt5_ticket), None)
@@ -544,6 +615,14 @@ class AccountManager:
 
     def getallaccounts(self) -> Dict[str, Tuple[CTraderClient, AccountConfig]]:
         return self.get_all_accounts()
+
+    def getaccountnamebymagic(self, magic: int) -> Optional[str]:
+        return self.get_account_name_by_magic(magic)
+
+    def getaccountcontextbymagic(
+        self, magic: int
+    ) -> Tuple[Optional[str], Optional[CTraderClient], Optional[AccountConfig]]:
+        return self.get_account_context_by_magic(magic)
 
 
 # Global instance
