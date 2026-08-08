@@ -249,10 +249,12 @@ class AccountManager:
 
         logger.info("Initializing account: %s", account.name)
 
-        client = CTraderClient(env=account.environment)
-
-        client.client_id = account.client_id
-        client.client_secret = account.client_secret
+        # Credentials are passed before CTraderClient.__init__ validates them.
+        client = CTraderClient(
+            env=account.environment,
+            client_id=account.client_id,
+            client_secret=account.client_secret,
+        )
 
         client.set_account_credentials(
             account_id=self._config_account_id(account),
@@ -327,7 +329,10 @@ class AccountManager:
                                 )
 
                                 pos_status = getattr(pos, "positionStatus", None)
-                                is_open = pos_status == ProtoOAPositionStatus.POSITION_STATUS_OPEN
+                                is_open = (
+                                    pos_status
+                                    == ProtoOAPositionStatus.POSITION_STATUS_OPEN
+                                )
                                 is_fill = exec_type == ProtoOAExecutionType.ORDER_FILLED
 
                                 if is_open and is_fill:
@@ -346,9 +351,9 @@ class AccountManager:
                                         if client_obj and hasattr(client_obj, "symbol_details"):
                                             symbol = client_obj.symbol_details.get(symbol_id)
 
-                                        mt5_data = self.mt5_payloads.get(acc_name, {}).get(
-                                            int(ticket), None
-                                        )
+                                        mt5_data = self.mt5_payloads.get(
+                                            acc_name, {}
+                                        ).get(int(ticket), None)
 
                                         if symbol is not None:
                                             _enforce_max_risk_on_fill(
@@ -376,7 +381,8 @@ class AccountManager:
 
                     if eq is not None or bal is not None:
                         logger.info(
-                            f"[{acc_name}] Funds cached: equity={self.account_equity.get(acc_name)}, "
+                            f"[{acc_name}] Funds cached: "
+                            f"equity={self.account_equity.get(acc_name)}, "
                             f"balance={self.account_balance.get(acc_name)}"
                         )
 
@@ -412,12 +418,16 @@ class AccountManager:
                             if order_id and oticket is not None:
                                 self.order_maps[acc_name][int(oticket)] = int(order_id)
                                 logger.info(
-                                    f"[{acc_name}] (reconcile order) MT5 ticket {int(oticket)} -> "
-                                    f"cTrader orderId {int(order_id)}"
+                                    f"[{acc_name}] (reconcile order) MT5 ticket "
+                                    f"{int(oticket)} -> cTrader orderId {int(order_id)}"
                                 )
                                 order_count += 1
                     except Exception:
-                        logger.debug("[%s] Failed parsing reconcile orders", acc_name, exc_info=True)
+                        logger.debug(
+                            "[%s] Failed parsing reconcile orders",
+                            acc_name,
+                            exc_info=True,
+                        )
 
                     logger.info(
                         f"[{acc_name}] Reconcile complete: {count} MT5 positions "
@@ -453,7 +463,10 @@ class AccountManager:
                 )
 
             except Exception as e:
-                logger.debug(f"[{acc_name}] Failed to parse message: {e}", exc_info=True)
+                logger.debug(
+                    f"[{acc_name}] Failed to parse message: {e}",
+                    exc_info=True,
+                )
 
         client.set_message_callback(on_message)
 
@@ -511,9 +524,12 @@ class AccountManager:
             pass
 
     def get_all_accounts(self) -> Dict[str, Tuple[CTraderClient, AccountConfig]]:
-        return {name: (self.clients[name], self.configs[name]) for name in self.clients.keys()}
+        return {
+            name: (self.clients[name], self.configs[name])
+            for name in self.clients.keys()
+        }
 
-    # compatibility aliases
+    # Compatibility aliases
     def getpositionid(self, account_name: str, mt5_ticket: int) -> Optional[int]:
         return self.get_position_id(account_name, mt5_ticket)
 
