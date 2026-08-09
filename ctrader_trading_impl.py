@@ -420,7 +420,6 @@ def amend_pending_order(
 ):
     """
     Amend an existing pending order via ProtoOAAmendOrderReq.
-    cTrader Open API supports amending pending orders with ProtoOAAmendOrderReq. [web:307][web:319]
     """
     if not self.is_account_authed:
         raise RuntimeError("Account not authenticated yet")
@@ -457,35 +456,35 @@ def amend_pending_order(
     else:
         take_profit = None
 
-    req = ProtoOAAmendOrderReq()
-    req.ctidTraderAccountId = account_id
-    req.orderId = order_id
-    req.volume = int(volume)
+    if ptype == "limit" and limit_price is None:
+        raise ValueError("LIMIT amend requires limit_price > 0")
 
-    if ptype == "limit":
-        if limit_price is None:
-            raise ValueError("LIMIT amend requires limit_price > 0")
-        req.orderType = ProtoOAOrderType.LIMIT
-        req.limitPrice = float(limit_price)
-    elif ptype == "stop":
-        if stop_price is None:
-            raise ValueError("STOP amend requires stop_price > 0")
-        req.orderType = ProtoOAOrderType.STOP
-        req.stopPrice = float(stop_price)
-    else:
+    if ptype == "stop" and stop_price is None:
+        raise ValueError("STOP amend requires stop_price > 0")
+
+    if ptype == "stop_limit":
         if stop_price is None:
             raise ValueError("STOP_LIMIT amend requires stop_price > 0")
         if limit_price is None:
             raise ValueError("STOP_LIMIT amend requires limit_price > 0")
-        req.orderType = ProtoOAOrderType.STOP_LIMIT
+
+    req = ProtoOAAmendOrderReq()
+    req.ctidTraderAccountId = account_id
+    req.orderId = order_id
+    req.tradeSide = ProtoOATradeSide.BUY if str(side).lower() == "buy" else ProtoOATradeSide.SELL
+    req.volume = int(volume)
+
+    if ptype == "limit":
+        req.limitPrice = float(limit_price)
+    elif ptype == "stop":
+        req.stopPrice = float(stop_price)
+    else:
         req.stopPrice = float(stop_price)
         req.limitPrice = float(limit_price)
 
-    req.tradeSide = ProtoOATradeSide.BUY if str(side).lower() == "buy" else ProtoOATradeSide.SELL
-    req.symbolId = symbol_id
-
     if stop_loss is not None:
         req.stopLoss = float(stop_loss)
+
     if take_profit is not None:
         req.takeProfit = float(take_profit)
 
@@ -496,7 +495,7 @@ def amend_pending_order(
     symbol_name = _resolve_symbol_name_from_id(self, symbol_id) or "UNKNOWN"
 
     logger.info(
-        "Amending pending order: account_id=%s orderId=%s symbol=%s symbolId=%s type=%s side=%s vol=%s stop=%s limit=%s SL=%s TP=%s exp=%s",
+        "Amending pending order: account_id=%s orderId=%s symbol=%s symbolId=%s type=%s side=%s volume=%s stop=%s limit=%s SL=%s TP=%s exp=%s",
         account_id,
         order_id,
         symbol_name,
@@ -508,7 +507,7 @@ def amend_pending_order(
         limit_price,
         stop_loss,
         take_profit,
-        int(expiration_ms or 0) if expiration_ms is not None else 0,
+        int(expiration_ms or 0),
     )
 
     d = self.send(req)
@@ -736,3 +735,4 @@ def close_position(self, *args: Any, **kwargs: Any):
     d.addCallback(_on_resp)
     d.addErrback(self._on_error)
     return d
+</query>
