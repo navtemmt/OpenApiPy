@@ -109,6 +109,25 @@ class MultiAccountConfig:
         token_dir = os.getenv("CTRADER_TOKEN_STATE_DIR", "runtime_tokens")
         return os.path.join(token_dir, f"{account_name}.json")
 
+    def _parse_int_set(self, raw: str, *, section: str, field_name: str) -> Optional[Set[int]]:
+        value = (raw or "").strip()
+        if not value:
+            return None
+
+        try:
+            parsed = {int(part.strip()) for part in value.split(",") if part.strip()}
+            return parsed if parsed else None
+        except ValueError:
+            logger.warning(f"{section}: Invalid {field_name} format")
+            return None
+
+    def _parse_symbol_set(self, raw: str) -> Optional[Set[str]]:
+        value = (raw or "").strip()
+        if not value:
+            return None
+        parsed = {s.strip().upper() for s in value.split(",") if s.strip()}
+        return parsed if parsed else None
+
     def _load_accounts(self) -> None:
         for section in self.config.sections():
             if not section.startswith("Account_"):
@@ -186,37 +205,25 @@ class MultiAccountConfig:
                     f"{section}: Invalid route_magic_number={route_magic_str}, ignoring"
                 )
 
-        magic_numbers: Optional[Set[int]] = None
-        magic_str = self.config.get(section, "magic_numbers", fallback="")
-        if magic_str.strip():
-            try:
-                magic_numbers = {
-                    int(m.strip()) for m in magic_str.split(",") if m.strip()
-                }
-            except ValueError:
-                logger.warning(f"{section}: Invalid magic_numbers format")
-                magic_numbers = None
+        magic_numbers = self._parse_int_set(
+            self.config.get(section, "magic_numbers", fallback=""),
+            section=section,
+            field_name="magic_numbers",
+        )
 
-        # Backward compatibility: include route_magic_number in magic_numbers if present.
         if route_magic_number is not None:
             if magic_numbers is None:
                 magic_numbers = {route_magic_number}
             else:
                 magic_numbers.add(route_magic_number)
 
-        allowed_symbols: Optional[Set[str]] = None
-        allowed_str = self.config.get(section, "allowed_symbols", fallback="")
-        if allowed_str.strip():
-            allowed_symbols = {
-                s.strip().upper() for s in allowed_str.split(",") if s.strip()
-            }
+        allowed_symbols = self._parse_symbol_set(
+            self.config.get(section, "allowed_symbols", fallback="")
+        )
 
-        blocked_symbols: Set[str] = set()
-        blocked_str = self.config.get(section, "blocked_symbols", fallback="")
-        if blocked_str.strip():
-            blocked_symbols = {
-                s.strip().upper() for s in blocked_str.split(",") if s.strip()
-            }
+        blocked_symbols = self._parse_symbol_set(
+            self.config.get(section, "blocked_symbols", fallback="")
+        ) or set()
 
         risk_mode = self.config.get(
             section, "risk_mode", fallback="SOURCE_VOLUME"
@@ -282,6 +289,11 @@ class MultiAccountConfig:
             )
             startup_pending_expiration_ms = 0
 
+        environment = self.config.get(section, "environment", fallback="demo").strip().lower()
+        if environment not in ("demo", "live"):
+            logger.warning(f"{section}: Invalid environment={environment}, defaulting to demo")
+            environment = "demo"
+
         logger.info(
             "%s: token config loaded access_present=%s refresh_present=%s token_state_file=%s",
             section,
@@ -299,7 +311,7 @@ class MultiAccountConfig:
             access_token=access_token,
             refresh_token=refresh_token,
             token_state_file=token_state_file,
-            environment=self.config.get(section, "environment", fallback="demo").strip().lower(),
+            environment=environment,
             symbol_prefix=self.config.get(section, "symbol_prefix", fallback=""),
             symbol_suffix=self.config.get(section, "symbol_suffix", fallback=""),
             custom_symbols=custom_symbols,
@@ -331,20 +343,19 @@ class MultiAccountConfig:
         )
 
     def _validate_route_magic_numbers(self) -> None:
-        seen: Dict[int, str] = {}
+        seen: Dict[int, List[str]] = {}
         for account in self.get_enabled_accounts():
             if account.route_magic_number is None:
                 continue
+            seen.setdefault(account.route_magic_number, []).append(account.name)
 
-            if account.route_magic_number in seen:
-                logger.warning(
-                    "Duplicate route_magic_number=%s on accounts %s and %s",
-                    account.route_magic_number,
-                    seen[account.route_magic_number],
-                    account.name,
+        for route_magic, names in seen.items():
+            if len(names) > 1:
+                logger.info(
+                    "route_magic_number=%s is shared by multiple accounts (fan-out): %s",
+                    route_magic,
+                    names,
                 )
-            else:
-                seen[account.route_magic_number] = account.name
 
     def get_enabled_accounts(self) -> List[AccountConfig]:
         return [acc for acc in self.accounts.values() if acc.enabled]
@@ -415,6 +426,9 @@ class MultiAccountConfig:
 
         if lots < account.min_lot_size:
             return False, f"Lot size {lots} below minimum {account.min_lot_size}"
+
+        if lots > account.max_lot_size:
+            return False, f"Lot size {lots} above maximum {account.max_lot_size}"
 
         return True, "OK"
 
