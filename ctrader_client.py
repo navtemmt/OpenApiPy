@@ -622,6 +622,35 @@ class CTraderClient:
     def send_pending_order(self, *args: Any, **kwargs: Any):
         return trading_impl.send_pending_order(self, *args, **kwargs)
 
+    def amend_pending_order(
+        self,
+        account_id: int,
+        order_id: int,
+        symbol_id: int,
+        side: str,
+        volume: int,
+        pending_type: str,
+        stop_price: Optional[float] = None,
+        limit_price: Optional[float] = None,
+        stop_loss: Optional[float] = None,
+        take_profit: Optional[float] = None,
+        expiration_ms: Optional[int] = None,
+    ):
+        return trading_impl.amend_pending_order(
+            self,
+            account_id=account_id,
+            order_id=order_id,
+            symbol_id=symbol_id,
+            side=side,
+            volume=volume,
+            pending_type=pending_type,
+            stop_price=stop_price,
+            limit_price=limit_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            expiration_ms=expiration_ms,
+        )
+
     def cancel_pending_order(self, account_id: int, order_id: int):
         return trading_impl.cancel_pending_order(self, account_id=account_id, order_id=order_id)
 
