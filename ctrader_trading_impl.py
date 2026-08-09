@@ -450,29 +450,29 @@ def amend_pending_order(
     else:
         take_profit = None
 
-    req = ProtoOAAmendOrderReq()
+        req = ProtoOAAmendOrderReq()
     req.ctidTraderAccountId = account_id
     req.orderId = order_id
     req.volume = int(volume)
-    req.tradeSide = ProtoOATradeSide.BUY if str(side).lower() == "buy" else ProtoOATradeSide.SELL
-    req.symbolId = symbol_id
 
+    # ProtoOAAmendOrderReq does NOT support:
+    # tradeSide, symbolId, or orderType.
+    # The existing cTrader order already determines those properties.
     if ptype == "limit":
         if limit_price is None:
             raise ValueError("LIMIT amend requires limit_price > 0")
-        req.orderType = ProtoOAOrderType.LIMIT
         req.limitPrice = float(limit_price)
+
     elif ptype == "stop":
         if stop_price is None:
             raise ValueError("STOP amend requires stop_price > 0")
-        req.orderType = ProtoOAOrderType.STOP
         req.stopPrice = float(stop_price)
+
     else:
         if stop_price is None:
             raise ValueError("STOP_LIMIT amend requires stop_price > 0")
         if limit_price is None:
             raise ValueError("STOP_LIMIT amend requires limit_price > 0")
-        req.orderType = ProtoOAOrderType.STOP_LIMIT
         req.stopPrice = float(stop_price)
         req.limitPrice = float(limit_price)
 
