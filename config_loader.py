@@ -4,6 +4,13 @@
 Loads configuration for multiple cTrader accounts.
 - Credentials loaded from .env file (private, never commit)
 - Trading settings loaded from accounts_config.ini (public, safe to commit)
+
+Routing notes:
+- `magic_numbers` is the primary routing/filtering field.
+- `route_magic_number` is supported as a backward-compatible single-value alias.
+- `receive_all_signals=true` means the account is eligible to receive any incoming
+  signal, subject to the normal symbol/risk filters. If `magic_numbers` is also set,
+  it still acts as a filter list for that account.
 """
 
 import configparser
@@ -63,6 +70,7 @@ class AccountConfig:
     max_concurrent_positions: int
 
     # Routing / filtering
+    receive_all_signals: bool
     route_magic_number: Optional[int]
     magic_numbers: Optional[Set[int]]
     allowed_symbols: Optional[Set[str]]
@@ -101,7 +109,7 @@ class MultiAccountConfig:
         token_dir = os.getenv("CTRADER_TOKEN_STATE_DIR", "runtime_tokens")
         return os.path.join(token_dir, f"{account_name}.json")
 
-    def _load_accounts(self):
+    def _load_accounts(self) -> None:
         for section in self.config.sections():
             if not section.startswith("Account_"):
                 logger.warning(f"Skipping non-account section: {section}")
@@ -115,6 +123,7 @@ class MultiAccountConfig:
                     logger.info(
                         f"✓ Loaded account: {account.name} "
                         f"(ID: {account.account_id}, {account.environment}, "
+                        f"receive_all_signals={account.receive_all_signals}, "
                         f"route_magic_number={account.route_magic_number}, "
                         f"magic_numbers={sorted(account.magic_numbers) if account.magic_numbers else None})"
                     )
@@ -154,12 +163,21 @@ class MultiAccountConfig:
         custom_symbols_str = self.config.get(section, "custom_symbols", fallback="{}")
         try:
             custom_symbols = json.loads(custom_symbols_str)
+            if not isinstance(custom_symbols, dict):
+                logger.warning(f"{section}: custom_symbols must be a JSON object, using empty")
+                custom_symbols = {}
         except json.JSONDecodeError:
             logger.warning(f"{section}: Invalid custom_symbols JSON, using empty")
             custom_symbols = {}
 
-        route_magic_number = None
-        route_magic_str = self.config.get(section, "route_magic_number", fallback="").strip()
+        receive_all_signals = self.config.getboolean(
+            section, "receive_all_signals", fallback=False
+        )
+
+        route_magic_number: Optional[int] = None
+        route_magic_str = self.config.get(
+            section, "route_magic_number", fallback=""
+        ).strip()
         if route_magic_str:
             try:
                 route_magic_number = int(route_magic_str)
@@ -168,7 +186,7 @@ class MultiAccountConfig:
                     f"{section}: Invalid route_magic_number={route_magic_str}, ignoring"
                 )
 
-        magic_numbers = None
+        magic_numbers: Optional[Set[int]] = None
         magic_str = self.config.get(section, "magic_numbers", fallback="")
         if magic_str.strip():
             try:
@@ -179,13 +197,14 @@ class MultiAccountConfig:
                 logger.warning(f"{section}: Invalid magic_numbers format")
                 magic_numbers = None
 
+        # Backward compatibility: include route_magic_number in magic_numbers if present.
         if route_magic_number is not None:
             if magic_numbers is None:
                 magic_numbers = {route_magic_number}
             else:
                 magic_numbers.add(route_magic_number)
 
-        allowed_symbols = None
+        allowed_symbols: Optional[Set[str]] = None
         allowed_str = self.config.get(section, "allowed_symbols", fallback="")
         if allowed_str.strip():
             allowed_symbols = {
@@ -199,15 +218,23 @@ class MultiAccountConfig:
                 s.strip().upper() for s in blocked_str.split(",") if s.strip()
             }
 
-        risk_mode = self.config.get(section, "risk_mode", fallback="SOURCE_VOLUME").strip().upper()
-        reject_if_no_sl = self.config.getboolean(section, "reject_if_no_sl", fallback=False)
+        risk_mode = self.config.get(
+            section, "risk_mode", fallback="SOURCE_VOLUME"
+        ).strip().upper()
+        reject_if_no_sl = self.config.getboolean(
+            section, "reject_if_no_sl", fallback=False
+        )
         fixed_lot = self.config.getfloat(section, "fixed_lot", fallback=0.0)
         source_volume_fallback = self.config.getboolean(
             section, "source_volume_fallback", fallback=True
         )
-        fixed_usd_risk = self.config.getfloat(section, "fixed_usd_risk", fallback=0.0)
+        fixed_usd_risk = self.config.getfloat(
+            section, "fixed_usd_risk", fallback=0.0
+        )
         risk_percent = self.config.getfloat(section, "risk_percent", fallback=0.0)
-        risk_reference = self.config.get(section, "risk_reference", fallback="EQUITY").strip().upper()
+        risk_reference = self.config.get(
+            section, "risk_reference", fallback="EQUITY"
+        ).strip().upper()
 
         startup_sync_market_orders = self.config.getboolean(
             section, "startup_sync_market_orders", fallback=False
@@ -272,7 +299,7 @@ class MultiAccountConfig:
             access_token=access_token,
             refresh_token=refresh_token,
             token_state_file=token_state_file,
-            environment=self.config.get(section, "environment", fallback="demo"),
+            environment=self.config.get(section, "environment", fallback="demo").strip().lower(),
             symbol_prefix=self.config.get(section, "symbol_prefix", fallback=""),
             symbol_suffix=self.config.get(section, "symbol_suffix", fallback=""),
             custom_symbols=custom_symbols,
@@ -296,6 +323,7 @@ class MultiAccountConfig:
             max_concurrent_positions=self.config.getint(
                 section, "max_concurrent_positions", fallback=100
             ),
+            receive_all_signals=receive_all_signals,
             route_magic_number=route_magic_number,
             magic_numbers=magic_numbers,
             allowed_symbols=allowed_symbols,
@@ -321,16 +349,45 @@ class MultiAccountConfig:
     def get_enabled_accounts(self) -> List[AccountConfig]:
         return [acc for acc in self.accounts.values() if acc.enabled]
 
-    def get_account_by_magic(self, magic: int) -> Optional[AccountConfig]:
+    def get_accounts_by_magic(self, magic: int) -> List[AccountConfig]:
+        """
+        Fan-out routing:
+        - Accounts with receive_all_signals=True are included, subject to magic filters.
+        - Accounts with magic_numbers containing the magic are included.
+        - route_magic_number remains a backward-compatible alias.
+        - Result order follows config file load order.
+        """
+        matches: List[AccountConfig] = []
+
         for account in self.get_enabled_accounts():
+            include = False
+
+            if account.receive_all_signals:
+                if account.magic_numbers is None or magic in account.magic_numbers:
+                    include = True
+
             if account.magic_numbers is not None and magic in account.magic_numbers:
-                return account
+                include = True
 
-        for account in self.get_enabled_accounts():
-            if account.route_magic_number is not None and account.route_magic_number == magic:
-                return account
+            if (
+                not include
+                and account.route_magic_number is not None
+                and account.route_magic_number == magic
+            ):
+                include = True
 
-        return None
+            if include:
+                matches.append(account)
+
+        return matches
+
+    def get_account_by_magic(self, magic: int) -> Optional[AccountConfig]:
+        """
+        Backward-compatible single-match helper.
+        Returns the first matching account according to get_accounts_by_magic().
+        """
+        matches = self.get_accounts_by_magic(magic)
+        return matches[0] if matches else None
 
     def should_copy_trade(
         self,
