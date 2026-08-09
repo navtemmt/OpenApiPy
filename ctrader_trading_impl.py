@@ -297,9 +297,6 @@ def send_pending_order(
     label: str = "MT5_Pending",
     expiration_ms: int = 0,
 ):
-    """
-    Create pending order (LIMIT / STOP / STOP_LIMIT) via ProtoOANewOrderReq.
-    """
     if not self.is_account_authed:
         raise RuntimeError("Account not authenticated yet")
 
@@ -418,9 +415,6 @@ def amend_pending_order(
     take_profit: Optional[float] = None,
     expiration_ms: Optional[int] = None,
 ):
-    """
-    Amend an existing pending order via ProtoOAAmendOrderReq.
-    """
     if not self.is_account_authed:
         raise RuntimeError("Account not authenticated yet")
 
@@ -456,35 +450,34 @@ def amend_pending_order(
     else:
         take_profit = None
 
-    if ptype == "limit" and limit_price is None:
-        raise ValueError("LIMIT amend requires limit_price > 0")
+    req = ProtoOAAmendOrderReq()
+    req.ctidTraderAccountId = account_id
+    req.orderId = order_id
+    req.volume = int(volume)
+    req.tradeSide = ProtoOATradeSide.BUY if str(side).lower() == "buy" else ProtoOATradeSide.SELL
+    req.symbolId = symbol_id
 
-    if ptype == "stop" and stop_price is None:
-        raise ValueError("STOP amend requires stop_price > 0")
-
-    if ptype == "stop_limit":
+    if ptype == "limit":
+        if limit_price is None:
+            raise ValueError("LIMIT amend requires limit_price > 0")
+        req.orderType = ProtoOAOrderType.LIMIT
+        req.limitPrice = float(limit_price)
+    elif ptype == "stop":
+        if stop_price is None:
+            raise ValueError("STOP amend requires stop_price > 0")
+        req.orderType = ProtoOAOrderType.STOP
+        req.stopPrice = float(stop_price)
+    else:
         if stop_price is None:
             raise ValueError("STOP_LIMIT amend requires stop_price > 0")
         if limit_price is None:
             raise ValueError("STOP_LIMIT amend requires limit_price > 0")
-
-    req = ProtoOAAmendOrderReq()
-    req.ctidTraderAccountId = account_id
-    req.orderId = order_id
-    req.tradeSide = ProtoOATradeSide.BUY if str(side).lower() == "buy" else ProtoOATradeSide.SELL
-    req.volume = int(volume)
-
-    if ptype == "limit":
-        req.limitPrice = float(limit_price)
-    elif ptype == "stop":
-        req.stopPrice = float(stop_price)
-    else:
+        req.orderType = ProtoOAOrderType.STOP_LIMIT
         req.stopPrice = float(stop_price)
         req.limitPrice = float(limit_price)
 
     if stop_loss is not None:
         req.stopLoss = float(stop_loss)
-
     if take_profit is not None:
         req.takeProfit = float(take_profit)
 
@@ -495,7 +488,7 @@ def amend_pending_order(
     symbol_name = _resolve_symbol_name_from_id(self, symbol_id) or "UNKNOWN"
 
     logger.info(
-        "Amending pending order: account_id=%s orderId=%s symbol=%s symbolId=%s type=%s side=%s volume=%s stop=%s limit=%s SL=%s TP=%s exp=%s",
+        "Amending pending order: account_id=%s orderId=%s symbol=%s symbolId=%s type=%s side=%s vol=%s stop=%s limit=%s SL=%s TP=%s exp=%s",
         account_id,
         order_id,
         symbol_name,
@@ -507,7 +500,7 @@ def amend_pending_order(
         limit_price,
         stop_loss,
         take_profit,
-        int(expiration_ms or 0),
+        int(expiration_ms or 0) if expiration_ms is not None else 0,
     )
 
     d = self.send(req)
@@ -540,9 +533,6 @@ def amend_pending_order(
 
 
 def cancel_pending_order(self, account_id: int, order_id: int):
-    """
-    Cancel an existing pending order by cTrader orderId.
-    """
     if not self.is_account_authed:
         raise RuntimeError("Account not authenticated yet")
 
@@ -655,14 +645,6 @@ def modify_position(
 
 
 def close_position(self, *args: Any, **kwargs: Any):
-    """
-    Compatible close.
-
-    Requires:
-      (account_id, position_id, volume[, symbol_id])
-    Accepts alt keyword names:
-      pos_id, position, qty, volume_cents
-    """
     account_id = kwargs.get("account_id")
     position_id = kwargs.get("position_id", kwargs.get("pos_id", kwargs.get("position")))
     volume = kwargs.get("volume", kwargs.get("qty", kwargs.get("volume_cents")))
@@ -735,4 +717,3 @@ def close_position(self, *args: Any, **kwargs: Any):
     d.addCallback(_on_resp)
     d.addErrback(self._on_error)
     return d
-</query>
