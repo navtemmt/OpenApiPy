@@ -16,6 +16,7 @@ from typing import Optional, Any
 from ctrader_open_api import Protobuf
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOANewOrderReq,
+    ProtoOAAmendOrderReq,
     ProtoOAAmendPositionSLTPReq,
     ProtoOAClosePositionReq,
     ProtoOACancelOrderReq,
@@ -160,6 +161,29 @@ def _format_context(context: dict) -> str:
     return " ".join(parts)
 
 
+def _normalize_pending_type(pending_type: str) -> str:
+    ptype = str(pending_type or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "limit": "limit",
+        "stop": "stop",
+        "stop_limit": "stop_limit",
+        "stoplimit": "stop_limit",
+        "buy_limit": "limit",
+        "sell_limit": "limit",
+        "buylimit": "limit",
+        "selllimit": "limit",
+        "buy_stop": "stop",
+        "sell_stop": "stop",
+        "buystop": "stop",
+        "sellstop": "stop",
+        "buy_stop_limit": "stop_limit",
+        "sell_stop_limit": "stop_limit",
+        "buystoplimit": "stop_limit",
+        "sellstoplimit": "stop_limit",
+    }
+    return aliases.get(ptype, ptype)
+
+
 def amend_position(
     self,
     account_id: int,
@@ -279,7 +303,7 @@ def send_pending_order(
     if not self.is_account_authed:
         raise RuntimeError("Account not authenticated yet")
 
-    ptype = (pending_type or "").strip().lower()
+    ptype = _normalize_pending_type(pending_type)
     if ptype not in ("limit", "stop", "stop_limit"):
         raise ValueError(f"Unsupported pending_type: {pending_type}")
 
@@ -372,6 +396,142 @@ def send_pending_order(
                 symbol_name,
                 symbol_id,
                 label,
+                result,
+            )
+
+    d.addCallback(_on_resp)
+    d.addErrback(self._on_error)
+    return d
+
+
+def amend_pending_order(
+    self,
+    account_id: int,
+    order_id: int,
+    symbol_id: int,
+    side: str,
+    volume: int,
+    pending_type: str,
+    stop_price: Optional[float] = None,
+    limit_price: Optional[float] = None,
+    stop_loss: Optional[float] = None,
+    take_profit: Optional[float] = None,
+    expiration_ms: Optional[int] = None,
+):
+    """
+    Amend an existing pending order via ProtoOAAmendOrderReq.
+    cTrader Open API supports amending pending orders with ProtoOAAmendOrderReq. [web:307][web:319]
+    """
+    if not self.is_account_authed:
+        raise RuntimeError("Account not authenticated yet")
+
+    ptype = _normalize_pending_type(pending_type)
+    if ptype not in ("limit", "stop", "stop_limit"):
+        raise ValueError(f"Unsupported pending_type: {pending_type}")
+
+    account_id = int(account_id)
+    order_id = int(order_id)
+    symbol_id = int(symbol_id)
+    volume = self.snap_volume_for_symbol(symbol_id, int(volume))
+
+    stop_price = float(stop_price or 0.0)
+    limit_price = float(limit_price or 0.0)
+
+    if stop_price > 0:
+        stop_price = self.round_price_for_symbol(symbol_id, stop_price)
+    else:
+        stop_price = None
+
+    if limit_price > 0:
+        limit_price = self.round_price_for_symbol(symbol_id, limit_price)
+    else:
+        limit_price = None
+
+    if stop_loss is not None and float(stop_loss) > 0:
+        stop_loss = self.round_price_for_symbol(symbol_id, float(stop_loss))
+    else:
+        stop_loss = None
+
+    if take_profit is not None and float(take_profit) > 0:
+        take_profit = self.round_price_for_symbol(symbol_id, float(take_profit))
+    else:
+        take_profit = None
+
+    req = ProtoOAAmendOrderReq()
+    req.ctidTraderAccountId = account_id
+    req.orderId = order_id
+    req.volume = int(volume)
+
+    if ptype == "limit":
+        if limit_price is None:
+            raise ValueError("LIMIT amend requires limit_price > 0")
+        req.orderType = ProtoOAOrderType.LIMIT
+        req.limitPrice = float(limit_price)
+    elif ptype == "stop":
+        if stop_price is None:
+            raise ValueError("STOP amend requires stop_price > 0")
+        req.orderType = ProtoOAOrderType.STOP
+        req.stopPrice = float(stop_price)
+    else:
+        if stop_price is None:
+            raise ValueError("STOP_LIMIT amend requires stop_price > 0")
+        if limit_price is None:
+            raise ValueError("STOP_LIMIT amend requires limit_price > 0")
+        req.orderType = ProtoOAOrderType.STOP_LIMIT
+        req.stopPrice = float(stop_price)
+        req.limitPrice = float(limit_price)
+
+    req.tradeSide = ProtoOATradeSide.BUY if str(side).lower() == "buy" else ProtoOATradeSide.SELL
+    req.symbolId = symbol_id
+
+    if stop_loss is not None:
+        req.stopLoss = float(stop_loss)
+    if take_profit is not None:
+        req.takeProfit = float(take_profit)
+
+    if expiration_ms is not None and int(expiration_ms) > 0:
+        req.timeInForce = ProtoOATimeInForce.GOOD_TILL_DATE
+        req.expirationTimestamp = int(expiration_ms)
+
+    symbol_name = _resolve_symbol_name_from_id(self, symbol_id) or "UNKNOWN"
+
+    logger.info(
+        "Amending pending order: account_id=%s orderId=%s symbol=%s symbolId=%s type=%s side=%s vol=%s stop=%s limit=%s SL=%s TP=%s exp=%s",
+        account_id,
+        order_id,
+        symbol_name,
+        symbol_id,
+        ptype,
+        side,
+        volume,
+        stop_price,
+        limit_price,
+        stop_loss,
+        take_profit,
+        int(expiration_ms or 0) if expiration_ms is not None else 0,
+    )
+
+    d = self.send(req)
+
+    def _on_resp(result):
+        try:
+            extracted = Protobuf.extract(result)
+            context = _extract_response_context(
+                self,
+                extracted,
+                fallback_account_id=account_id,
+                fallback_symbol_id=symbol_id,
+            )
+            if context.get("order_id") is None:
+                context["order_id"] = int(order_id)
+            logger.info("Amend pending order response: %s\n%s", _format_context(context), extracted)
+        except Exception:
+            logger.warning(
+                "Amend pending order response (raw): account_id=%s orderId=%s symbol=%s symbolId=%s raw=%r",
+                account_id,
+                order_id,
+                symbol_name,
+                symbol_id,
                 result,
             )
 
