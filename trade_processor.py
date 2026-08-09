@@ -108,6 +108,10 @@ def _canonical_event_type(data: dict) -> str:
         "ORDERDELETE": "PENDING_CANCEL",
         "PENDING_OPEN": "PENDING_OPEN",
         "PENDINGOPEN": "PENDING_OPEN",
+        "PENDING_MODIFY": "PENDING_MODIFY",
+        "PENDINGMODIFY": "PENDING_MODIFY",
+        "PENDING_UPDATE": "PENDING_MODIFY",
+        "PENDINGUPDATE": "PENDING_MODIFY",
     }
     return aliases.get(raw, raw)
 
@@ -865,6 +869,8 @@ def process_trade_event(data, account_manager):
             handle_open_event(data, account_manager)
         elif event_type == "PENDING_OPEN":
             handle_pending_open_event(data, account_manager)
+        elif event_type == "PENDING_MODIFY":
+            handle_pending_modify_event(data, account_manager)
         elif event_type == "PENDING_CANCEL":
             handle_pending_cancel_event(data, account_manager)
         elif event_type == "MODIFY":
@@ -1086,6 +1092,85 @@ def handle_pending_open_event(data, account_manager):
 
     except Exception as e:
         logger.error(f"[{account_name}] Failed to copy PENDING_OPEN event: {e}")
+
+
+def handle_pending_modify_event(data, account_manager):
+    ticket = _to_int(data.get("ticket"), 0)
+    mt5_symbol = data.get("symbol")
+    side = str(data.get("side") or data.get("type") or "").strip().upper()
+    volume = _to_float(data.get("volume", 0), 0.0)
+    sl = _to_float(data.get("sl", 0), 0.0)
+    tp = _to_float(data.get("tp", 0), 0.0)
+    magic = _to_int(data.get("magic", 0), 0)
+
+    pending_type = _canonical_pending_type(data)
+    entry_price = _to_float(data.get("entry_price", 0), 0.0)
+    stop_price = _to_float(data.get("stop_price", 0), 0.0)
+    limit_price = _to_float(data.get("limit_price", 0), 0.0)
+    expiration_ms = _to_int(data.get("expiration_ms", 0), 0)
+
+    if pending_type not in ("limit", "stop", "stop_limit"):
+        logger.warning(
+            f"PENDING_MODIFY ignored for ticket {ticket}: unsupported pending_type={pending_type!r}"
+        )
+        return
+
+    if pending_type == "limit" and limit_price <= 0:
+        limit_price = entry_price
+    if pending_type == "stop" and stop_price <= 0:
+        stop_price = entry_price
+    if pending_type == "stop_limit":
+        if stop_price <= 0:
+            stop_price = entry_price
+        if limit_price <= 0:
+            limit_price = entry_price
+
+    logger.info(
+        f"PENDING_MODIFY event - Ticket: {ticket}, Symbol: {mt5_symbol}, Side: {side}, "
+        f"Volume: {volume}, pending_type={pending_type}, "
+        f"stop_price={stop_price}, limit_price={limit_price}, SL={sl}, TP={tp}, "
+        f"expiration_ms={expiration_ms}"
+    )
+
+    account_name, client, config = _get_target_account_context(data, account_manager)
+    if not account_name:
+        logger.warning(f"PENDING_MODIFY ignored for ticket {ticket}: no target account for magic={magic}")
+        return
+
+    try:
+        order_id = account_manager.get_order_id(account_name, int(ticket))
+        if not order_id:
+            logger.warning(
+                f"[{account_name}] PENDING_MODIFY ignored for ticket {ticket} "
+                f"(no orderId mapping yet)"
+            )
+            return
+
+        symbol_id = _get_symbol_id_for_account(client, config, mt5_symbol)
+        if symbol_id is None:
+            logger.warning(
+                f"[{account_name}] PENDING_MODIFY ignored for ticket {ticket} "
+                f"(symbol mapping failed for {mt5_symbol})"
+            )
+            return
+
+        client.amend_pending_order(
+            account_id=config.account_id,
+            order_id=int(order_id),
+            symbol_id=int(symbol_id),
+            side=side,
+            volume=float(volume),
+            pending_type=pending_type,
+            stop_price=float(stop_price) if float(stop_price or 0) > 0 else None,
+            limit_price=float(limit_price) if float(limit_price or 0) > 0 else None,
+            stop_loss=float(sl) if float(sl or 0) > 0 else None,
+            take_profit=float(tp) if float(tp or 0) > 0 else None,
+            expiration_ms=int(expiration_ms) if int(expiration_ms or 0) > 0 else None,
+        )
+        logger.info(f"[{account_name}] Modified pending order {int(order_id)} for ticket {ticket}")
+
+    except Exception as e:
+        logger.error(f"[{account_name}] Failed to modify pending order for ticket {ticket}: {e}")
 
 
 def handle_pending_cancel_event(data, account_manager):
