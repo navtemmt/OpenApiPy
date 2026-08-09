@@ -10,8 +10,8 @@ import configparser
 import json
 import logging
 import os
-from typing import Dict, List, Optional, Set
 from dataclasses import dataclass
+from typing import Dict, List, Optional, Set
 
 from dotenv import load_dotenv
 
@@ -80,8 +80,9 @@ class MultiAccountConfig:
         load_dotenv()
 
         self.accounts: Dict[str, AccountConfig] = {}
-
-        self.config = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
+        self.config = configparser.ConfigParser(
+            inline_comment_prefixes=(";", "#")
+        )
 
         if not os.path.exists(config_file):
             logger.error(f"Config file not found: {config_file}")
@@ -114,7 +115,8 @@ class MultiAccountConfig:
                     logger.info(
                         f"✓ Loaded account: {account.name} "
                         f"(ID: {account.account_id}, {account.environment}, "
-                        f"route_magic_number={account.route_magic_number})"
+                        f"route_magic_number={account.route_magic_number}, "
+                        f"magic_numbers={sorted(account.magic_numbers) if account.magic_numbers else None})"
                     )
                 else:
                     logger.info(f"○ Loaded account: {account.name} (DISABLED)")
@@ -138,7 +140,10 @@ class MultiAccountConfig:
         client_secret = os.getenv(client_secret_key, "")
         access_token = os.getenv(access_token_key, "")
         refresh_token = os.getenv(refresh_token_key, "")
-        token_state_file = os.getenv(token_state_file_key, "").strip() or self._default_token_state_file(account_name)
+        token_state_file = (
+            os.getenv(token_state_file_key, "").strip()
+            or self._default_token_state_file(account_name)
+        )
 
         if account_id == 0 or not client_id or not client_secret:
             logger.warning(
@@ -159,15 +164,20 @@ class MultiAccountConfig:
             try:
                 route_magic_number = int(route_magic_str)
             except ValueError:
-                logger.warning(f"{section}: Invalid route_magic_number={route_magic_str}, ignoring")
+                logger.warning(
+                    f"{section}: Invalid route_magic_number={route_magic_str}, ignoring"
+                )
 
-        magic_str = self.config.get(section, "magic_numbers", fallback="")
         magic_numbers = None
+        magic_str = self.config.get(section, "magic_numbers", fallback="")
         if magic_str.strip():
             try:
-                magic_numbers = {int(m.strip()) for m in magic_str.split(",") if m.strip()}
+                magic_numbers = {
+                    int(m.strip()) for m in magic_str.split(",") if m.strip()
+                }
             except ValueError:
                 logger.warning(f"{section}: Invalid magic_numbers format")
+                magic_numbers = None
 
         if route_magic_number is not None:
             if magic_numbers is None:
@@ -175,20 +185,26 @@ class MultiAccountConfig:
             else:
                 magic_numbers.add(route_magic_number)
 
-        allowed_str = self.config.get(section, "allowed_symbols", fallback="")
         allowed_symbols = None
+        allowed_str = self.config.get(section, "allowed_symbols", fallback="")
         if allowed_str.strip():
-            allowed_symbols = {s.strip().upper() for s in allowed_str.split(",") if s.strip()}
+            allowed_symbols = {
+                s.strip().upper() for s in allowed_str.split(",") if s.strip()
+            }
 
+        blocked_symbols: Set[str] = set()
         blocked_str = self.config.get(section, "blocked_symbols", fallback="")
-        blocked_symbols = set()
         if blocked_str.strip():
-            blocked_symbols = {s.strip().upper() for s in blocked_str.split(",") if s.strip()}
+            blocked_symbols = {
+                s.strip().upper() for s in blocked_str.split(",") if s.strip()
+            }
 
         risk_mode = self.config.get(section, "risk_mode", fallback="SOURCE_VOLUME").strip().upper()
         reject_if_no_sl = self.config.getboolean(section, "reject_if_no_sl", fallback=False)
         fixed_lot = self.config.getfloat(section, "fixed_lot", fallback=0.0)
-        source_volume_fallback = self.config.getboolean(section, "source_volume_fallback", fallback=True)
+        source_volume_fallback = self.config.getboolean(
+            section, "source_volume_fallback", fallback=True
+        )
         fixed_usd_risk = self.config.getfloat(section, "fixed_usd_risk", fallback=0.0)
         risk_percent = self.config.getfloat(section, "risk_percent", fallback=0.0)
         risk_reference = self.config.get(section, "risk_reference", fallback="EQUITY").strip().upper()
@@ -207,11 +223,15 @@ class MultiAccountConfig:
         )
 
         if risk_reference not in ("EQUITY", "BALANCE"):
-            logger.warning(f"{section}: Invalid risk_reference={risk_reference}, defaulting to EQUITY")
+            logger.warning(
+                f"{section}: Invalid risk_reference={risk_reference}, defaulting to EQUITY"
+            )
             risk_reference = "EQUITY"
 
         if risk_mode not in ("SOURCE_VOLUME", "FIXED_LOT", "PERCENT_EQUITY", "FIXED_USD"):
-            logger.warning(f"{section}: Invalid risk_mode={risk_mode}, defaulting to SOURCE_VOLUME")
+            logger.warning(
+                f"{section}: Invalid risk_mode={risk_mode}, defaulting to SOURCE_VOLUME"
+            )
             risk_mode = "SOURCE_VOLUME"
 
         if startup_market_recovery_mode not in ("market", "market_or_pending", "skip"):
@@ -273,7 +293,9 @@ class MultiAccountConfig:
             startup_market_max_distance_pips=startup_market_max_distance_pips,
             startup_pending_expiration_ms=startup_pending_expiration_ms,
             max_daily_trades=self.config.getint(section, "max_daily_trades", fallback=1000),
-            max_concurrent_positions=self.config.getint(section, "max_concurrent_positions", fallback=100),
+            max_concurrent_positions=self.config.getint(
+                section, "max_concurrent_positions", fallback=100
+            ),
             route_magic_number=route_magic_number,
             magic_numbers=magic_numbers,
             allowed_symbols=allowed_symbols,
@@ -285,6 +307,7 @@ class MultiAccountConfig:
         for account in self.get_enabled_accounts():
             if account.route_magic_number is None:
                 continue
+
             if account.route_magic_number in seen:
                 logger.warning(
                     "Duplicate route_magic_number=%s on accounts %s and %s",
@@ -300,11 +323,22 @@ class MultiAccountConfig:
 
     def get_account_by_magic(self, magic: int) -> Optional[AccountConfig]:
         for account in self.get_enabled_accounts():
+            if account.magic_numbers is not None and magic in account.magic_numbers:
+                return account
+
+        for account in self.get_enabled_accounts():
             if account.route_magic_number is not None and account.route_magic_number == magic:
                 return account
+
         return None
 
-    def should_copy_trade(self, account: AccountConfig, symbol: str, magic: int, lots: float) -> tuple[bool, str]:
+    def should_copy_trade(
+        self,
+        account: AccountConfig,
+        symbol: str,
+        magic: int,
+        lots: float,
+    ) -> tuple[bool, str]:
         symbol_upper = symbol.upper()
 
         if account.daily_trade_count >= account.max_daily_trades:
