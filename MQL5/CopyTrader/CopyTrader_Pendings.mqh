@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //| CopyTrader_Pendings.mqh                                          |
-//| Pending orders tracking + PENDING_OPEN + PENDING_CLOSE (MT5 safe) |
+//| Pending orders tracking + PENDING_OPEN/PENDING_MODIFY/PENDING_CLOSE |
 //+------------------------------------------------------------------+
 #ifndef __COPYTRADER_PENDINGS_MQH__
 #define __COPYTRADER_PENDINGS_MQH__
@@ -244,6 +244,42 @@ void UpdatePendingList()
 }
 
 //======================================================
+// Helpers
+//======================================================
+string PendingTypeToSide(const int ord_type)
+{
+   if(ord_type == ORDER_TYPE_SELL_LIMIT ||
+      ord_type == ORDER_TYPE_SELL_STOP ||
+      ord_type == ORDER_TYPE_SELL_STOP_LIMIT)
+      return "SELL";
+
+   return "BUY";
+}
+
+string PendingTypeToName(const int ord_type)
+{
+   if(ord_type == ORDER_TYPE_BUY_LIMIT || ord_type == ORDER_TYPE_SELL_LIMIT)
+      return "limit";
+   if(ord_type == ORDER_TYPE_BUY_STOP || ord_type == ORDER_TYPE_SELL_STOP)
+      return "stop";
+   return "stop_limit";
+}
+
+bool PendingFieldsChanged(const PendingSnap &a,
+                          const PendingSnap &b)
+{
+   return (a.type            != b.type ||
+           a.volume          != b.volume ||
+           a.price_open      != b.price_open ||
+           a.price_stoplimit != b.price_stoplimit ||
+           a.stopLoss        != b.stopLoss ||
+           a.takeProfit      != b.takeProfit ||
+           a.expiration      != b.expiration ||
+           a.magicNumber     != b.magicNumber ||
+           a.symbol          != b.symbol);
+}
+
+//======================================================
 // JSON builders
 //======================================================
 void SendPendingOpenSignal(const ulong ticket)
@@ -269,39 +305,8 @@ void SendPendingOpenSignal(const ulong ticket)
    double contract_size, vol_min, vol_max, vol_step;
    GetSymbolTradeMeta(symbol, contract_size, vol_min, vol_max, vol_step);
 
-   string side = "BUY";
-   string pending_type = "limit";
-
-   if(ord_type == ORDER_TYPE_BUY_LIMIT)
-   {
-      side = "BUY";
-      pending_type = "limit";
-   }
-   else if(ord_type == ORDER_TYPE_SELL_LIMIT)
-   {
-      side = "SELL";
-      pending_type = "limit";
-   }
-   else if(ord_type == ORDER_TYPE_BUY_STOP)
-   {
-      side = "BUY";
-      pending_type = "stop";
-   }
-   else if(ord_type == ORDER_TYPE_SELL_STOP)
-   {
-      side = "SELL";
-      pending_type = "stop";
-   }
-   else if(ord_type == ORDER_TYPE_BUY_STOP_LIMIT)
-   {
-      side = "BUY";
-      pending_type = "stop_limit";
-   }
-   else if(ord_type == ORDER_TYPE_SELL_STOP_LIMIT)
-   {
-      side = "SELL";
-      pending_type = "stop_limit";
-   }
+   string side = PendingTypeToSide(ord_type);
+   string pending_type = PendingTypeToName(ord_type);
 
    long exp_ms = 0;
    if(exp > 0)
@@ -316,13 +321,9 @@ void SendPendingOpenSignal(const ulong ticket)
    json += "\"pending_type\":\"" + pending_type + "\",";
 
    if(pending_type == "limit")
-   {
       json += "\"limit_price\":" + DoubleToString(price_open, 5) + ",";
-   }
    else if(pending_type == "stop")
-   {
       json += "\"stop_price\":" + DoubleToString(price_open, 5) + ",";
-   }
    else
    {
       json += "\"stop_price\":" + DoubleToString(price_open, 5) + ",";
@@ -337,6 +338,42 @@ void SendPendingOpenSignal(const ulong ticket)
    json += "\"mt5_volume_min\":" + DoubleToString(vol_min, 2) + ",";
    json += "\"mt5_volume_max\":" + DoubleToString(vol_max, 2) + ",";
    json += "\"mt5_volume_step\":" + DoubleToString(vol_step, 2);
+   json += "}";
+
+   SendToServer(json);
+}
+
+void SendPendingModifySignal(const PendingSnap &snap)
+{
+   string side = PendingTypeToSide(snap.type);
+   string pending_type = PendingTypeToName(snap.type);
+
+   long exp_ms = 0;
+   if(snap.expiration > 0)
+      exp_ms = (long)snap.expiration * 1000;
+
+   string json = "{";
+   json += "\"event_type\":\"PENDING_MODIFY\",";
+   json += "\"ticket\":" + (string)snap.ticket + ",";
+   json += "\"symbol\":\"" + JsonEscape(snap.symbol) + "\",";
+   json += "\"side\":\"" + side + "\",";
+   json += "\"volume\":" + DoubleToString(snap.volume, 2) + ",";
+   json += "\"pending_type\":\"" + pending_type + "\",";
+
+   if(pending_type == "limit")
+      json += "\"limit_price\":" + DoubleToString(snap.price_open, 5) + ",";
+   else if(pending_type == "stop")
+      json += "\"stop_price\":" + DoubleToString(snap.price_open, 5) + ",";
+   else
+   {
+      json += "\"stop_price\":" + DoubleToString(snap.price_open, 5) + ",";
+      json += "\"limit_price\":" + DoubleToString(snap.price_stoplimit, 5) + ",";
+   }
+
+   json += "\"sl\":" + DoubleToString(snap.stopLoss, 5) + ",";
+   json += "\"tp\":" + DoubleToString(snap.takeProfit, 5) + ",";
+   json += "\"expiration_ms\":" + (string)exp_ms + ",";
+   json += "\"magic\":" + (string)snap.magicNumber;
    json += "}";
 
    SendToServer(json);
@@ -367,11 +404,47 @@ void Pendings_OnTradeTransaction(const MqlTradeTransaction &trans)
    if(trans.order == 0)
       return;
 
-   // Capture magic while the order still exists and can be selected.
-   if(trans.type == TRADE_TRANSACTION_ORDER_ADD ||
-      trans.type == TRADE_TRANSACTION_ORDER_UPDATE)
+   if(trans.type == TRADE_TRANSACTION_ORDER_ADD)
    {
       UpsertPendSnap_FromLiveOrder((ulong)trans.order);
+      return;
+   }
+
+   if(trans.type == TRADE_TRANSACTION_ORDER_UPDATE)
+   {
+      long t = (long)trans.order;
+      int oldIdx = FindPendSnapIndex(t);
+
+      PendingSnap before;
+      bool haveBefore = false;
+      if(oldIdx >= 0)
+      {
+         before = g_pendSnap[oldIdx];
+         haveBefore = true;
+      }
+
+      if(!UpsertPendSnap_FromLiveOrder((ulong)trans.order))
+         return;
+
+      int newIdx = FindPendSnapIndex(t);
+      if(newIdx < 0)
+         return;
+
+      PendingSnap after = g_pendSnap[newIdx];
+
+      if(haveBefore && PendingFieldsChanged(before, after))
+      {
+         PrintFormat(
+            "DEBUG PENDING_MODIFY: ticket=%I64d symbol=%s sl=%.5f tp=%.5f magic=%I64d",
+            after.ticket,
+            after.symbol,
+            after.stopLoss,
+            after.takeProfit,
+            after.magicNumber
+         );
+         SendPendingModifySignal(after);
+      }
+
       return;
    }
 
@@ -381,8 +454,6 @@ void Pendings_OnTradeTransaction(const MqlTradeTransaction &trans)
    if(!IsPendingOrderType((int)trans.order_type))
       return;
 
-   // ORDER_DELETE also occurs when a pending order becomes a market position.
-   // Copy only canceled and expired pending removals as PENDING_CLOSE.
    ENUM_ORDER_STATE os = (ENUM_ORDER_STATE)trans.order_state;
    if(os != ORDER_STATE_CANCELED && os != ORDER_STATE_EXPIRED)
       return;
@@ -390,8 +461,6 @@ void Pendings_OnTradeTransaction(const MqlTradeTransaction &trans)
    long t = (long)trans.order;
    string sym = trans.symbol;
 
-   // MqlTradeTransaction has no .magic field.
-   // Resolve magic from the snapshot captured on ORDER_ADD/ORDER_UPDATE.
    long magic = 0;
    int snapIdx = FindPendSnapIndex(t);
 
@@ -421,7 +490,7 @@ void Pendings_OnTradeTransaction(const MqlTradeTransaction &trans)
 }
 
 //======================================================
-// Detect new and removed pending orders
+// Detect new / modified / removed pending orders
 //======================================================
 void CheckPendingChanges()
 {
@@ -452,16 +521,46 @@ void CheckPendingChanges()
          continue;
       }
 
-      UpsertPendSnap_FromLiveOrder(ticket_u);
+      long t = (long)ticket_u;
+
+      PendingSnap before;
+      bool haveBefore = false;
+      int oldIdx = FindPendSnapIndex(t);
+      if(oldIdx >= 0)
+      {
+         before = g_pendSnap[oldIdx];
+         haveBefore = true;
+      }
+
+      if(!UpsertPendSnap_FromLiveOrder(ticket_u))
+         continue;
+
+      int newIdx = FindPendSnapIndex(t);
+      if(newIdx < 0)
+         continue;
+
+      PendingSnap after = g_pendSnap[newIdx];
 
       ArrayResize(currTickets, currCount + 1);
-      currTickets[currCount] = (long)ticket_u;
+      currTickets[currCount] = t;
       currCount++;
 
-      if(!PendingAlreadySent((long)ticket_u))
+      if(!PendingAlreadySent(t))
       {
          SendPendingOpenSignal(ticket_u);
-         MarkPendingSent((long)ticket_u);
+         MarkPendingSent(t);
+      }
+      else if(haveBefore && PendingFieldsChanged(before, after))
+      {
+         PrintFormat(
+            "DEBUG PENDING_MODIFY (polling): ticket=%I64d symbol=%s sl=%.5f tp=%.5f magic=%I64d",
+            after.ticket,
+            after.symbol,
+            after.stopLoss,
+            after.takeProfit,
+            after.magicNumber
+         );
+         SendPendingModifySignal(after);
       }
    }
 
