@@ -1,3 +1,7 @@
+WARNING:app_state:[Demo] Cannot close ticket 5332530 (positionId=40011275) 
+because close volume is unknown/invalid.
+
+INFO:app_state:[1067389] CLOSE ignored for ticket 5332530 (no mapping)
 ## MT4/MT5 to cTrader Copy Trading System
 
 This repository contains a copy trading bridge that forwards master trade events from MetaTrader to cTrader accounts through the cTrader Open API. The active runtime uses `main.py` as the entrypoint and `bridge_server.py` as the HTTP receiver. Legacy file `mt5_bridge_server.py` is not the primary startup path.
