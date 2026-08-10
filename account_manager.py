@@ -61,6 +61,10 @@ class AccountManager:
         # Routing map: MT5 magic -> account name
         self.route_magic_map: Dict[int, str] = {}
 
+        # Shared token-state grouping:
+        # token_key -> canonical token state file path
+        self.shared_token_files: Dict[str, str] = {}
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -189,6 +193,95 @@ class AccountManager:
             pass
         return None
 
+    @staticmethod
+    def _safe_str(value) -> str:
+        try:
+            return str(value or "").strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _token_preview(token: str) -> str:
+        tok = str(token or "")
+        if len(tok) <= 10:
+            return tok or "<empty>"
+        return f"{tok[:6]}...{tok[-4:]}"
+
+    def _build_token_group_key(self, account: AccountConfig) -> str:
+        """
+        Build a stable grouping key for accounts that share the same cTrader auth context.
+
+        Preferred explicit config:
+          - token_group
+          - shared_token_group
+          - ctid_key
+
+        Fallback implicit grouping:
+          - identical access_token + refresh_token pair
+
+        This lets demo/live accounts share one canonical token_state_file if they
+        truly use the same OAuth credentials.
+        """
+        explicit_candidates = (
+            getattr(account, "token_group", None),
+            getattr(account, "shared_token_group", None),
+            getattr(account, "ctid_key", None),
+        )
+        for value in explicit_candidates:
+            value = self._safe_str(value)
+            if value:
+                return f"explicit:{value}"
+
+        access_token = self._safe_str(getattr(account, "access_token", ""))
+        refresh_token = self._safe_str(getattr(account, "refresh_token", ""))
+        if access_token or refresh_token:
+            return f"pair:{access_token}|{refresh_token}"
+
+        state_file = self._safe_str(getattr(account, "token_state_file", ""))
+        if state_file:
+            return f"state:{state_file}"
+
+        return f"account:{self._safe_str(getattr(account, 'name', 'unknown'))}"
+
+    def _resolve_shared_token_state_file(self, account: AccountConfig) -> Optional[str]:
+        """
+        Ensure accounts that share the same token group also share the same token state file.
+
+        First account in a group becomes canonical. Later accounts in the same group
+        are forced to reuse that file even if their own config points elsewhere.
+        """
+        token_key = self._build_token_group_key(account)
+        configured_state_file = self._safe_str(getattr(account, "token_state_file", ""))
+
+        existing = self.shared_token_files.get(token_key)
+        if existing:
+            if configured_state_file and configured_state_file != existing:
+                logger.warning(
+                    "[%s] Shared token group detected; overriding token_state_file %s -> %s",
+                    account.name,
+                    configured_state_file,
+                    existing,
+                )
+            return existing or None
+
+        if configured_state_file:
+            self.shared_token_files[token_key] = configured_state_file
+            logger.info(
+                "[%s] Registered shared token group %s with state file %s",
+                account.name,
+                token_key,
+                configured_state_file,
+            )
+            return configured_state_file
+
+        logger.info(
+            "[%s] Shared token group %s has no token_state_file configured",
+            account.name,
+            token_key,
+        )
+        self.shared_token_files[token_key] = ""
+        return None
+
     def _ensure_account_maps(self, acc_name: str):
         if acc_name not in self.position_maps:
             self.position_maps[acc_name] = {}
@@ -291,6 +384,19 @@ class AccountManager:
 
         logger.info("Initializing account: %s", account.name)
 
+        shared_state_file = self._resolve_shared_token_state_file(account)
+        account_id = self._config_account_id(account)
+
+        logger.info(
+            "[%s] Token bootstrap: access=%s refresh_present=%s state_file=%s env=%s account_id=%s",
+            account.name,
+            self._token_preview(getattr(account, "access_token", "")),
+            bool(self._safe_str(getattr(account, "refresh_token", ""))),
+            shared_state_file or getattr(account, "token_state_file", None),
+            getattr(account, "environment", None),
+            account_id,
+        )
+
         client = CTraderClient(
             env=account.environment,
             client_id=account.client_id,
@@ -298,10 +404,10 @@ class AccountManager:
         )
 
         client.set_account_credentials(
-            account_id=self._config_account_id(account),
+            account_id=account_id,
             access_token=account.access_token or "",
             refresh_token=account.refresh_token or "",
-            token_state_file=account.token_state_file,
+            token_state_file=shared_state_file,
             account_name=account.name,
         )
 
