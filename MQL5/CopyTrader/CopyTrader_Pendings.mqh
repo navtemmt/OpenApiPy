@@ -12,7 +12,15 @@
 // Also requires these helpers somewhere in your project:
 // - string JsonEscape(const string s);
 // - void SendToServer(const string json);
-// - void GetSymbolTradeMeta(const string symbol, double &contract_size, double &vol_min, double &vol_max, double &vol_step);
+// - bool GetSymbolTradeMeta(const string symbol,
+//                           double &contract_size,
+//                           double &vol_min,
+//                           double &vol_max,
+//                           double &vol_step,
+//                           double &tick_size,
+//                           double &tick_value,
+//                           double &point,
+//                           int &digits);
 // - extern string MagicNumberFilter;
 
 bool PendingAlreadySent(const long ticket)
@@ -302,8 +310,24 @@ void SendPendingOpenSignal(const ulong ticket)
    double tp              = OrderGetDouble(ORDER_TP);
    datetime exp           = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
 
-   double contract_size, vol_min, vol_max, vol_step;
-   GetSymbolTradeMeta(symbol, contract_size, vol_min, vol_max, vol_step);
+   double contract_size = 0.0;
+   double vol_min = 0.0;
+   double vol_max = 0.0;
+   double vol_step = 0.0;
+   double tick_size = 0.0;
+   double tick_value = 0.0;
+   double point = 0.0;
+   int digits = 0;
+
+   GetSymbolTradeMeta(symbol,
+                      contract_size,
+                      vol_min,
+                      vol_max,
+                      vol_step,
+                      tick_size,
+                      tick_value,
+                      point,
+                      digits);
 
    string side = PendingTypeToSide(ord_type);
    string pending_type = PendingTypeToName(ord_type);
@@ -311,6 +335,8 @@ void SendPendingOpenSignal(const ulong ticket)
    long exp_ms = 0;
    if(exp > 0)
       exp_ms = (long)exp * 1000;
+
+   int priceDigits = (digits > 0 ? digits : 5);
 
    string json = "{";
    json += "\"event_type\":\"PENDING_OPEN\",";
@@ -321,23 +347,27 @@ void SendPendingOpenSignal(const ulong ticket)
    json += "\"pending_type\":\"" + pending_type + "\",";
 
    if(pending_type == "limit")
-      json += "\"limit_price\":" + DoubleToString(price_open, 5) + ",";
+      json += "\"limit_price\":" + DoubleToString(price_open, priceDigits) + ",";
    else if(pending_type == "stop")
-      json += "\"stop_price\":" + DoubleToString(price_open, 5) + ",";
+      json += "\"stop_price\":" + DoubleToString(price_open, priceDigits) + ",";
    else
    {
-      json += "\"stop_price\":" + DoubleToString(price_open, 5) + ",";
-      json += "\"limit_price\":" + DoubleToString(price_stoplimit, 5) + ",";
+      json += "\"stop_price\":" + DoubleToString(price_open, priceDigits) + ",";
+      json += "\"limit_price\":" + DoubleToString(price_stoplimit, priceDigits) + ",";
    }
 
-   json += "\"sl\":" + DoubleToString(sl, 5) + ",";
-   json += "\"tp\":" + DoubleToString(tp, 5) + ",";
+   json += "\"sl\":" + DoubleToString(sl, priceDigits) + ",";
+   json += "\"tp\":" + DoubleToString(tp, priceDigits) + ",";
    json += "\"expiration_ms\":" + (string)exp_ms + ",";
    json += "\"magic\":" + (string)magic + ",";
-   json += "\"mt5_contract_size\":" + DoubleToString(contract_size, 2) + ",";
-   json += "\"mt5_volume_min\":" + DoubleToString(vol_min, 2) + ",";
-   json += "\"mt5_volume_max\":" + DoubleToString(vol_max, 2) + ",";
-   json += "\"mt5_volume_step\":" + DoubleToString(vol_step, 2);
+   json += "\"mt5_contract_size\":" + DoubleToString(contract_size, 8) + ",";
+   json += "\"mt5_volume_min\":" + DoubleToString(vol_min, 8) + ",";
+   json += "\"mt5_volume_max\":" + DoubleToString(vol_max, 8) + ",";
+   json += "\"mt5_volume_step\":" + DoubleToString(vol_step, 8) + ",";
+   json += "\"mt5_tick_size\":" + DoubleToString(tick_size, 10) + ",";
+   json += "\"mt5_tick_value\":" + DoubleToString(tick_value, 10) + ",";
+   json += "\"point\":" + DoubleToString(point, 10) + ",";
+   json += "\"digits\":" + IntegerToString(digits);
    json += "}";
 
    SendToServer(json);
@@ -352,6 +382,27 @@ void SendPendingModifySignal(const PendingSnap &snap)
    if(snap.expiration > 0)
       exp_ms = (long)snap.expiration * 1000;
 
+   double contract_size = 0.0;
+   double vol_min = 0.0;
+   double vol_max = 0.0;
+   double vol_step = 0.0;
+   double tick_size = 0.0;
+   double tick_value = 0.0;
+   double point = 0.0;
+   int digits = 0;
+
+   GetSymbolTradeMeta(snap.symbol,
+                      contract_size,
+                      vol_min,
+                      vol_max,
+                      vol_step,
+                      tick_size,
+                      tick_value,
+                      point,
+                      digits);
+
+   int priceDigits = (digits > 0 ? digits : 5);
+
    string json = "{";
    json += "\"event_type\":\"PENDING_MODIFY\",";
    json += "\"ticket\":" + (string)snap.ticket + ",";
@@ -361,19 +412,27 @@ void SendPendingModifySignal(const PendingSnap &snap)
    json += "\"pending_type\":\"" + pending_type + "\",";
 
    if(pending_type == "limit")
-      json += "\"limit_price\":" + DoubleToString(snap.price_open, 5) + ",";
+      json += "\"limit_price\":" + DoubleToString(snap.price_open, priceDigits) + ",";
    else if(pending_type == "stop")
-      json += "\"stop_price\":" + DoubleToString(snap.price_open, 5) + ",";
+      json += "\"stop_price\":" + DoubleToString(snap.price_open, priceDigits) + ",";
    else
    {
-      json += "\"stop_price\":" + DoubleToString(snap.price_open, 5) + ",";
-      json += "\"limit_price\":" + DoubleToString(snap.price_stoplimit, 5) + ",";
+      json += "\"stop_price\":" + DoubleToString(snap.price_open, priceDigits) + ",";
+      json += "\"limit_price\":" + DoubleToString(snap.price_stoplimit, priceDigits) + ",";
    }
 
-   json += "\"sl\":" + DoubleToString(snap.stopLoss, 5) + ",";
-   json += "\"tp\":" + DoubleToString(snap.takeProfit, 5) + ",";
+   json += "\"sl\":" + DoubleToString(snap.stopLoss, priceDigits) + ",";
+   json += "\"tp\":" + DoubleToString(snap.takeProfit, priceDigits) + ",";
    json += "\"expiration_ms\":" + (string)exp_ms + ",";
-   json += "\"magic\":" + (string)snap.magicNumber;
+   json += "\"magic\":" + (string)snap.magicNumber + ",";
+   json += "\"mt5_contract_size\":" + DoubleToString(contract_size, 8) + ",";
+   json += "\"mt5_volume_min\":" + DoubleToString(vol_min, 8) + ",";
+   json += "\"mt5_volume_max\":" + DoubleToString(vol_max, 8) + ",";
+   json += "\"mt5_volume_step\":" + DoubleToString(vol_step, 8) + ",";
+   json += "\"mt5_tick_size\":" + DoubleToString(tick_size, 10) + ",";
+   json += "\"mt5_tick_value\":" + DoubleToString(tick_value, 10) + ",";
+   json += "\"point\":" + DoubleToString(point, 10) + ",";
+   json += "\"digits\":" + IntegerToString(digits);
    json += "}";
 
    SendToServer(json);
