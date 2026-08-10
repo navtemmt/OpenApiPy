@@ -8,7 +8,11 @@
 // Also requires these helpers somewhere in your project:
 // - string JsonEscape(const string s);
 // - void SendToServer(string json);
-// - bool GetSymbolTradeMeta(const string symbol, double &contract_size, double &vol_min, double &vol_max, double &vol_step);
+// - bool GetSymbolTradeMeta(const string symbol,
+//                           double &contract_size,
+//                           double &vol_min,
+//                           double &vol_max,
+//                           double &vol_step);
 // - extern string MagicNumberFilter;
 
 bool PendingAlreadySent(const long ticket)
@@ -232,9 +236,9 @@ void UpdatePendingList()
 }
 
 //======================================================
-// MT5 pricing helpers for strict risk sizing
+// MT4 pricing helpers for strict risk sizing
 //======================================================
-double GetMt5TickSizePending(const string symbol)
+double GetMt4TickSizePending(const string symbol)
 {
    double v = MarketInfo(symbol, MODE_TICKSIZE);
    if(v <= 0.0)
@@ -242,7 +246,7 @@ double GetMt5TickSizePending(const string symbol)
    return v;
 }
 
-double GetMt5TickValuePending(const string symbol)
+double GetMt4TickValuePending(const string symbol)
 {
    return MarketInfo(symbol, MODE_TICKVALUE);
 }
@@ -295,8 +299,8 @@ void SendPendingOpenSignal(const int ticket)
       priceDigits = Digits;
 
    double pointSize          = MarketInfo(symbol, MODE_POINT);
-   double tickSize           = GetMt5TickSizePending(symbol);
-   double tickValue          = GetMt5TickValuePending(symbol);
+   double tickSize           = GetMt4TickSizePending(symbol);
+   double tickValue          = GetMt4TickValuePending(symbol);
    double quoteToDepositRate = GetQuoteToDepositRatePending(symbol);
 
    string json = "{";
@@ -313,14 +317,14 @@ void SendPendingOpenSignal(const int ticket)
       json += "\"stop_price\":" + DoubleToString(price, priceDigits) + ",";
 
    json += "\"entry_price\":" + DoubleToString(price, priceDigits) + ",";
-   json += "\"point\":" + DoubleToString(pointSize, priceDigits) + ",";
+   json += "\"point\":" + DoubleToString(pointSize, 10) + ",";
    json += "\"digits\":" + IntegerToString(priceDigits) + ",";
-   json += "\"mt5_tick_size\":" + DoubleToString(tickSize, priceDigits) + ",";
+   json += "\"mt5_tick_size\":" + DoubleToString(tickSize, 10) + ",";
    json += "\"mt5_tick_value\":" + DoubleToString(tickValue, 8) + ",";
    json += "\"quote_to_deposit_rate\":" + DoubleToString(quoteToDepositRate, 8) + ",";
    json += "\"sl\":" + DoubleToString(sl, priceDigits) + ",";
    json += "\"tp\":" + DoubleToString(tp, priceDigits) + ",";
-   json += "\"expiration_ms\":\"" + IntegerToString((int)exp_ms) + "\",";
+   json += "\"expiration_ms\":" + IntegerToString((int)exp_ms) + ",";
    json += "\"magic\":" + IntegerToString((int)magic) + ",";
    json += "\"mt5_contract_size\":" + DoubleToString(contract_size, 2) + ",";
    json += "\"mt5_volume_min\":" + DoubleToString(vol_min, 2) + ",";
@@ -336,7 +340,7 @@ void SendPendingOpenSignal(const int ticket)
          " pending_type=", pending_type,
          " price=", DoubleToString(price, priceDigits),
          " magic=", magic,
-         " tickSize=", DoubleToString(tickSize, priceDigits),
+         " tickSize=", DoubleToString(tickSize, 10),
          " tickValue=", DoubleToString(tickValue, 8));
 }
 
