@@ -10,6 +10,11 @@ Uses:
   - self.is_app_authed, self.is_account_authed
   - self._on_error, self._load_symbol_map
   - self._on_connect_callback
+
+Shared-token aware update:
+  - coordinates refresh through CTraderClient.with_shared_token_lock()
+  - re-syncs from shared runtime token state before refresh and auth
+  - persists refreshed tokens through self._apply_runtime_tokens(..., persist=True)
 """
 
 import json
@@ -37,7 +42,10 @@ TOKEN_REFRESH_URL = "https://openapi.ctrader.com/apps/token"
 
 def _get_auth_timeout_sec(self) -> int:
     try:
-        v = int(getattr(self, "auth_timeout_sec", DEFAULT_AUTH_TIMEOUT_SEC) or DEFAULT_AUTH_TIMEOUT_SEC)
+        v = int(
+            getattr(self, "auth_timeout_sec", DEFAULT_AUTH_TIMEOUT_SEC)
+            or DEFAULT_AUTH_TIMEOUT_SEC
+        )
         return v if v > 0 else DEFAULT_AUTH_TIMEOUT_SEC
     except Exception:
         return DEFAULT_AUTH_TIMEOUT_SEC
@@ -58,6 +66,34 @@ def _failure_text(failure) -> str:
         return str(failure)
 
 
+def _sync_shared_tokens(self, reason: str = "auth_impl") -> None:
+    """
+    Best-effort sync from shared token coordinator if ctrader_client.py exposes it.
+    """
+    try:
+        sync_fn = getattr(self, "_sync_from_shared_state", None)
+        if callable(sync_fn):
+            sync_fn(reason=reason)
+    except Exception:
+        logger.debug(
+            "[%s] Shared token sync failed reason=%s",
+            getattr(self, "account_name", None) or getattr(self, "account_id", None),
+            reason,
+            exc_info=True,
+        )
+
+
+def _run_with_shared_token_lock(self, fn, *args, **kwargs):
+    """
+    Best-effort shared lock wrapper if ctrader_client.py exposes it.
+    Falls back to direct execution.
+    """
+    wrapper = getattr(self, "with_shared_token_lock", None)
+    if callable(wrapper):
+        return wrapper(fn, *args, **kwargs)
+    return fn(*args, **kwargs)
+
+
 def _mark_auth_dead(self, reason: str) -> None:
     self.is_account_authed = False
     self.auth_failed = True
@@ -72,117 +108,136 @@ def _mark_auth_dead(self, reason: str) -> None:
 
 
 def _refresh_access_token(self, reason: str = "") -> bool:
-    refresh_token = getattr(self, "refresh_token", "") or ""
-    if not refresh_token:
+    """
+    Refresh access token under shared-token lock so multiple clients sharing the same
+    token_state_file do not race refreshes against each other.
+    """
+
+    def _do_refresh() -> bool:
+        _sync_shared_tokens(self, reason="before_refresh")
+
+        refresh_token = getattr(self, "refresh_token", "") or ""
+        if not refresh_token:
+            logger.warning(
+                "[%s] Cannot refresh token: refresh_token missing. reason=%s",
+                getattr(self, "account_name", None) or getattr(self, "account_id", None),
+                reason,
+            )
+            return False
+
+        client_id = getattr(self, "client_id", "") or ""
+        client_secret = getattr(self, "client_secret", "") or ""
+        if not client_id or not client_secret:
+            logger.error(
+                "[%s] Cannot refresh token: client_id/client_secret missing",
+                getattr(self, "account_name", None) or getattr(self, "account_id", None),
+            )
+            return False
+
+        timeout_sec = _get_auth_timeout_sec(self)
+
+        params = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+            "client_secret": client_secret,
+        }
+        url = f"{TOKEN_REFRESH_URL}?{urllib.parse.urlencode(params)}"
+        req = urllib.request.Request(
+            url,
+            data=b"",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+
         logger.warning(
-            "[%s] Cannot refresh token: refresh_token missing. reason=%s",
+            "[%s] Attempting token refresh. account_id=%s token_source=%s refresh_token=%s reason=%s",
             getattr(self, "account_name", None) or getattr(self, "account_id", None),
+            getattr(self, "account_id", None),
+            getattr(self, "current_token_source", None),
+            _mask_token(refresh_token),
             reason,
         )
-        return False
 
-    client_id = getattr(self, "client_id", "") or ""
-    client_secret = getattr(self, "client_secret", "") or ""
-    if not client_id or not client_secret:
-        logger.error(
-            "[%s] Cannot refresh token: client_id/client_secret missing",
-            getattr(self, "account_name", None) or getattr(self, "account_id", None),
-        )
-        return False
-
-    timeout_sec = _get_auth_timeout_sec(self)
-
-    params = {
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "client_id": client_id,
-        "client_secret": client_secret,
-    }
-    url = f"{TOKEN_REFRESH_URL}?{urllib.parse.urlencode(params)}"
-    req = urllib.request.Request(
-        url,
-        data=b"",
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-
-    logger.warning(
-        "[%s] Attempting token refresh. account_id=%s token_source=%s refresh_token=%s reason=%s",
-        getattr(self, "account_name", None) or getattr(self, "account_id", None),
-        getattr(self, "account_id", None),
-        getattr(self, "current_token_source", None),
-        _mask_token(refresh_token),
-        reason,
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
-            raw = resp.read().decode("utf-8")
-        payload = json.loads(raw)
-    except urllib.error.HTTPError as e:
-        body = ""
         try:
-            body = e.read().decode("utf-8", errors="ignore")
+            with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+                raw = resp.read().decode("utf-8")
+            payload = json.loads(raw)
+        except urllib.error.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode("utf-8", errors="ignore")
+            except Exception:
+                pass
+            logger.error(
+                "[%s] Token refresh HTTPError status=%s body=%s",
+                getattr(self, "account_name", None) or getattr(self, "account_id", None),
+                getattr(e, "code", None),
+                body,
+            )
+            return False
+        except Exception as e:
+            logger.exception(
+                "[%s] Token refresh request failed: %s",
+                getattr(self, "account_name", None) or getattr(self, "account_id", None),
+                e,
+            )
+            return False
+
+        new_access_token = payload.get("accessToken") or payload.get("access_token") or ""
+        new_refresh_token = payload.get("refreshToken") or payload.get("refresh_token") or ""
+        expires_in = payload.get("expiresIn") or payload.get("expires_in") or 0
+
+        try:
+            expires_in = int(expires_in or 0)
         except Exception:
-            pass
-        logger.error(
-            "[%s] Token refresh HTTPError status=%s body=%s",
-            getattr(self, "account_name", None) or getattr(self, "account_id", None),
-            getattr(e, "code", None),
-            body,
+            expires_in = 0
+
+        if not new_access_token:
+            logger.error(
+                "[%s] Token refresh response missing access token payload=%s",
+                getattr(self, "account_name", None) or getattr(self, "account_id", None),
+                payload,
+            )
+            return False
+
+        expires_at = int(time.time()) + expires_in if expires_in > 0 else None
+
+        self._apply_runtime_tokens(
+            access_token=new_access_token,
+            refresh_token=new_refresh_token or refresh_token,
+            expires_at=expires_at,
+            source="refresh",
+            persist=True,
         )
-        return False
-    except Exception as e:
-        logger.exception(
-            "[%s] Token refresh request failed: %s",
+
+        logger.info(
+            "[%s] Token refresh success. account_id=%s access_token=%s refresh_token=%s expires_in=%s expires_at=%s",
             getattr(self, "account_name", None) or getattr(self, "account_id", None),
-            e,
+            getattr(self, "account_id", None),
+            _mask_token(new_access_token),
+            _mask_token(new_refresh_token or refresh_token),
+            expires_in,
+            expires_at,
         )
-        return False
+        return True
 
-    new_access_token = payload.get("accessToken") or payload.get("access_token") or ""
-    new_refresh_token = payload.get("refreshToken") or payload.get("refresh_token") or ""
-    expires_in = payload.get("expiresIn") or payload.get("expires_in") or 0
-
-    try:
-        expires_in = int(expires_in or 0)
-    except Exception:
-        expires_in = 0
-
-    if not new_access_token:
-        logger.error(
-            "[%s] Token refresh response missing access token payload=%s",
-            getattr(self, "account_name", None) or getattr(self, "account_id", None),
-            payload,
-        )
-        return False
-
-    expires_at = int(time.time()) + expires_in if expires_in > 0 else None
-
-    self._apply_runtime_tokens(
-        access_token=new_access_token,
-        refresh_token=new_refresh_token or refresh_token,
-        expires_at=expires_at,
-        source="refresh",
-        persist=True,
-    )
-
-    logger.info(
-        "[%s] Token refresh success. account_id=%s access_token=%s refresh_token=%s expires_in=%s expires_at=%s",
-        getattr(self, "account_name", None) or getattr(self, "account_id", None),
-        getattr(self, "account_id", None),
-        _mask_token(new_access_token),
-        _mask_token(new_refresh_token or refresh_token),
-        expires_in,
-        expires_at,
-    )
-    return True
+    return bool(_run_with_shared_token_lock(self, _do_refresh))
 
 
 def _recover_account_auth(self, reason: str) -> None:
+    """
+    Recovery path order:
+    1. Sync from shared token state
+    2. Try refresh once
+    3. Try bootstrap/.env fallback once
+    4. Mark auth dead
+    """
+    _sync_shared_tokens(self, reason="recover_start")
+
     steps = getattr(self, "_auth_recovery_steps", set())
 
     if "refresh" not in steps and getattr(self, "refresh_token", None):
@@ -221,6 +276,7 @@ def _recover_account_auth(self, reason: str) -> None:
 # ----------------------------------------------------------------------
 # Application Authentication
 # ----------------------------------------------------------------------
+
 
 def authenticate_app(self) -> None:
     timeout_sec = _get_auth_timeout_sec(self)
@@ -288,7 +344,14 @@ def on_app_auth_success(self, result) -> None:
     logger.info("Application authenticated successfully")
     self.is_app_authed = True
 
-    if self.account_id and (self.access_token or self.refresh_token or self.bootstrap_access_token or self.bootstrap_refresh_token):
+    _sync_shared_tokens(self, reason="post_app_auth")
+
+    if self.account_id and (
+        self.access_token
+        or self.refresh_token
+        or self.bootstrap_access_token
+        or self.bootstrap_refresh_token
+    ):
         authorize_account(self)
     else:
         logger.warning(
@@ -300,6 +363,7 @@ def on_app_auth_success(self, result) -> None:
 # Account Authentication
 # ----------------------------------------------------------------------
 
+
 def authorize_account(self) -> None:
     timeout_sec = _get_auth_timeout_sec(self)
 
@@ -310,6 +374,8 @@ def authorize_account(self) -> None:
     if not self.account_id:
         logger.error("Account ID missing")
         return
+
+    _sync_shared_tokens(self, reason="before_authorize_account")
 
     if not self.access_token:
         logger.warning(
@@ -339,7 +405,10 @@ def authorize_account(self) -> None:
         try:
             d.addTimeout(timeout_sec, self.client.reactor)
         except Exception:
-            logger.debug("Unable to attach addTimeout() to account auth deferred", exc_info=True)
+            logger.debug(
+                "Unable to attach addTimeout() to account auth deferred",
+                exc_info=True,
+            )
     except Exception:
         logger.exception("Failed to send account auth request")
         _recover_account_auth(self, "send account auth request failed")
