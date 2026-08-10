@@ -8,6 +8,7 @@ import json
 import os
 import time
 import logging
+import threading
 from typing import Optional, Callable, Dict, Any, Iterable
 
 from dotenv import load_dotenv
@@ -32,6 +33,43 @@ logging.basicConfig(level=logging.INFO)
 PROTO_OA_SPOT_EVENT_TYPE = ProtoOASpotEvent().payloadType
 
 
+class _SharedTokenState:
+    """
+    Process-wide token coordinator keyed by canonical token_state_file.
+
+    Goal:
+    - If multiple CTraderClient instances share the same token state file,
+      they also share one in-memory token snapshot and one refresh lock.
+    - This does not require changing external call sites.
+    """
+
+    def __init__(self, state_file: str):
+        self.state_file = os.path.normpath(state_file)
+        self.lock = threading.RLock()
+        self.access_token: str = ""
+        self.refresh_token: str = ""
+        self.expires_at: Optional[int] = None
+        self.updated_at: int = 0
+        self.last_source: str = "init"
+
+
+_SHARED_TOKEN_STATES: Dict[str, _SharedTokenState] = {}
+_SHARED_TOKEN_STATES_LOCK = threading.RLock()
+
+
+def _get_shared_token_state(state_file: Optional[str]) -> Optional[_SharedTokenState]:
+    if not state_file:
+        return None
+
+    norm = os.path.normpath(state_file)
+    with _SHARED_TOKEN_STATES_LOCK:
+        state = _SHARED_TOKEN_STATES.get(norm)
+        if state is None:
+            state = _SharedTokenState(norm)
+            _SHARED_TOKEN_STATES[norm] = state
+        return state
+
+
 class CTraderClient:
     """High-level wrapper for cTrader Open API trading operations."""
 
@@ -43,6 +81,7 @@ class CTraderClient:
     ):
         load_dotenv()
 
+        self.env = env
         self.client_id = client_id or os.getenv("CTRADER_CLIENT_ID")
         self.client_secret = client_secret or os.getenv("CTRADER_CLIENT_SECRET")
 
@@ -52,7 +91,11 @@ class CTraderClient:
                 "(either via constructor or CTRADER_CLIENT_ID / CTRADER_CLIENT_SECRET in .env)"
             )
 
-        self.host = EndPoints.PROTOBUF_LIVE_HOST if env == "live" else EndPoints.PROTOBUF_DEMO_HOST
+        self.host = (
+            EndPoints.PROTOBUF_LIVE_HOST
+            if env == "live"
+            else EndPoints.PROTOBUF_DEMO_HOST
+        )
         self.port = EndPoints.PROTOBUF_PORT
 
         self.client = Client(self.host, self.port, TcpProtocol)
@@ -83,6 +126,7 @@ class CTraderClient:
         self.bootstrap_access_token: Optional[str] = None
         self.bootstrap_refresh_token: Optional[str] = None
         self.token_state_file: Optional[str] = None
+        self.shared_token_state: Optional[_SharedTokenState] = None
 
         self.auth_failed = False
         self.auth_failure_reason: Optional[str] = None
@@ -150,6 +194,56 @@ class CTraderClient:
             return None
         return os.path.normpath(path)
 
+    def _sync_from_shared_state(self, reason: str = "sync") -> bool:
+        """
+        Pull latest tokens from shared in-memory coordinator into this client.
+        """
+        shared = self.shared_token_state
+        if not shared:
+            return False
+
+        with shared.lock:
+            if not (shared.access_token or shared.refresh_token):
+                return False
+
+            changed = (
+                (self.access_token or "") != (shared.access_token or "")
+                or (self.refresh_token or "") != (shared.refresh_token or "")
+                or (self.token_expires_at or None) != (shared.expires_at or None)
+            )
+
+            self.access_token = shared.access_token or ""
+            self.refresh_token = shared.refresh_token or ""
+            self.token_expires_at = shared.expires_at
+            self.current_token_source = f"shared:{shared.last_source}"
+
+        if changed:
+            logger.info(
+                "[%s] Synced runtime tokens from shared state reason=%s access_token=%s refresh_present=%s expires_at=%s state_file=%s",
+                self.account_name or self.account_id,
+                reason,
+                self._mask_token(self.access_token),
+                bool(self.refresh_token),
+                self.token_expires_at,
+                self.token_state_file,
+            )
+        return changed
+
+    def _publish_to_shared_state(self, source: str = "runtime") -> None:
+        """
+        Push this client's current runtime tokens into the shared in-memory coordinator.
+        """
+        shared = self.shared_token_state
+        if not shared:
+            return
+
+        with shared.lock:
+            shared.access_token = self.access_token or ""
+            shared.refresh_token = self.refresh_token or ""
+            shared.expires_at = self.token_expires_at
+            shared.updated_at = int(time.time())
+            shared.last_source = source
+
     def _apply_runtime_tokens(
         self,
         access_token: Optional[str],
@@ -157,6 +251,7 @@ class CTraderClient:
         expires_at: Optional[int] = None,
         source: str = "runtime",
         persist: bool = False,
+        publish_shared: bool = True,
     ) -> None:
         self.access_token = access_token or ""
         self.refresh_token = refresh_token or self.refresh_token or ""
@@ -164,6 +259,9 @@ class CTraderClient:
         self.current_token_source = source
         self.auth_failed = False
         self.auth_failure_reason = None
+
+        if publish_shared:
+            self._publish_to_shared_state(source=source)
 
         logger.info(
             "[%s] Runtime tokens updated source=%s access_token=%s refresh_present=%s expires_at=%s",
@@ -202,7 +300,10 @@ class CTraderClient:
         if not self.token_state_file:
             return
 
-        try:
+        shared = self.shared_token_state
+        lock = shared.lock if shared else None
+
+        def _write():
             parent = os.path.dirname(self.token_state_file)
             if parent:
                 os.makedirs(parent, exist_ok=True)
@@ -230,6 +331,13 @@ class CTraderClient:
                 self._mask_token(self.access_token),
                 bool(self.refresh_token),
             )
+
+        try:
+            if lock:
+                with lock:
+                    _write()
+            else:
+                _write()
         except Exception as e:
             logger.exception(
                 "[%s] Failed to save token state file %s: %s",
@@ -264,6 +372,7 @@ class CTraderClient:
             expires_at=None,
             source=source,
             persist=False,
+            publish_shared=True,
         )
         return True
 
@@ -276,20 +385,37 @@ class CTraderClient:
         else:
             self.token_state_file = self._normalize_token_state_file(self.token_state_file)
 
+        self.shared_token_state = _get_shared_token_state(self.token_state_file)
+
         if clear_state and self.token_state_file and os.path.exists(self.token_state_file):
             try:
-                os.remove(self.token_state_file)
+                if self.shared_token_state:
+                    with self.shared_token_state.lock:
+                        os.remove(self.token_state_file)
+                        self.shared_token_state.access_token = ""
+                        self.shared_token_state.refresh_token = ""
+                        self.shared_token_state.expires_at = None
+                        self.shared_token_state.updated_at = int(time.time())
+                        self.shared_token_state.last_source = "cleared_on_start"
+                else:
+                    os.remove(self.token_state_file)
+
                 logger.warning(
                     "[%s] Deleted token state file on startup due to CTRADER_CLEAR_TOKEN_STATE_ON_START=1 file=%s",
                     self.account_name or self.account_id,
                     self.token_state_file,
                 )
+            except FileNotFoundError:
+                pass
             except Exception:
                 logger.exception(
                     "[%s] Failed to delete token state file on startup: %s",
                     self.account_name or self.account_id,
                     self.token_state_file,
                 )
+
+        if self._sync_from_shared_state(reason="startup_preload"):
+            return
 
         if force_env:
             logger.warning(
@@ -302,6 +428,7 @@ class CTraderClient:
                 expires_at=None,
                 source="env",
                 persist=True,
+                publish_shared=True,
             )
             return
 
@@ -321,6 +448,7 @@ class CTraderClient:
                 expires_at=expires_at,
                 source="state_file",
                 persist=False,
+                publish_shared=True,
             )
             logger.info(
                 "[%s] Loaded tokens from state file file=%s access_token=%s refresh_present=%s expires_at=%s",
@@ -338,6 +466,7 @@ class CTraderClient:
             expires_at=None,
             source="env",
             persist=True,
+            publish_shared=True,
         )
         logger.info(
             "[%s] Token state file missing/unusable; using .env bootstrap tokens file=%s access_token=%s refresh_present=%s",
@@ -346,6 +475,26 @@ class CTraderClient:
             self._mask_token(self.access_token),
             bool(self.refresh_token),
         )
+
+    def _sync_runtime_tokens_before_auth(self) -> None:
+        """
+        Best-effort sync point right before auth/reauth steps.
+        """
+        self._sync_from_shared_state(reason="pre_auth")
+
+    def with_shared_token_lock(self, fn: Callable[..., Any], *args: Any, **kwargs: Any):
+        """
+        Run a callable under the shared token lock for this token group.
+        Useful for refresh paths inside auth_impl without changing architecture too much.
+        """
+        shared = self.shared_token_state
+        if not shared:
+            return fn(*args, **kwargs)
+
+        with shared.lock:
+            self._sync_from_shared_state(reason="lock_enter")
+            result = fn(*args, **kwargs)
+            return result
 
     def _client_send_with_timeout(self, req, timeout=None):
         effective_timeout = timeout
@@ -390,6 +539,7 @@ class CTraderClient:
         self.is_connected = True
         self.last_message_time = time.time()
 
+        self._sync_runtime_tokens_before_auth()
         self._authenticate_app()
 
         reactor.callLater(5, self._start_heartbeat)
@@ -495,6 +645,7 @@ class CTraderClient:
         return auth_impl.on_app_auth_success(self, result)
 
     def _authorize_account(self):
+        self._sync_runtime_tokens_before_auth()
         return auth_impl.authorize_account(self)
 
     def _on_account_auth_success(self, result):
@@ -553,17 +704,19 @@ class CTraderClient:
         self.token_state_file = self._normalize_token_state_file(
             token_state_file or self._default_token_state_file()
         )
+        self.shared_token_state = _get_shared_token_state(self.token_state_file)
 
         self._load_startup_tokens()
 
         logger.info(
-            "[%s] Account credentials set account_id=%s token_source=%s state_file=%s bootstrap_access=%s bootstrap_refresh_present=%s",
+            "[%s] Account credentials set account_id=%s token_source=%s state_file=%s bootstrap_access=%s bootstrap_refresh_present=%s shared_state=%s",
             self.account_name,
             self.account_id,
             self.current_token_source,
             self.token_state_file,
             self._mask_token(self.bootstrap_access_token),
             bool(self.bootstrap_refresh_token),
+            bool(self.shared_token_state),
         )
 
     def connect(self, on_connect: Optional[Callable] = None):
@@ -652,7 +805,11 @@ class CTraderClient:
         )
 
     def cancel_pending_order(self, account_id: int, order_id: int):
-        return trading_impl.cancel_pending_order(self, account_id=account_id, order_id=order_id)
+        return trading_impl.cancel_pending_order(
+            self,
+            account_id=account_id,
+            order_id=order_id,
+        )
 
     def modify_position(
         self,
