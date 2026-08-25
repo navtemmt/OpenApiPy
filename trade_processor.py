@@ -11,6 +11,12 @@ from trade_executor import copy_open_to_account, copy_pending_to_account
 from symbol_mapper import SymbolMapper
 
 
+_PENDING_SLTP_MAX_AGE_MS = 5 * 60 * 1000
+_PENDING_SLTP_BASE_RETRY_MS = 350
+_PENDING_SLTP_MAX_RETRY_MS = 5000
+_PENDING_SLTP_MAX_ATTEMPTS = 12
+
+
 def _build_account_symbol_mapper(client, config) -> SymbolMapper:
     return SymbolMapper(
         prefix=getattr(config, "symbol_prefix", ""),
@@ -73,12 +79,25 @@ def _pending_sltp_bucket(account_name: str) -> dict:
     return PENDING_SLTP.setdefault(str(account_name), {})
 
 
+def _next_pending_retry_delay_ms(attempts: int) -> int:
+    attempts = max(0, int(attempts))
+    delay = _PENDING_SLTP_BASE_RETRY_MS * (2 ** attempts)
+    return min(delay, _PENDING_SLTP_MAX_RETRY_MS)
+
+
 def _set_pending_sltp(account_name: str, ticket: int, symbol: str, sl: float, tp: float):
+    existing = _pending_sltp_bucket(account_name).get(int(ticket), {})
+    now_ms = _now_ms()
     _pending_sltp_bucket(account_name)[int(ticket)] = {
         "symbol": symbol,
         "sl": float(sl or 0.0),
         "tp": float(tp or 0.0),
-        "created_ms": _now_ms(),
+        "created_ms": existing.get("created_ms", now_ms),
+        "updated_ms": now_ms,
+        "attempts": 0,
+        "next_retry_ms": now_ms,
+        "last_error": None,
+        "last_position_id": existing.get("last_position_id"),
     }
 
 
@@ -88,6 +107,32 @@ def _get_pending_sltp(account_name: str, ticket: int):
 
 def _clear_pending_sltp(account_name: str, ticket: int):
     _pending_sltp_bucket(account_name).pop(int(ticket), None)
+
+
+def _touch_pending_sltp_retry(account_name: str, ticket: int, error: str = None, position_id=None):
+    pending = _get_pending_sltp(account_name, ticket)
+    if not pending:
+        return
+
+    attempts = int(pending.get("attempts", 0) or 0) + 1
+    delay_ms = _next_pending_retry_delay_ms(attempts - 1)
+    pending["attempts"] = attempts
+    pending["next_retry_ms"] = _now_ms() + delay_ms
+    pending["last_error"] = error
+    pending["updated_ms"] = _now_ms()
+    if position_id:
+        pending["last_position_id"] = int(position_id)
+
+
+def _pending_sltp_expired(pending: dict) -> bool:
+    created_ms = _to_int(pending.get("created_ms", 0), 0)
+    if created_ms <= 0:
+        return False
+    return (_now_ms() - created_ms) > _PENDING_SLTP_MAX_AGE_MS
+
+
+def _pending_sltp_due(pending: dict) -> bool:
+    return _now_ms() >= _to_int(pending.get("next_retry_ms", 0), 0)
 
 
 def _canonical_event_type(data: dict) -> str:
@@ -832,14 +877,32 @@ def _get_target_account_contexts(data, account_manager):
     return contexts
 
 
-def try_apply_pending_sltp(account_name, client, config, ticket, account_manager):
+def try_apply_pending_sltp(account_name, client, config, ticket, account_manager, force=False):
     pending = _get_pending_sltp(account_name, int(ticket))
     if not pending:
-        return
+        return False
+
+    if _pending_sltp_expired(pending):
+        logger.warning(f"[{account_name}] Pending SL/TP expired for ticket {ticket}, dropping repair item")
+        _clear_pending_sltp(account_name, int(ticket))
+        return False
+
+    attempts = _to_int(pending.get("attempts", 0), 0)
+    if attempts >= _PENDING_SLTP_MAX_ATTEMPTS:
+        logger.error(
+            f"[{account_name}] Pending SL/TP exceeded retry limit for ticket {ticket}, "
+            f"last_error={pending.get('last_error')}"
+        )
+        _clear_pending_sltp(account_name, int(ticket))
+        return False
+
+    if not force and not _pending_sltp_due(pending):
+        return False
 
     position_id = account_manager.get_position_id(account_name, int(ticket))
     if not position_id:
-        return
+        _touch_pending_sltp_retry(account_name, int(ticket), error="position_mapping_not_ready")
+        return False
 
     mt5_symbol = pending.get("symbol")
     new_sl = float(pending.get("sl", 0) or 0)
@@ -848,7 +911,8 @@ def try_apply_pending_sltp(account_name, client, config, ticket, account_manager
 
     logger.info(
         f"[{account_name}] Applying pending SL/TP for ticket {ticket} -> "
-        f"positionId={position_id}, symbolId={symbol_id}, SL={new_sl}, TP={new_tp}"
+        f"positionId={position_id}, symbolId={symbol_id}, SL={new_sl}, TP={new_tp}, "
+        f"attempt={attempts + 1}"
     )
 
     try:
@@ -861,8 +925,54 @@ def try_apply_pending_sltp(account_name, client, config, ticket, account_manager
         )
         logger.info(f"[{account_name}] Successfully applied pending SL/TP for ticket {ticket}")
         _clear_pending_sltp(account_name, int(ticket))
+        return True
     except Exception as e:
-        logger.error(f"[{account_name}] Failed to apply pending SL/TP for ticket {ticket}: {e}")
+        _touch_pending_sltp_retry(
+            account_name,
+            int(ticket),
+            error=str(e),
+            position_id=position_id,
+        )
+        logger.error(
+            f"[{account_name}] Failed to apply pending SL/TP for ticket {ticket}: {e}"
+        )
+        return False
+
+
+def drain_pending_sltp_repairs(account_manager, account_name=None, force=False):
+    repaired = 0
+    scanned_accounts = []
+
+    try:
+        if account_name is not None:
+            scanned_accounts = [str(account_name)]
+        else:
+            scanned_accounts = list(PENDING_SLTP.keys())
+    except Exception:
+        scanned_accounts = []
+
+    for name in scanned_accounts:
+        try:
+            client = account_manager.get_client(name)
+            config = account_manager.get_config(name)
+            if not client or not config:
+                continue
+
+            pending_bucket = dict(_pending_sltp_bucket(name))
+            for ticket in list(pending_bucket.keys()):
+                if try_apply_pending_sltp(
+                    account_name=name,
+                    client=client,
+                    config=config,
+                    ticket=int(ticket),
+                    account_manager=account_manager,
+                    force=force,
+                ):
+                    repaired += 1
+        except Exception as e:
+            logger.debug(f"[{name}] drain_pending_sltp_repairs failed: {e}")
+
+    return repaired
 
 
 def notify_position_update(account_name, ticket, account_manager):
@@ -877,6 +987,7 @@ def notify_position_update(account_name, ticket, account_manager):
             config=config,
             ticket=int(ticket),
             account_manager=account_manager,
+            force=True,
         )
     except Exception as e:
         logger.debug(f"[{account_name}] notify_position_update failed: {e}")
@@ -904,6 +1015,8 @@ def process_trade_event(data, account_manager):
             handle_close_event(data, account_manager)
         else:
             logger.warning(f"Unknown event type: {event_type}")
+
+        drain_pending_sltp_repairs(account_manager)
 
     except Exception as e:
         logger.error(f"Error processing trade event: {e}")
@@ -1021,6 +1134,15 @@ def handle_open_event(data, account_manager):
                 sl=sl,
                 tp=tp,
                 magic=magic,
+            )
+
+            try_apply_pending_sltp(
+                account_name=account_name,
+                client=client,
+                config=config,
+                ticket=int(ticket),
+                account_manager=account_manager,
+                force=False,
             )
 
         except Exception as e:
@@ -1253,15 +1375,28 @@ def handle_modify_event(data, account_manager):
             symbol_id = _get_symbol_id_for_account(client, config, mt5_symbol)
 
             if position_id:
-                client.amend_position(
-                    account_id=config.account_id,
-                    position_id=position_id,
-                    symbol_id=symbol_id,
-                    stop_loss=new_sl if new_sl > 0 else None,
-                    take_profit=new_tp if new_tp > 0 else None,
-                )
-                logger.info(f"[{account_name}] Modified position {position_id} for ticket {ticket}")
-                _clear_pending_sltp(account_name, ticket)
+                try:
+                    client.amend_position(
+                        account_id=config.account_id,
+                        position_id=position_id,
+                        symbol_id=symbol_id,
+                        stop_loss=new_sl if new_sl > 0 else None,
+                        take_profit=new_tp if new_tp > 0 else None,
+                    )
+                    logger.info(f"[{account_name}] Modified position {position_id} for ticket {ticket}")
+                    _clear_pending_sltp(account_name, ticket)
+                except Exception as amend_error:
+                    logger.warning(
+                        f"[{account_name}] Immediate modify failed for ticket {ticket}, "
+                        f"queueing repair: {amend_error}"
+                    )
+                    _set_pending_sltp(account_name, ticket, mt5_symbol, new_sl, new_tp)
+                    _touch_pending_sltp_retry(
+                        account_name,
+                        ticket,
+                        error=str(amend_error),
+                        position_id=position_id,
+                    )
             else:
                 logger.warning(
                     f"[{account_name}] Position not found for ticket {ticket}, storing pending SL/TP"
