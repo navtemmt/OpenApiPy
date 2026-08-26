@@ -5,7 +5,6 @@ Manages multiple cTrader client connections for different accounts.
 """
 
 import inspect
-import logging
 from typing import Dict, Optional, Tuple
 
 import ctrader_client as ctr_mod
@@ -19,8 +18,7 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAReconcileRes,
 )
 from trade_processor import _enforce_max_risk_on_fill, notify_position_update
-
-logger = logging.getLogger(__name__)
+from app_state import logger, alert_trade_failure, alert_trade_warning, alert_trade_info
 
 # One-shot debug: confirm which _on_spot_event implementation is live
 try:
@@ -218,9 +216,6 @@ class AccountManager:
 
         Fallback implicit grouping:
           - identical access_token + refresh_token pair
-
-        This lets demo/live accounts share one canonical token_state_file if they
-        truly use the same OAuth credentials.
         """
         explicit_candidates = (
             getattr(account, "token_group", None),
@@ -244,23 +239,20 @@ class AccountManager:
         return f"account:{self._safe_str(getattr(account, 'name', 'unknown'))}"
 
     def _resolve_shared_token_state_file(self, account: AccountConfig) -> Optional[str]:
-        """
-        Ensure accounts that share the same token group also share the same token state file.
-
-        First account in a group becomes canonical. Later accounts in the same group
-        are forced to reuse that file even if their own config points elsewhere.
-        """
         token_key = self._build_token_group_key(account)
         configured_state_file = self._safe_str(getattr(account, "token_state_file", ""))
 
         existing = self.shared_token_files.get(token_key)
         if existing:
             if configured_state_file and configured_state_file != existing:
-                logger.warning(
-                    "[%s] Shared token group detected; overriding token_state_file %s -> %s",
-                    account.name,
-                    configured_state_file,
-                    existing,
+                msg = f"Shared token group detected; overriding token_state_file {configured_state_file} -> {existing}"
+                logger.warning("[%s] %s", account.name, msg)
+                alert_trade_warning(
+                    account_name=account.name,
+                    action="shared_token_state_override",
+                    ticket=0,
+                    message=msg,
+                    token_group=token_key,
                 )
             return existing or None
 
@@ -324,12 +316,26 @@ class AccountManager:
         config = self.get_config(account_name)
 
         if not client or not config:
-            logger.warning("[%s] Cannot send reconcile: missing client/config", account_name)
+            msg = "Cannot send reconcile: missing client/config"
+            logger.warning("[%s] %s", account_name, msg)
+            alert_trade_warning(
+                account_name=account_name,
+                action="reconcile_missing_context",
+                ticket=0,
+                message=msg,
+            )
             return
 
         account_id = self._config_account_id(config)
         if not account_id:
-            logger.warning("[%s] Cannot send reconcile: missing account_id", account_name)
+            msg = "Cannot send reconcile: missing account_id"
+            logger.warning("[%s] %s", account_name, msg)
+            alert_trade_warning(
+                account_name=account_name,
+                action="reconcile_missing_account_id",
+                ticket=0,
+                message=msg,
+            )
             return
 
         if self.reconcile_requested.get(account_name, False):
@@ -361,16 +367,36 @@ class AccountManager:
                         account_name,
                         e,
                     )
+                    alert_trade_failure(
+                        account_name=account_name,
+                        action="reconcile_callback_parse",
+                        ticket=0,
+                        exc=e,
+                    )
 
             def _on_reconcile_err(failure):
                 self.reconcile_requested[account_name] = False
+                try:
+                    alert_trade_failure(
+                        account_name=account_name,
+                        action="reconcile_request_errback",
+                        ticket=0,
+                        exc=Exception(str(failure)),
+                    )
+                except Exception:
+                    pass
                 client._on_error(failure)
 
             d.addCallback(_on_reconcile)
             d.addErrback(_on_reconcile_err)
         except Exception as e:
             self.reconcile_requested[account_name] = False
-            logger.error("[%s] Failed to send reconcile request: %s", account_name, e)
+            alert_trade_failure(
+                account_name=account_name,
+                action="send_reconcile_request",
+                ticket=0,
+                exc=e,
+            )
 
     # ------------------------------------------------------------------
     # Account lifecycle
@@ -425,6 +451,12 @@ class AccountManager:
                     if not self.auth_seen.get(acc_name, False):
                         self.auth_seen[acc_name] = True
                         logger.info("✓ Account %s connected and authenticated", acc_name)
+                        alert_trade_info(
+                            account_name=acc_name,
+                            action="account_authenticated",
+                            ticket=0,
+                            message="cTrader account authenticated",
+                        )
                     self._send_reconcile_request(acc_name)
                     return
 
@@ -567,11 +599,17 @@ class AccountManager:
                                     f"{int(oticket)} -> cTrader orderId {int(order_id)}"
                                 )
                                 order_count += 1
-                    except Exception:
+                    except Exception as e:
                         logger.debug(
                             "[%s] Failed parsing reconcile orders",
                             acc_name,
                             exc_info=True,
+                        )
+                        alert_trade_failure(
+                            account_name=acc_name,
+                            action="reconcile_parse_orders",
+                            ticket=0,
+                            exc=e,
                         )
 
                     logger.info(
@@ -607,9 +645,11 @@ class AccountManager:
                 )
 
             except Exception as e:
-                logger.debug(
-                    f"[{acc_name}] Failed to parse message: {e}",
-                    exc_info=True,
+                alert_trade_failure(
+                    account_name=acc_name,
+                    action="account_message_callback",
+                    ticket=0,
+                    exc=e,
                 )
 
         client.set_message_callback(on_message)
