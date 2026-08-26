@@ -2,15 +2,40 @@
 Shared state for the MT5 to cTrader bridge server.
 """
 import logging
+import sys
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-logger = logging.getLogger(__name__)
+_LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+if not root_logger.handlers:
+    console_handler = logging.StreamHandler(sys.stderr)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+    root_logger.addHandler(console_handler)
+else:
+    for handler in root_logger.handlers:
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+
+logger = logging.getLogger("mt5_ctrader_bridge")
+logger.setLevel(logging.INFO)
+logger.propagate = True
+
+
+def log_trade_critical(account_name: str, action: str, ticket: int, exc: Exception, **context):
+    ctx = " ".join(f"{k}={v}" for k, v in context.items() if v is not None)
+    logger.error(
+        f"[{account_name}] CRITICAL trade sync failure | action={action} ticket={ticket} {ctx} error={exc}"
+    )
+    logger.exception(
+        f"[{account_name}] TRACEBACK | action={action} ticket={ticket} {ctx}"
+    )
+
 
 # Global pending SL/TP map:
-# account_name -> {mt5_ticket -> dict(symbol, sl, tp, created_ms)}
+# account_name -> {mt5_ticket -> dict(symbol, sl, tp, created_ms, attempts, next_retry_ms, last_error)}
 PENDING_SLTP = {}
 
 # --- PATCH: pending lifecycle support ---
