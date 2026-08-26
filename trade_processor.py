@@ -6,7 +6,15 @@ Supports one MT5 magic -> multiple cTrader destination accounts.
 
 import time
 
-from app_state import logger, PENDING_SLTP, MASTER_OPEN_LOTS, MASTER_CLOSED_LOTS
+from app_state import (
+    logger,
+    PENDING_SLTP,
+    MASTER_OPEN_LOTS,
+    MASTER_CLOSED_LOTS,
+    alert_trade_failure,
+    alert_trade_warning,
+    alert_trade_info,
+)
 from trade_executor import copy_open_to_account, copy_pending_to_account
 from symbol_mapper import SymbolMapper
 
@@ -414,8 +422,14 @@ def _enforce_max_risk_on_fill(
         return
 
     if not isinstance(mt5_data, dict):
-        logger.warning(
-            f"[{account_name}] Over-risk check skipped: missing mt5_data for strict MT5 risk mode"
+        msg = "Over-risk check skipped: missing mt5_data for strict MT5 risk mode"
+        logger.warning(f"[{account_name}] {msg}")
+        alert_trade_warning(
+            account_name=account_name,
+            action="overrisk_check_missing_mt5_data",
+            ticket=0,
+            message=msg,
+            mt5_symbol=mt5_symbol,
         )
         return
 
@@ -429,8 +443,16 @@ def _enforce_max_risk_on_fill(
         f"perLot={float(risk_per_1lot):.2f}"
     )
     if risk_per_1lot <= 0:
-        logger.warning(
-            f"[{account_name}] Over-risk check skipped: cannot price MT5 risk strictly"
+        msg = "Over-risk check skipped: cannot price MT5 risk strictly"
+        logger.warning(f"[{account_name}] {msg}")
+        alert_trade_warning(
+            account_name=account_name,
+            action="overrisk_check_cannot_price_risk",
+            ticket=0,
+            message=msg,
+            mt5_symbol=mt5_symbol,
+            entry=entry,
+            sl=sl,
         )
         return
 
@@ -481,10 +503,28 @@ def _enforce_max_risk_on_fill(
             f"[{account_name}] Over-risk partial close sent: "
             f"positionId={position.positionId}, trim_units={excess_units}"
         )
+        alert_trade_warning(
+            account_name=account_name,
+            action="overrisk_partial_close_sent",
+            ticket=0,
+            message="Over-risk trim executed after fill",
+            mt5_symbol=mt5_symbol,
+            position_id=position.positionId,
+            trim_units=excess_units,
+            actual_risk=actual_risk,
+            target_risk=target_risk,
+        )
     except Exception as e:
-        logger.error(
-            f"[{account_name}] Failed over-risk partial close for "
-            f"positionId={position.positionId}: {e}"
+        alert_trade_failure(
+            account_name=account_name,
+            action="overrisk_partial_close_failed",
+            ticket=0,
+            exc=e,
+            mt5_symbol=mt5_symbol,
+            position_id=getattr(position, "positionId", None),
+            trim_units=excess_units,
+            actual_risk=actual_risk,
+            target_risk=target_risk,
         )
 
 
@@ -812,7 +852,15 @@ def _build_startup_recovery_plan(client, config, mt5_symbol: str, side: str, ent
 def _resolve_target_accounts(data, account_manager):
     magic = _to_int(data.get("magic", 0), 0)
     if magic <= 0:
-        logger.warning("No valid magic in event payload; cannot route event")
+        msg = "No valid magic in event payload; cannot route event"
+        logger.warning(msg)
+        alert_trade_warning(
+            account_name="router",
+            action="resolve_target_accounts_invalid_magic",
+            ticket=_to_int(data.get("ticket", 0), 0),
+            message=msg,
+            magic=magic,
+        )
         return []
 
     matched = []
@@ -825,7 +873,6 @@ def _resolve_target_accounts(data, account_manager):
 
             route_magic = getattr(config, "route_magic_number", None)
             magic_numbers = getattr(config, "magic_numbers", None)
-
             matched_here = False
 
             try:
@@ -845,11 +892,25 @@ def _resolve_target_accounts(data, account_manager):
                 matched.append(account_name)
                 seen.add(account_name)
     except Exception as e:
-        logger.error(f"Failed resolving target accounts for magic={magic}: {e}")
+        alert_trade_failure(
+            account_name="router",
+            action="resolve_target_accounts_exception",
+            ticket=_to_int(data.get("ticket", 0), 0),
+            exc=e,
+            magic=magic,
+        )
         return []
 
     if not matched:
-        logger.warning(f"No configured account routes for magic={magic}")
+        msg = f"No configured account routes for magic={magic}"
+        logger.warning(msg)
+        alert_trade_warning(
+            account_name="router",
+            action="resolve_target_accounts_no_match",
+            ticket=_to_int(data.get("ticket", 0), 0),
+            message=msg,
+            magic=magic,
+        )
         return []
 
     logger.info(f"Resolved magic={magic} -> target accounts: {matched}")
@@ -865,11 +926,23 @@ def _get_target_account_contexts(data, account_manager):
             client = account_manager.get_client(account_name)
             config = account_manager.get_config(account_name)
         except Exception as e:
-            logger.error(f"Failed to load target account context for {account_name}: {e}")
+            alert_trade_failure(
+                account_name=account_name,
+                action="load_target_account_context",
+                ticket=_to_int(data.get("ticket", 0), 0),
+                exc=e,
+            )
             continue
 
         if not client or not config:
-            logger.warning(f"Target account {account_name} is unavailable or not initialized")
+            msg = f"Target account {account_name} is unavailable or not initialized"
+            logger.warning(msg)
+            alert_trade_warning(
+                account_name=account_name,
+                action="target_account_unavailable",
+                ticket=_to_int(data.get("ticket", 0), 0),
+                message=msg,
+            )
             continue
 
         contexts.append((account_name, client, config))
@@ -883,15 +956,31 @@ def try_apply_pending_sltp(account_name, client, config, ticket, account_manager
         return False
 
     if _pending_sltp_expired(pending):
-        logger.warning(f"[{account_name}] Pending SL/TP expired for ticket {ticket}, dropping repair item")
+        msg = f"Pending SL/TP expired for ticket {ticket}, dropping repair item"
+        logger.warning(f"[{account_name}] {msg}")
+        alert_trade_warning(
+            account_name=account_name,
+            action="pending_sltp_expired",
+            ticket=int(ticket),
+            message=msg,
+            last_error=pending.get("last_error"),
+        )
         _clear_pending_sltp(account_name, int(ticket))
         return False
 
     attempts = _to_int(pending.get("attempts", 0), 0)
     if attempts >= _PENDING_SLTP_MAX_ATTEMPTS:
+        msg = f"Pending SL/TP exceeded retry limit for ticket {ticket}"
         logger.error(
-            f"[{account_name}] Pending SL/TP exceeded retry limit for ticket {ticket}, "
-            f"last_error={pending.get('last_error')}"
+            f"[{account_name}] {msg}, last_error={pending.get('last_error')}"
+        )
+        alert_trade_failure(
+            account_name=account_name,
+            action="pending_sltp_retry_limit_exceeded",
+            ticket=int(ticket),
+            exc=Exception(pending.get("last_error") or "retry limit exceeded"),
+            attempts=attempts,
+            mt5_symbol=pending.get("symbol"),
         )
         _clear_pending_sltp(account_name, int(ticket))
         return False
@@ -933,8 +1022,17 @@ def try_apply_pending_sltp(account_name, client, config, ticket, account_manager
             error=str(e),
             position_id=position_id,
         )
-        logger.error(
-            f"[{account_name}] Failed to apply pending SL/TP for ticket {ticket}: {e}"
+        alert_trade_failure(
+            account_name=account_name,
+            action="apply_pending_sltp",
+            ticket=int(ticket),
+            exc=e,
+            mt5_symbol=mt5_symbol,
+            position_id=position_id,
+            symbol_id=symbol_id,
+            sl=new_sl,
+            tp=new_tp,
+            attempt=attempts + 1,
         )
         return False
 
@@ -970,7 +1068,12 @@ def drain_pending_sltp_repairs(account_manager, account_name=None, force=False):
                 ):
                     repaired += 1
         except Exception as e:
-            logger.debug(f"[{name}] drain_pending_sltp_repairs failed: {e}")
+            alert_trade_failure(
+                account_name=name,
+                action="drain_pending_sltp_repairs",
+                ticket=0,
+                exc=e,
+            )
 
     return repaired
 
@@ -1014,12 +1117,28 @@ def process_trade_event(data, account_manager):
         elif event_type == "CLOSE":
             handle_close_event(data, account_manager)
         else:
-            logger.warning(f"Unknown event type: {event_type}")
+            msg = f"Unknown event type: {event_type}"
+            logger.warning(msg)
+            alert_trade_warning(
+                account_name="router",
+                action="unknown_event_type",
+                ticket=ticket,
+                message=msg,
+                magic=magic,
+            )
 
         drain_pending_sltp_repairs(account_manager)
 
     except Exception as e:
-        logger.error(f"Error processing trade event: {e}")
+        alert_trade_failure(
+            account_name="router",
+            action="process_trade_event",
+            ticket=_to_int(data.get("ticket", 0), 0),
+            exc=e,
+            event_type=data.get("event_type") or data.get("action") or data.get("event"),
+            magic=_to_int(data.get("magic", 0), 0),
+            symbol=data.get("symbol"),
+        )
         raise
 
 
@@ -1046,7 +1165,16 @@ def handle_open_event(data, account_manager):
 
     contexts = _get_target_account_contexts(data, account_manager)
     if not contexts:
-        logger.warning(f"OPEN ignored for ticket {ticket}: no target accounts for magic={magic}")
+        msg = f"OPEN ignored for ticket {ticket}: no target accounts for magic={magic}"
+        logger.warning(msg)
+        alert_trade_warning(
+            account_name="router",
+            action="open_no_target_accounts",
+            ticket=ticket,
+            message=msg,
+            magic=magic,
+            mt5_symbol=mt5_symbol,
+        )
         return
 
     for account_name, client, config in contexts:
@@ -1068,7 +1196,18 @@ def handle_open_event(data, account_manager):
             )
 
             if lots is None or float(lots) <= 0:
-                logger.warning(f"[{account_name}] OPEN rejected for ticket {ticket}: {decision}")
+                msg = f"OPEN rejected for ticket {ticket}: {decision}"
+                logger.warning(f"[{account_name}] {msg}")
+                alert_trade_warning(
+                    account_name=account_name,
+                    action="open_rejected",
+                    ticket=ticket,
+                    message=msg,
+                    mt5_symbol=mt5_symbol,
+                    side=side,
+                    volume=src_volume,
+                    decision=decision,
+                )
                 continue
 
             logger.info(f"[{account_name}] OPEN sizing: {decision}, lots={float(lots):.4f}")
@@ -1146,7 +1285,18 @@ def handle_open_event(data, account_manager):
             )
 
         except Exception as e:
-            logger.error(f"[{account_name}] Failed to copy OPEN event: {e}")
+            alert_trade_failure(
+                account_name=account_name,
+                action="handle_open_event",
+                ticket=ticket,
+                exc=e,
+                mt5_symbol=mt5_symbol,
+                side=side,
+                volume=src_volume,
+                sl=sl,
+                tp=tp,
+                magic=magic,
+            )
 
 
 def handle_pending_open_event(data, account_manager):
@@ -1165,8 +1315,15 @@ def handle_pending_open_event(data, account_manager):
     expiration_ms = _to_int(data.get("expiration_ms", 0), 0)
 
     if pending_type not in ("limit", "stop", "stop_limit"):
-        logger.warning(
-            f"PENDING_OPEN ignored for ticket {ticket}: unsupported pending_type={pending_type!r}"
+        msg = f"PENDING_OPEN ignored for ticket {ticket}: unsupported pending_type={pending_type!r}"
+        logger.warning(msg)
+        alert_trade_warning(
+            account_name="router",
+            action="pending_open_unsupported_type",
+            ticket=ticket,
+            message=msg,
+            pending_type=pending_type,
+            mt5_symbol=mt5_symbol,
         )
         return
 
@@ -1197,7 +1354,16 @@ def handle_pending_open_event(data, account_manager):
 
     contexts = _get_target_account_contexts(data, account_manager)
     if not contexts:
-        logger.warning(f"PENDING_OPEN ignored for ticket {ticket}: no target accounts for magic={magic}")
+        msg = f"PENDING_OPEN ignored for ticket {ticket}: no target accounts for magic={magic}"
+        logger.warning(msg)
+        alert_trade_warning(
+            account_name="router",
+            action="pending_open_no_target_accounts",
+            ticket=ticket,
+            message=msg,
+            magic=magic,
+            mt5_symbol=mt5_symbol,
+        )
         return
 
     for account_name, client, config in contexts:
@@ -1217,7 +1383,19 @@ def handle_pending_open_event(data, account_manager):
                     account_manager=account_manager,
                 )
                 if lots is None or float(lots) <= 0:
-                    logger.warning(f"[{account_name}] PENDING_OPEN rejected for ticket {ticket}: {decision}")
+                    msg = f"PENDING_OPEN rejected for ticket {ticket}: {decision}"
+                    logger.warning(f"[{account_name}] {msg}")
+                    alert_trade_warning(
+                        account_name=account_name,
+                        action="pending_open_rejected",
+                        ticket=ticket,
+                        message=msg,
+                        mt5_symbol=mt5_symbol,
+                        side=side,
+                        volume=volume,
+                        decision=decision,
+                        pending_type=pending_type,
+                    )
                     continue
                 sizing_volume = float(lots)
                 logger.info(f"[{account_name}] PENDING_OPEN sizing: {decision}, lots={float(lots):.4f}")
@@ -1240,7 +1418,22 @@ def handle_pending_open_event(data, account_manager):
             )
 
         except Exception as e:
-            logger.error(f"[{account_name}] Failed to copy PENDING_OPEN event: {e}")
+            alert_trade_failure(
+                account_name=account_name,
+                action="handle_pending_open_event",
+                ticket=ticket,
+                exc=e,
+                mt5_symbol=mt5_symbol,
+                side=side,
+                volume=volume,
+                sl=sl,
+                tp=tp,
+                magic=magic,
+                pending_type=pending_type,
+                stop_price=stop_price,
+                limit_price=limit_price,
+                expiration_ms=expiration_ms,
+            )
 
 
 def handle_pending_modify_event(data, account_manager):
@@ -1259,8 +1452,15 @@ def handle_pending_modify_event(data, account_manager):
     expiration_ms = _to_int(data.get("expiration_ms", 0), 0)
 
     if pending_type not in ("limit", "stop", "stop_limit"):
-        logger.warning(
-            f"PENDING_MODIFY ignored for ticket {ticket}: unsupported pending_type={pending_type!r}"
+        msg = f"PENDING_MODIFY ignored for ticket {ticket}: unsupported pending_type={pending_type!r}"
+        logger.warning(msg)
+        alert_trade_warning(
+            account_name="router",
+            action="pending_modify_unsupported_type",
+            ticket=ticket,
+            message=msg,
+            pending_type=pending_type,
+            mt5_symbol=mt5_symbol,
         )
         return
 
@@ -1283,24 +1483,44 @@ def handle_pending_modify_event(data, account_manager):
 
     contexts = _get_target_account_contexts(data, account_manager)
     if not contexts:
-        logger.warning(f"PENDING_MODIFY ignored for ticket {ticket}: no target accounts for magic={magic}")
+        msg = f"PENDING_MODIFY ignored for ticket {ticket}: no target accounts for magic={magic}"
+        logger.warning(msg)
+        alert_trade_warning(
+            account_name="router",
+            action="pending_modify_no_target_accounts",
+            ticket=ticket,
+            message=msg,
+            magic=magic,
+            mt5_symbol=mt5_symbol,
+        )
         return
 
     for account_name, client, config in contexts:
         try:
             order_id = account_manager.get_order_id(account_name, int(ticket))
             if not order_id:
-                logger.warning(
-                    f"[{account_name}] PENDING_MODIFY ignored for ticket {ticket} "
-                    f"(no orderId mapping yet)"
+                msg = f"PENDING_MODIFY ignored for ticket {ticket} (no orderId mapping yet)"
+                logger.warning(f"[{account_name}] {msg}")
+                alert_trade_warning(
+                    account_name=account_name,
+                    action="pending_modify_missing_order_mapping",
+                    ticket=ticket,
+                    message=msg,
+                    mt5_symbol=mt5_symbol,
                 )
                 continue
 
             symbol_id = _get_symbol_id_for_account(client, config, mt5_symbol)
             if symbol_id is None:
-                logger.warning(
-                    f"[{account_name}] PENDING_MODIFY ignored for ticket {ticket} "
-                    f"(symbol mapping failed for {mt5_symbol})"
+                msg = f"PENDING_MODIFY ignored for ticket {ticket} (symbol mapping failed for {mt5_symbol})"
+                logger.warning(f"[{account_name}] {msg}")
+                alert_trade_warning(
+                    account_name=account_name,
+                    action="pending_modify_symbol_mapping_failed",
+                    ticket=ticket,
+                    message=msg,
+                    mt5_symbol=mt5_symbol,
+                    order_id=order_id,
                 )
                 continue
 
@@ -1320,7 +1540,22 @@ def handle_pending_modify_event(data, account_manager):
             logger.info(f"[{account_name}] Modified pending order {int(order_id)} for ticket {ticket}")
 
         except Exception as e:
-            logger.error(f"[{account_name}] Failed to modify pending order for ticket {ticket}: {e}")
+            alert_trade_failure(
+                account_name=account_name,
+                action="handle_pending_modify_event",
+                ticket=ticket,
+                exc=e,
+                mt5_symbol=mt5_symbol,
+                order_id=order_id if "order_id" in locals() else None,
+                side=side,
+                volume=volume,
+                sl=sl,
+                tp=tp,
+                pending_type=pending_type,
+                stop_price=stop_price,
+                limit_price=limit_price,
+                expiration_ms=expiration_ms,
+            )
 
 
 def handle_pending_cancel_event(data, account_manager):
@@ -1332,16 +1567,30 @@ def handle_pending_cancel_event(data, account_manager):
 
     contexts = _get_target_account_contexts(data, account_manager)
     if not contexts:
-        logger.warning(f"PENDING_CANCEL ignored for ticket {ticket}: no target accounts for magic={magic}")
+        msg = f"PENDING_CANCEL ignored for ticket {ticket}: no target accounts for magic={magic}"
+        logger.warning(msg)
+        alert_trade_warning(
+            account_name="router",
+            action="pending_cancel_no_target_accounts",
+            ticket=ticket,
+            message=msg,
+            magic=magic,
+            mt5_symbol=mt5_symbol,
+        )
         return
 
     for account_name, client, config in contexts:
         try:
             order_id = account_manager.get_order_id(account_name, int(ticket))
             if not order_id:
-                logger.warning(
-                    f"[{account_name}] PENDING_CANCEL ignored for ticket {ticket} "
-                    f"(no orderId mapping yet)"
+                msg = f"PENDING_CANCEL ignored for ticket {ticket} (no orderId mapping yet)"
+                logger.warning(f"[{account_name}] {msg}")
+                alert_trade_warning(
+                    account_name=account_name,
+                    action="pending_cancel_missing_order_mapping",
+                    ticket=ticket,
+                    message=msg,
+                    mt5_symbol=mt5_symbol,
                 )
                 continue
 
@@ -1349,7 +1598,14 @@ def handle_pending_cancel_event(data, account_manager):
             logger.info(f"[{account_name}] Cancel sent: ticket {ticket} -> orderId {int(order_id)}")
 
         except Exception as e:
-            logger.error(f"[{account_name}] Failed to cancel pending for ticket {ticket}: {e}")
+            alert_trade_failure(
+                account_name=account_name,
+                action="handle_pending_cancel_event",
+                ticket=ticket,
+                exc=e,
+                mt5_symbol=mt5_symbol,
+                order_id=order_id if "order_id" in locals() else None,
+            )
 
 
 def handle_modify_event(data, account_manager):
@@ -1366,7 +1622,16 @@ def handle_modify_event(data, account_manager):
 
     contexts = _get_target_account_contexts(data, account_manager)
     if not contexts:
-        logger.warning(f"MODIFY ignored for ticket {ticket}: no target accounts for magic={magic}")
+        msg = f"MODIFY ignored for ticket {ticket}: no target accounts for magic={magic}"
+        logger.warning(msg)
+        alert_trade_warning(
+            account_name="router",
+            action="modify_no_target_accounts",
+            ticket=ticket,
+            message=msg,
+            magic=magic,
+            mt5_symbol=mt5_symbol,
+        )
         return
 
     for account_name, client, config in contexts:
@@ -1386,9 +1651,18 @@ def handle_modify_event(data, account_manager):
                     logger.info(f"[{account_name}] Modified position {position_id} for ticket {ticket}")
                     _clear_pending_sltp(account_name, ticket)
                 except Exception as amend_error:
-                    logger.warning(
-                        f"[{account_name}] Immediate modify failed for ticket {ticket}, "
-                        f"queueing repair: {amend_error}"
+                    msg = f"Immediate modify failed for ticket {ticket}, queueing repair: {amend_error}"
+                    logger.warning(f"[{account_name}] {msg}")
+                    alert_trade_warning(
+                        account_name=account_name,
+                        action="modify_immediate_failed_queue_repair",
+                        ticket=ticket,
+                        message=msg,
+                        mt5_symbol=mt5_symbol,
+                        position_id=position_id,
+                        symbol_id=symbol_id,
+                        sl=new_sl,
+                        tp=new_tp,
                     )
                     _set_pending_sltp(account_name, ticket, mt5_symbol, new_sl, new_tp)
                     _touch_pending_sltp_retry(
@@ -1398,13 +1672,30 @@ def handle_modify_event(data, account_manager):
                         position_id=position_id,
                     )
             else:
-                logger.warning(
-                    f"[{account_name}] Position not found for ticket {ticket}, storing pending SL/TP"
+                msg = f"Position not found for ticket {ticket}, storing pending SL/TP"
+                logger.warning(f"[{account_name}] {msg}")
+                alert_trade_warning(
+                    account_name=account_name,
+                    action="modify_position_missing_store_pending_sltp",
+                    ticket=ticket,
+                    message=msg,
+                    mt5_symbol=mt5_symbol,
+                    sl=new_sl,
+                    tp=new_tp,
                 )
                 _set_pending_sltp(account_name, ticket, mt5_symbol, new_sl, new_tp)
 
         except Exception as e:
-            logger.error(f"[{account_name}] Failed to modify position for ticket {ticket}: {e}")
+            alert_trade_failure(
+                account_name=account_name,
+                action="handle_modify_event",
+                ticket=ticket,
+                exc=e,
+                mt5_symbol=mt5_symbol,
+                sl=new_sl,
+                tp=new_tp,
+                magic=magic,
+            )
 
 
 def handle_close_event(data, account_manager):
@@ -1426,7 +1717,16 @@ def handle_close_event(data, account_manager):
 
     contexts = _get_target_account_contexts(data, account_manager)
     if not contexts:
-        logger.warning(f"CLOSE ignored for ticket {ticket}: no target accounts for magic={magic}")
+        msg = f"CLOSE ignored for ticket {ticket}: no target accounts for magic={magic}"
+        logger.warning(msg)
+        alert_trade_warning(
+            account_name="router",
+            action="close_no_target_accounts",
+            ticket=ticket,
+            message=msg,
+            magic=magic,
+            mt5_symbol=mt5_symbol,
+        )
         return
 
     for account_name, client, config in contexts:
@@ -1464,9 +1764,20 @@ def handle_close_event(data, account_manager):
                 close_units = follower_units
 
             if close_units is None or int(close_units) <= 0:
-                logger.warning(
-                    f"[{account_name}] Cannot close ticket {ticket} (positionId={position_id}) "
+                msg = (
+                    f"Cannot close ticket {ticket} (positionId={position_id}) "
                     f"because close volume is unknown/invalid."
+                )
+                logger.warning(f"[{account_name}] {msg}")
+                alert_trade_warning(
+                    account_name=account_name,
+                    action="close_invalid_volume",
+                    ticket=ticket,
+                    message=msg,
+                    mt5_symbol=mt5_symbol,
+                    position_id=position_id,
+                    follower_units=follower_units,
+                    close_lots=close_lots,
                 )
                 _clear_pending_sltp(account_name, ticket)
                 continue
@@ -1492,7 +1803,19 @@ def handle_close_event(data, account_manager):
             _clear_pending_sltp(account_name, ticket)
 
         except Exception as e:
-            logger.error(f"[{account_name}] Failed to close position for ticket {ticket}: {e}")
+            alert_trade_failure(
+                account_name=account_name,
+                action="handle_close_event",
+                ticket=ticket,
+                exc=e,
+                mt5_symbol=mt5_symbol,
+                position_id=position_id if "position_id" in locals() else None,
+                symbol_id=symbol_id if "symbol_id" in locals() else None,
+                close_lots=close_lots,
+                follower_units=follower_units if "follower_units" in locals() else None,
+                mt5_contract_size=mt5_contract_size,
+                magic=magic,
+            )
 
     if close_lots is not None:
         MASTER_CLOSED_LOTS[int(ticket)] = master_closed_lots + float(close_lots)
