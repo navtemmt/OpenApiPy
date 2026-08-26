@@ -7,13 +7,13 @@ Provides high-level trading methods wrapping the low-level OpenApiPy SDK.
 import json
 import os
 import time
-import logging
 import threading
 from typing import Optional, Callable, Dict, Any, Iterable
 
 from dotenv import load_dotenv
 from twisted.internet import reactor
 
+from app_state import logger, notify_info, notify_warning, notify_error
 from ctrader_utils import convert_mt5_lots_to_ctrader_cents  # kept for compatibility
 import ctrader_symbols_impl as symbols_impl
 import ctrader_monitor_impl as monitor_impl
@@ -26,9 +26,6 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAUnsubscribeSpotsReq,
     ProtoOASpotEvent,
 )
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 PROTO_OA_SPOT_EVENT_TYPE = ProtoOASpotEvent().payloadType
 
@@ -194,10 +191,22 @@ class CTraderClient:
             return None
         return os.path.normpath(path)
 
+    def _client_context(self, **extra) -> Dict[str, Any]:
+        ctx = {
+            "account_name": self.account_name,
+            "account_id": self.account_id,
+            "environment": self.env,
+            "host": self.host,
+            "token_state_file": self.token_state_file,
+            "token_source": self.current_token_source,
+            "is_connected": self.is_connected,
+            "is_app_authed": self.is_app_authed,
+            "is_account_authed": self.is_account_authed,
+        }
+        ctx.update(extra)
+        return ctx
+
     def _sync_from_shared_state(self, reason: str = "sync") -> bool:
-        """
-        Pull latest tokens from shared in-memory coordinator into this client.
-        """
         shared = self.shared_token_state
         if not shared:
             return False
@@ -230,9 +239,6 @@ class CTraderClient:
         return changed
 
     def _publish_to_shared_state(self, source: str = "runtime") -> None:
-        """
-        Push this client's current runtime tokens into the shared in-memory coordinator.
-        """
         shared = self.shared_token_state
         if not shared:
             return
@@ -288,11 +294,11 @@ class CTraderClient:
         except FileNotFoundError:
             return None
         except Exception as e:
-            logger.exception(
-                "[%s] Failed to read token state file %s: %s",
-                self.account_name or self.account_id,
-                self.token_state_file,
-                e,
+            notify_error(
+                event="ctrader_token_state_read_failed",
+                message=f"Failed to read token state file: {self.token_state_file}",
+                exc=e,
+                **self._client_context(),
             )
             return None
 
@@ -339,11 +345,11 @@ class CTraderClient:
             else:
                 _write()
         except Exception as e:
-            logger.exception(
-                "[%s] Failed to save token state file %s: %s",
-                self.account_name or self.account_id,
-                self.token_state_file,
-                e,
+            notify_error(
+                event="ctrader_token_state_save_failed",
+                message=f"Failed to save token state file: {self.token_state_file}",
+                exc=e,
+                **self._client_context(source=source),
             )
 
     def _use_bootstrap_tokens(self, source: str = "env_fallback") -> bool:
@@ -351,18 +357,20 @@ class CTraderClient:
         refresh_token = self.bootstrap_refresh_token or ""
 
         if not access_token and not refresh_token:
-            logger.warning(
-                "[%s] No bootstrap .env tokens available for fallback",
-                self.account_name or self.account_id,
+            notify_warning(
+                event="ctrader_bootstrap_tokens_missing",
+                message="No bootstrap .env tokens available for fallback",
+                **self._client_context(source=source),
             )
             return False
 
         same_access = (access_token or "") == (self.access_token or "")
         same_refresh = (refresh_token or "") == (self.refresh_token or "")
         if same_access and same_refresh:
-            logger.warning(
-                "[%s] Bootstrap .env tokens are identical to current runtime tokens; skipping fallback",
-                self.account_name or self.account_id,
+            notify_warning(
+                event="ctrader_bootstrap_tokens_same_as_runtime",
+                message="Bootstrap .env tokens are identical to current runtime tokens; skipping fallback",
+                **self._client_context(source=source),
             )
             return False
 
@@ -400,27 +408,29 @@ class CTraderClient:
                 else:
                     os.remove(self.token_state_file)
 
-                logger.warning(
-                    "[%s] Deleted token state file on startup due to CTRADER_CLEAR_TOKEN_STATE_ON_START=1 file=%s",
-                    self.account_name or self.account_id,
-                    self.token_state_file,
+                notify_warning(
+                    event="ctrader_token_state_cleared_on_start",
+                    message="Deleted token state file on startup due to CTRADER_CLEAR_TOKEN_STATE_ON_START=1",
+                    **self._client_context(),
                 )
             except FileNotFoundError:
                 pass
-            except Exception:
-                logger.exception(
-                    "[%s] Failed to delete token state file on startup: %s",
-                    self.account_name or self.account_id,
-                    self.token_state_file,
+            except Exception as e:
+                notify_error(
+                    event="ctrader_token_state_clear_failed",
+                    message=f"Failed to delete token state file on startup: {self.token_state_file}",
+                    exc=e,
+                    **self._client_context(),
                 )
 
         if self._sync_from_shared_state(reason="startup_preload"):
             return
 
         if force_env:
-            logger.warning(
-                "[%s] FORCE_ENV_TOKENS enabled; ignoring token state file and using .env bootstrap tokens",
-                self.account_name or self.account_id,
+            notify_warning(
+                event="ctrader_force_env_tokens",
+                message="FORCE_ENV_TOKENS enabled; ignoring token state file and using .env bootstrap tokens",
+                **self._client_context(),
             )
             self._apply_runtime_tokens(
                 access_token=self.bootstrap_access_token or "",
@@ -477,16 +487,9 @@ class CTraderClient:
         )
 
     def _sync_runtime_tokens_before_auth(self) -> None:
-        """
-        Best-effort sync point right before auth/reauth steps.
-        """
         self._sync_from_shared_state(reason="pre_auth")
 
     def with_shared_token_lock(self, fn: Callable[..., Any], *args: Any, **kwargs: Any):
-        """
-        Run a callable under the shared token lock for this token group.
-        Useful for refresh paths inside auth_impl without changing architecture too much.
-        """
         shared = self.shared_token_state
         if not shared:
             return fn(*args, **kwargs)
@@ -511,11 +514,12 @@ class CTraderClient:
                     "Low-level client.send() does not accept timeout kwarg for %s; falling back",
                     req_name,
                 )
-            except Exception:
-                logger.exception(
-                    "Low-level client.send(timeout=%s) failed for %s",
-                    effective_timeout,
-                    req_name,
+            except Exception as e:
+                notify_error(
+                    event="ctrader_send_with_timeout_failed",
+                    message=f"Low-level client.send(timeout={effective_timeout}) failed for {req_name}",
+                    exc=e,
+                    **self._client_context(request_type=req_name, timeout=effective_timeout),
                 )
                 raise
 
@@ -535,7 +539,11 @@ class CTraderClient:
         return d
 
     def _handle_connected(self, client):
-        logger.info("Connected to cTrader Open API")
+        notify_info(
+            event="ctrader_connected",
+            message="Connected to cTrader Open API",
+            **self._client_context(),
+        )
         self.is_connected = True
         self.last_message_time = time.time()
 
@@ -548,14 +556,19 @@ class CTraderClient:
         if self._on_connect_callback:
             try:
                 self._on_connect_callback()
-            except Exception:
-                logger.exception("on_connect callback crashed")
+            except Exception as e:
+                notify_error(
+                    event="ctrader_on_connect_callback_crashed",
+                    message="on_connect callback crashed",
+                    exc=e,
+                    **self._client_context(),
+                )
 
     def _handle_disconnected(self, client, reason):
-        logger.warning(
-            "[%s] Disconnected from cTrader: %s",
-            self.account_name or self.account_id,
-            reason,
+        notify_warning(
+            event="ctrader_disconnected",
+            message=f"Disconnected from cTrader: {reason}",
+            **self._client_context(reason=str(reason)),
         )
         self.is_connected = False
         self.is_app_authed = False
@@ -566,10 +579,10 @@ class CTraderClient:
         self._stop_periodic_tasks()
 
         if self.auth_failed:
-            logger.critical(
-                "[%s] Bot remains stopped for trading due to auth failure. reason=%s",
-                self.account_name or self.account_id,
-                self.auth_failure_reason,
+            notify_error(
+                event="ctrader_auth_failed_disconnected",
+                message="Bot remains stopped for trading due to auth failure",
+                **self._client_context(reason=self.auth_failure_reason),
             )
 
     def _handle_message(self, client, message):
@@ -599,8 +612,13 @@ class CTraderClient:
         if self._on_message_callback:
             try:
                 self._on_message_callback(message)
-            except Exception:
-                logger.exception("User message callback crashed")
+            except Exception as e:
+                notify_error(
+                    event="ctrader_user_message_callback_crashed",
+                    message="User message callback crashed",
+                    exc=e,
+                    **self._client_context(),
+                )
 
     def _on_spot_event(self, spot_event: ProtoOASpotEvent):
         spots = list(getattr(spot_event, "spot", []))
@@ -728,7 +746,7 @@ class CTraderClient:
         self._on_message_callback = callback
 
     def send(self, req, timeout=None):
-        return self.client.send(req, timeout=timeout)
+        return self._client_send_with_timeout(req, timeout=timeout)
 
     def amend_position(
         self,
