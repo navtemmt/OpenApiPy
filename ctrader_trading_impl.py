@@ -10,9 +10,9 @@ All functions operate on the CTraderClient instance ("self") and keep using:
   - self._on_error  (errback)
 """
 
-import logging
 from typing import Optional, Any
 
+from app_state import logger, notify_info, notify_warning, notify_error
 from ctrader_open_api import Protobuf
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOANewOrderReq,
@@ -26,8 +26,6 @@ from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
     ProtoOATradeSide,
     ProtoOATimeInForce,
 )
-
-logger = logging.getLogger(__name__)
 
 
 def _parse_mt5_ticket_from_label(label: str) -> Optional[int]:
@@ -65,6 +63,13 @@ def _first_non_empty(*values):
         if value is not None and value != "":
             return value
     return None
+
+
+def _normalize_side(side: str) -> str:
+    side_norm = str(side or "").strip().lower()
+    if side_norm not in ("buy", "sell"):
+        raise ValueError(f"Unsupported side: {side}")
+    return side_norm
 
 
 def _resolve_symbol_name_from_id(self, symbol_id: Optional[int]) -> Optional[str]:
@@ -184,6 +189,81 @@ def _normalize_pending_type(pending_type: str) -> str:
     return aliases.get(ptype, ptype)
 
 
+def _base_event_context(
+    account_id: Optional[int] = None,
+    symbol_id: Optional[int] = None,
+    symbol_name: Optional[str] = None,
+    ticket: Optional[int] = None,
+    order_id: Optional[int] = None,
+    position_id: Optional[int] = None,
+    side: Optional[str] = None,
+    volume: Optional[int] = None,
+    pending_type: Optional[str] = None,
+    label: Optional[str] = None,
+    stop_price: Optional[float] = None,
+    limit_price: Optional[float] = None,
+    stop_loss: Optional[float] = None,
+    take_profit: Optional[float] = None,
+    expiration_ms: Optional[int] = None,
+):
+    ctx = {}
+    if account_id is not None:
+        ctx["account_id"] = int(account_id)
+    if symbol_id is not None:
+        ctx["symbol_id"] = int(symbol_id)
+    if symbol_name:
+        ctx["symbol_name"] = str(symbol_name)
+    if ticket is not None:
+        ctx["ticket"] = int(ticket)
+    if order_id is not None:
+        ctx["order_id"] = int(order_id)
+    if position_id is not None:
+        ctx["position_id"] = int(position_id)
+    if side:
+        ctx["side"] = str(side)
+    if volume is not None:
+        ctx["volume"] = int(volume)
+    if pending_type:
+        ctx["pending_type"] = str(pending_type)
+    if label:
+        ctx["label"] = str(label)
+    if stop_price is not None:
+        ctx["stop_price"] = float(stop_price)
+    if limit_price is not None:
+        ctx["limit_price"] = float(limit_price)
+    if stop_loss is not None:
+        ctx["stop_loss"] = float(stop_loss)
+    if take_profit is not None:
+        ctx["take_profit"] = float(take_profit)
+    if expiration_ms is not None:
+        ctx["expiration_ms"] = int(expiration_ms)
+    return ctx
+
+
+def _notify_resp_ok(event: str, message: str, **context):
+    notify_info(event=event, message=message, **context)
+
+
+def _notify_resp_warn(event: str, message: str, **context):
+    notify_warning(event=event, message=message, **context)
+
+
+def _notify_resp_error(event: str, message: str, exc: Optional[Exception] = None, **context):
+    notify_error(event=event, message=message, exc=exc, **context)
+
+
+def _auth_guard(event: str, **context):
+    if not getattr(context.get("self_ref"), "is_account_authed", False):
+        exc = RuntimeError("Account not authenticated yet")
+        notify_error(
+            event=event,
+            message=str(exc),
+            exc=exc,
+            **{k: v for k, v in context.items() if k != "self_ref"},
+        )
+        raise exc
+
+
 def amend_position(
     self,
     account_id: int,
@@ -219,16 +299,50 @@ def send_market_order(
     tp: Optional[float] = None,
     label: str = "MT5_Copy",
 ):
-    if not self.is_account_authed:
-        raise RuntimeError("Account not authenticated yet")
+    ticket = _parse_mt5_ticket_from_label(label)
+    symbol_name = _resolve_symbol_name_from_id(self, symbol_id) or "UNKNOWN"
 
-    volume = self.snap_volume_for_symbol(symbol_id, volume)
+    _auth_guard(
+        "ctrader_market_order_not_authed",
+        self_ref=self,
+        **_base_event_context(
+            account_id=account_id,
+            symbol_id=symbol_id,
+            symbol_name=symbol_name,
+            ticket=ticket,
+            side=side,
+            volume=volume,
+            label=label,
+        ),
+    )
+
+    try:
+        side_norm = _normalize_side(side)
+        volume = self.snap_volume_for_symbol(symbol_id, int(volume))
+    except Exception as e:
+        _notify_resp_error(
+            "ctrader_market_order_prepare_failed",
+            str(e),
+            exc=e,
+            **_base_event_context(
+                account_id=account_id,
+                symbol_id=symbol_id,
+                symbol_name=symbol_name,
+                ticket=ticket,
+                side=side,
+                volume=volume,
+                label=label,
+                stop_loss=sl,
+                take_profit=tp,
+            ),
+        )
+        raise
 
     req = ProtoOANewOrderReq()
     req.ctidTraderAccountId = int(account_id)
     req.symbolId = int(symbol_id)
     req.orderType = ProtoOAOrderType.MARKET
-    req.tradeSide = ProtoOATradeSide.BUY if side.lower() == "buy" else ProtoOATradeSide.SELL
+    req.tradeSide = ProtoOATradeSide.BUY if side_norm == "buy" else ProtoOATradeSide.SELL
     req.volume = int(volume)
 
     if sl is not None and float(sl) > 0.0:
@@ -238,23 +352,39 @@ def send_market_order(
 
     req.label = label
 
-    ticket = _parse_mt5_ticket_from_label(label)
-    symbol_name = _resolve_symbol_name_from_id(self, symbol_id) or "UNKNOWN"
-
     logger.info(
         "Sending market order: account_id=%s ticket=%s symbol=%s symbolId=%s side=%s volume=%s sl=%s tp=%s label=%s",
         account_id,
         ticket,
         symbol_name,
         symbol_id,
-        side,
+        side_norm,
         volume,
         sl,
         tp,
         label,
     )
 
-    d = self.send(req)
+    try:
+        d = self.send(req)
+    except Exception as e:
+        _notify_resp_error(
+            "ctrader_market_order_send_failed",
+            str(e),
+            exc=e,
+            **_base_event_context(
+                account_id=account_id,
+                symbol_id=symbol_id,
+                symbol_name=symbol_name,
+                ticket=ticket,
+                side=side_norm,
+                volume=volume,
+                label=label,
+                stop_loss=sl,
+                take_profit=tp,
+            ),
+        )
+        raise
 
     def _on_resp(result):
         try:
@@ -267,7 +397,29 @@ def send_market_order(
                 fallback_label=label,
             )
             logger.info("Order response: %s\n%s", _format_context(context), extracted)
-        except Exception:
+            _notify_resp_ok(
+                "ctrader_market_order_response",
+                "Market order response received",
+                **context,
+            )
+        except Exception as e:
+            _notify_resp_warn(
+                "ctrader_market_order_response_parse_warning",
+                "Failed to parse market order response; raw response logged",
+                **_base_event_context(
+                    account_id=account_id,
+                    symbol_id=symbol_id,
+                    symbol_name=symbol_name,
+                    ticket=ticket,
+                    side=side_norm,
+                    volume=volume,
+                    label=label,
+                    stop_loss=sl,
+                    take_profit=tp,
+                ),
+                error=str(e),
+                raw_type=type(result).__name__,
+            )
             logger.warning(
                 "Order response (raw): account_id=%s ticket=%s symbol=%s symbolId=%s label=%s raw=%r",
                 account_id,
@@ -278,8 +430,27 @@ def send_market_order(
                 result,
             )
 
+    def _on_err(failure):
+        _notify_resp_error(
+            "ctrader_market_order_errback",
+            str(failure),
+            exc=Exception(str(failure)),
+            **_base_event_context(
+                account_id=account_id,
+                symbol_id=symbol_id,
+                symbol_name=symbol_name,
+                ticket=ticket,
+                side=side_norm,
+                volume=volume,
+                label=label,
+                stop_loss=sl,
+                take_profit=tp,
+            ),
+        )
+        return self._on_error(failure)
+
     d.addCallback(_on_resp)
-    d.addErrback(self._on_error)
+    d.addErrback(_on_err)
     return d
 
 
@@ -297,30 +468,69 @@ def send_pending_order(
     label: str = "MT5_Pending",
     expiration_ms: int = 0,
 ):
-    if not self.is_account_authed:
-        raise RuntimeError("Account not authenticated yet")
+    ticket = _parse_mt5_ticket_from_label(label)
+    symbol_name = _resolve_symbol_name_from_id(self, symbol_id) or "UNKNOWN"
 
-    ptype = _normalize_pending_type(pending_type)
-    if ptype not in ("limit", "stop", "stop_limit"):
-        raise ValueError(f"Unsupported pending_type: {pending_type}")
+    _auth_guard(
+        "ctrader_pending_order_not_authed",
+        self_ref=self,
+        **_base_event_context(
+            account_id=account_id,
+            symbol_id=symbol_id,
+            symbol_name=symbol_name,
+            ticket=ticket,
+            side=side,
+            volume=volume,
+            pending_type=pending_type,
+            label=label,
+        ),
+    )
 
-    volume = self.snap_volume_for_symbol(symbol_id, int(volume))
+    try:
+        side_norm = _normalize_side(side)
+        ptype = _normalize_pending_type(pending_type)
+        if ptype not in ("limit", "stop", "stop_limit"):
+            raise ValueError(f"Unsupported pending_type: {pending_type}")
 
-    stop_price = float(stop_price or 0.0)
-    limit_price = float(limit_price or 0.0)
-    if stop_price > 0:
-        stop_price = self.round_price_for_symbol(symbol_id, stop_price)
-    if limit_price > 0:
-        limit_price = self.round_price_for_symbol(symbol_id, limit_price)
-    if sl is not None and float(sl) > 0:
-        sl = self.round_price_for_symbol(symbol_id, float(sl))
-    if tp is not None and float(tp) > 0:
-        tp = self.round_price_for_symbol(symbol_id, float(tp))
+        volume = self.snap_volume_for_symbol(symbol_id, int(volume))
+        stop_price = float(stop_price or 0.0)
+        limit_price = float(limit_price or 0.0)
+
+        if stop_price > 0:
+            stop_price = self.round_price_for_symbol(symbol_id, stop_price)
+        if limit_price > 0:
+            limit_price = self.round_price_for_symbol(symbol_id, limit_price)
+        if sl is not None and float(sl) > 0:
+            sl = self.round_price_for_symbol(symbol_id, float(sl))
+        if tp is not None and float(tp) > 0:
+            tp = self.round_price_for_symbol(symbol_id, float(tp))
+    except Exception as e:
+        _notify_resp_error(
+            "ctrader_pending_order_prepare_failed",
+            str(e),
+            exc=e,
+            **_base_event_context(
+                account_id=account_id,
+                symbol_id=symbol_id,
+                symbol_name=symbol_name,
+                ticket=ticket,
+                side=side,
+                volume=volume,
+                pending_type=pending_type,
+                label=label,
+                stop_price=stop_price or None,
+                limit_price=limit_price or None,
+                stop_loss=sl,
+                take_profit=tp,
+                expiration_ms=expiration_ms,
+            ),
+        )
+        raise
 
     req = ProtoOANewOrderReq()
     req.ctidTraderAccountId = int(account_id)
     req.symbolId = int(symbol_id)
-    req.tradeSide = ProtoOATradeSide.BUY if side.lower() == "buy" else ProtoOATradeSide.SELL
+    req.tradeSide = ProtoOATradeSide.BUY if side_norm == "buy" else ProtoOATradeSide.SELL
     req.volume = int(volume)
     req.label = str(label)
 
@@ -352,9 +562,6 @@ def send_pending_order(
         req.timeInForce = ProtoOATimeInForce.GOOD_TILL_DATE
         req.expirationTimestamp = int(expiration_ms)
 
-    ticket = _parse_mt5_ticket_from_label(label)
-    symbol_name = _resolve_symbol_name_from_id(self, symbol_id) or "UNKNOWN"
-
     logger.info(
         "Sending pending order: account_id=%s ticket=%s symbol=%s symbolId=%s type=%s side=%s vol=%s stop=%s limit=%s SL=%s TP=%s exp=%s label=%s",
         account_id,
@@ -362,7 +569,7 @@ def send_pending_order(
         symbol_name,
         symbol_id,
         ptype,
-        side,
+        side_norm,
         volume,
         stop_price,
         limit_price,
@@ -372,7 +579,30 @@ def send_pending_order(
         label,
     )
 
-    d = self.send(req)
+    try:
+        d = self.send(req)
+    except Exception as e:
+        _notify_resp_error(
+            "ctrader_pending_order_send_failed",
+            str(e),
+            exc=e,
+            **_base_event_context(
+                account_id=account_id,
+                symbol_id=symbol_id,
+                symbol_name=symbol_name,
+                ticket=ticket,
+                side=side_norm,
+                volume=volume,
+                pending_type=ptype,
+                label=label,
+                stop_price=stop_price or None,
+                limit_price=limit_price or None,
+                stop_loss=sl,
+                take_profit=tp,
+                expiration_ms=expiration_ms,
+            ),
+        )
+        raise
 
     def _on_resp(result):
         try:
@@ -385,7 +615,33 @@ def send_pending_order(
                 fallback_label=label,
             )
             logger.info("Pending order response: %s\n%s", _format_context(context), extracted)
-        except Exception:
+            _notify_resp_ok(
+                "ctrader_pending_order_response",
+                "Pending order response received",
+                **context,
+            )
+        except Exception as e:
+            _notify_resp_warn(
+                "ctrader_pending_order_response_parse_warning",
+                "Failed to parse pending order response; raw response logged",
+                **_base_event_context(
+                    account_id=account_id,
+                    symbol_id=symbol_id,
+                    symbol_name=symbol_name,
+                    ticket=ticket,
+                    side=side_norm,
+                    volume=volume,
+                    pending_type=ptype,
+                    label=label,
+                    stop_price=stop_price or None,
+                    limit_price=limit_price or None,
+                    stop_loss=sl,
+                    take_profit=tp,
+                    expiration_ms=expiration_ms,
+                ),
+                error=str(e),
+                raw_type=type(result).__name__,
+            )
             logger.warning(
                 "Pending order response (raw): account_id=%s ticket=%s symbol=%s symbolId=%s label=%s raw=%r",
                 account_id,
@@ -396,8 +652,31 @@ def send_pending_order(
                 result,
             )
 
+    def _on_err(failure):
+        _notify_resp_error(
+            "ctrader_pending_order_errback",
+            str(failure),
+            exc=Exception(str(failure)),
+            **_base_event_context(
+                account_id=account_id,
+                symbol_id=symbol_id,
+                symbol_name=symbol_name,
+                ticket=ticket,
+                side=side_norm,
+                volume=volume,
+                pending_type=ptype,
+                label=label,
+                stop_price=stop_price or None,
+                limit_price=limit_price or None,
+                stop_loss=sl,
+                take_profit=tp,
+                expiration_ms=expiration_ms,
+            ),
+        )
+        return self._on_error(failure)
+
     d.addCallback(_on_resp)
-    d.addErrback(self._on_error)
+    d.addErrback(_on_err)
     return d
 
 
@@ -415,59 +694,90 @@ def amend_pending_order(
     take_profit: Optional[float] = None,
     expiration_ms: Optional[int] = None,
 ):
-    if not self.is_account_authed:
-        raise RuntimeError("Account not authenticated yet")
+    symbol_name = _resolve_symbol_name_from_id(self, symbol_id) or "UNKNOWN"
 
-    ptype = _normalize_pending_type(pending_type)
-    if ptype not in ("limit", "stop", "stop_limit"):
-        raise ValueError(f"Unsupported pending_type: {pending_type}")
+    _auth_guard(
+        "ctrader_amend_pending_not_authed",
+        self_ref=self,
+        **_base_event_context(
+            account_id=account_id,
+            order_id=order_id,
+            symbol_id=symbol_id,
+            symbol_name=symbol_name,
+            side=side,
+            volume=volume,
+            pending_type=pending_type,
+        ),
+    )
 
-    account_id = int(account_id)
-    order_id = int(order_id)
-    symbol_id = int(symbol_id)
-    volume = self.snap_volume_for_symbol(symbol_id, int(volume))
+    try:
+        side_norm = _normalize_side(side)
+        ptype = _normalize_pending_type(pending_type)
+        if ptype not in ("limit", "stop", "stop_limit"):
+            raise ValueError(f"Unsupported pending_type: {pending_type}")
 
-    stop_price = float(stop_price or 0.0)
-    limit_price = float(limit_price or 0.0)
+        account_id = int(account_id)
+        order_id = int(order_id)
+        symbol_id = int(symbol_id)
+        volume = self.snap_volume_for_symbol(symbol_id, int(volume))
 
-    if stop_price > 0:
-        stop_price = self.round_price_for_symbol(symbol_id, stop_price)
-    else:
-        stop_price = None
+        stop_price = float(stop_price or 0.0)
+        limit_price = float(limit_price or 0.0)
 
-    if limit_price > 0:
-        limit_price = self.round_price_for_symbol(symbol_id, limit_price)
-    else:
-        limit_price = None
+        if stop_price > 0:
+            stop_price = self.round_price_for_symbol(symbol_id, stop_price)
+        else:
+            stop_price = None
 
-    if stop_loss is not None and float(stop_loss) > 0:
-        stop_loss = self.round_price_for_symbol(symbol_id, float(stop_loss))
-    else:
-        stop_loss = None
+        if limit_price > 0:
+            limit_price = self.round_price_for_symbol(symbol_id, limit_price)
+        else:
+            limit_price = None
 
-    if take_profit is not None and float(take_profit) > 0:
-        take_profit = self.round_price_for_symbol(symbol_id, float(take_profit))
-    else:
-        take_profit = None
+        if stop_loss is not None and float(stop_loss) > 0:
+            stop_loss = self.round_price_for_symbol(symbol_id, float(stop_loss))
+        else:
+            stop_loss = None
 
-        req = ProtoOAAmendOrderReq()
+        if take_profit is not None and float(take_profit) > 0:
+            take_profit = self.round_price_for_symbol(symbol_id, float(take_profit))
+        else:
+            take_profit = None
+    except Exception as e:
+        _notify_resp_error(
+            "ctrader_amend_pending_prepare_failed",
+            str(e),
+            exc=e,
+            **_base_event_context(
+                account_id=account_id,
+                order_id=order_id,
+                symbol_id=symbol_id,
+                symbol_name=symbol_name,
+                side=side,
+                volume=volume,
+                pending_type=pending_type,
+                stop_price=stop_price,
+                limit_price=limit_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                expiration_ms=expiration_ms,
+            ),
+        )
+        raise
+
+    req = ProtoOAAmendOrderReq()
     req.ctidTraderAccountId = account_id
     req.orderId = order_id
     req.volume = int(volume)
 
-    # ProtoOAAmendOrderReq does NOT support:
-    # tradeSide, symbolId, or orderType.
-    # The existing cTrader order already determines those properties.
     if ptype == "limit":
         if limit_price is None:
             raise ValueError("LIMIT amend requires limit_price > 0")
         req.limitPrice = float(limit_price)
-
     elif ptype == "stop":
         if stop_price is None:
             raise ValueError("STOP amend requires stop_price > 0")
         req.stopPrice = float(stop_price)
-
     else:
         if stop_price is None:
             raise ValueError("STOP_LIMIT amend requires stop_price > 0")
@@ -485,8 +795,6 @@ def amend_pending_order(
         req.timeInForce = ProtoOATimeInForce.GOOD_TILL_DATE
         req.expirationTimestamp = int(expiration_ms)
 
-    symbol_name = _resolve_symbol_name_from_id(self, symbol_id) or "UNKNOWN"
-
     logger.info(
         "Amending pending order: account_id=%s orderId=%s symbol=%s symbolId=%s type=%s side=%s vol=%s stop=%s limit=%s SL=%s TP=%s exp=%s",
         account_id,
@@ -494,7 +802,7 @@ def amend_pending_order(
         symbol_name,
         symbol_id,
         ptype,
-        side,
+        side_norm,
         volume,
         stop_price,
         limit_price,
@@ -503,7 +811,29 @@ def amend_pending_order(
         int(expiration_ms or 0) if expiration_ms is not None else 0,
     )
 
-    d = self.send(req)
+    try:
+        d = self.send(req)
+    except Exception as e:
+        _notify_resp_error(
+            "ctrader_amend_pending_send_failed",
+            str(e),
+            exc=e,
+            **_base_event_context(
+                account_id=account_id,
+                order_id=order_id,
+                symbol_id=symbol_id,
+                symbol_name=symbol_name,
+                side=side_norm,
+                volume=volume,
+                pending_type=ptype,
+                stop_price=stop_price,
+                limit_price=limit_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                expiration_ms=expiration_ms,
+            ),
+        )
+        raise
 
     def _on_resp(result):
         try:
@@ -517,7 +847,32 @@ def amend_pending_order(
             if context.get("order_id") is None:
                 context["order_id"] = int(order_id)
             logger.info("Amend pending order response: %s\n%s", _format_context(context), extracted)
-        except Exception:
+            _notify_resp_ok(
+                "ctrader_amend_pending_response",
+                "Amend pending order response received",
+                **context,
+            )
+        except Exception as e:
+            _notify_resp_warn(
+                "ctrader_amend_pending_response_parse_warning",
+                "Failed to parse amend pending response; raw response logged",
+                **_base_event_context(
+                    account_id=account_id,
+                    order_id=order_id,
+                    symbol_id=symbol_id,
+                    symbol_name=symbol_name,
+                    side=side_norm,
+                    volume=volume,
+                    pending_type=ptype,
+                    stop_price=stop_price,
+                    limit_price=limit_price,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    expiration_ms=expiration_ms,
+                ),
+                error=str(e),
+                raw_type=type(result).__name__,
+            )
             logger.warning(
                 "Amend pending order response (raw): account_id=%s orderId=%s symbol=%s symbolId=%s raw=%r",
                 account_id,
@@ -527,14 +882,39 @@ def amend_pending_order(
                 result,
             )
 
+    def _on_err(failure):
+        _notify_resp_error(
+            "ctrader_amend_pending_errback",
+            str(failure),
+            exc=Exception(str(failure)),
+            **_base_event_context(
+                account_id=account_id,
+                order_id=order_id,
+                symbol_id=symbol_id,
+                symbol_name=symbol_name,
+                side=side_norm,
+                volume=volume,
+                pending_type=ptype,
+                stop_price=stop_price,
+                limit_price=limit_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                expiration_ms=expiration_ms,
+            ),
+        )
+        return self._on_error(failure)
+
     d.addCallback(_on_resp)
-    d.addErrback(self._on_error)
+    d.addErrback(_on_err)
     return d
 
 
 def cancel_pending_order(self, account_id: int, order_id: int):
-    if not self.is_account_authed:
-        raise RuntimeError("Account not authenticated yet")
+    _auth_guard(
+        "ctrader_cancel_pending_not_authed",
+        self_ref=self,
+        **_base_event_context(account_id=account_id, order_id=order_id),
+    )
 
     req = ProtoOACancelOrderReq()
     req.ctidTraderAccountId = int(account_id)
@@ -542,7 +922,16 @@ def cancel_pending_order(self, account_id: int, order_id: int):
 
     logger.info("Cancelling pending order: account_id=%s orderId=%s", account_id, order_id)
 
-    d = self.send(req)
+    try:
+        d = self.send(req)
+    except Exception as e:
+        _notify_resp_error(
+            "ctrader_cancel_pending_send_failed",
+            str(e),
+            exc=e,
+            **_base_event_context(account_id=account_id, order_id=order_id),
+        )
+        raise
 
     def _on_resp(result):
         try:
@@ -555,7 +944,19 @@ def cancel_pending_order(self, account_id: int, order_id: int):
             if context.get("order_id") is None:
                 context["order_id"] = int(order_id)
             logger.info("Cancel order response: %s\n%s", _format_context(context), extracted)
-        except Exception:
+            _notify_resp_ok(
+                "ctrader_cancel_pending_response",
+                "Cancel pending order response received",
+                **context,
+            )
+        except Exception as e:
+            _notify_resp_warn(
+                "ctrader_cancel_pending_response_parse_warning",
+                "Failed to parse cancel pending response; raw response logged",
+                **_base_event_context(account_id=account_id, order_id=order_id),
+                error=str(e),
+                raw_type=type(result).__name__,
+            )
             logger.warning(
                 "Cancel order response (raw): account_id=%s orderId=%s raw=%r",
                 account_id,
@@ -563,8 +964,17 @@ def cancel_pending_order(self, account_id: int, order_id: int):
                 result,
             )
 
+    def _on_err(failure):
+        _notify_resp_error(
+            "ctrader_cancel_pending_errback",
+            str(failure),
+            exc=Exception(str(failure)),
+            **_base_event_context(account_id=account_id, order_id=order_id),
+        )
+        return self._on_error(failure)
+
     d.addCallback(_on_resp)
-    d.addErrback(self._on_error)
+    d.addErrback(_on_err)
     return d
 
 
@@ -576,23 +986,49 @@ def modify_position(
     tp: Optional[float] = None,
     symbol_id: Optional[int] = None,
 ):
-    if not self.is_account_authed:
-        raise RuntimeError("Account not authenticated yet")
+    symbol_name = _resolve_symbol_name_from_id(self, symbol_id) if symbol_id is not None else None
+
+    _auth_guard(
+        "ctrader_modify_position_not_authed",
+        self_ref=self,
+        **_base_event_context(
+            account_id=account_id,
+            position_id=position_id,
+            symbol_id=symbol_id,
+            symbol_name=symbol_name,
+            stop_loss=sl,
+            take_profit=tp,
+        ),
+    )
 
     orig_sl, orig_tp = sl, tp
 
-    if sl is not None and float(sl) <= 0.0:
-        sl = None
-    if tp is not None and float(tp) <= 0.0:
-        tp = None
+    try:
+        if sl is not None and float(sl) <= 0.0:
+            sl = None
+        if tp is not None and float(tp) <= 0.0:
+            tp = None
 
-    symbol_name = _resolve_symbol_name_from_id(self, symbol_id) if symbol_id is not None else None
-
-    if symbol_id is not None:
-        if sl is not None:
-            sl = self.round_price_for_symbol(symbol_id, sl)
-        if tp is not None:
-            tp = self.round_price_for_symbol(symbol_id, tp)
+        if symbol_id is not None:
+            if sl is not None:
+                sl = self.round_price_for_symbol(symbol_id, sl)
+            if tp is not None:
+                tp = self.round_price_for_symbol(symbol_id, tp)
+    except Exception as e:
+        _notify_resp_error(
+            "ctrader_modify_position_prepare_failed",
+            str(e),
+            exc=e,
+            **_base_event_context(
+                account_id=account_id,
+                position_id=position_id,
+                symbol_id=symbol_id,
+                symbol_name=symbol_name,
+                stop_loss=orig_sl,
+                take_profit=orig_tp,
+            ),
+        )
+        raise
 
     req = ProtoOAAmendPositionSLTPReq()
     req.ctidTraderAccountId = int(account_id)
@@ -615,7 +1051,23 @@ def modify_position(
         tp,
     )
 
-    d = self.send(req)
+    try:
+        d = self.send(req)
+    except Exception as e:
+        _notify_resp_error(
+            "ctrader_modify_position_send_failed",
+            str(e),
+            exc=e,
+            **_base_event_context(
+                account_id=account_id,
+                position_id=position_id,
+                symbol_id=symbol_id,
+                symbol_name=symbol_name,
+                stop_loss=sl,
+                take_profit=tp,
+            ),
+        )
+        raise
 
     def _on_resp(result):
         try:
@@ -629,7 +1081,26 @@ def modify_position(
             if context.get("position_id") is None:
                 context["position_id"] = int(position_id)
             logger.info("Amend response: %s\n%s", _format_context(context), extracted)
-        except Exception:
+            _notify_resp_ok(
+                "ctrader_modify_position_response",
+                "Modify position response received",
+                **context,
+            )
+        except Exception as e:
+            _notify_resp_warn(
+                "ctrader_modify_position_response_parse_warning",
+                "Failed to parse modify position response; raw response logged",
+                **_base_event_context(
+                    account_id=account_id,
+                    position_id=position_id,
+                    symbol_id=symbol_id,
+                    symbol_name=symbol_name,
+                    stop_loss=sl,
+                    take_profit=tp,
+                ),
+                error=str(e),
+                raw_type=type(result).__name__,
+            )
             logger.warning(
                 "Amend response (raw): account_id=%s positionId=%s symbol=%s symbolId=%s raw=%r",
                 account_id,
@@ -639,8 +1110,24 @@ def modify_position(
                 result,
             )
 
+    def _on_err(failure):
+        _notify_resp_error(
+            "ctrader_modify_position_errback",
+            str(failure),
+            exc=Exception(str(failure)),
+            **_base_event_context(
+                account_id=account_id,
+                position_id=position_id,
+                symbol_id=symbol_id,
+                symbol_name=symbol_name,
+                stop_loss=sl,
+                take_profit=tp,
+            ),
+        )
+        return self._on_error(failure)
+
     d.addCallback(_on_resp)
-    d.addErrback(self._on_error)
+    d.addErrback(_on_err)
     return d
 
 
@@ -660,20 +1147,60 @@ def close_position(self, *args: Any, **kwargs: Any):
         symbol_id = args[3]
 
     if account_id is None or position_id is None or volume is None:
-        raise TypeError("close_position requires (account_id, position_id, volume[, symbol_id])")
-
-    if not self.is_account_authed:
-        raise RuntimeError("Account not authenticated yet")
-
-    account_id = int(account_id)
-    position_id = int(position_id)
-    volume = int(volume)
+        exc = TypeError("close_position requires (account_id, position_id, volume[, symbol_id])")
+        _notify_resp_error(
+            "ctrader_close_position_invalid_args",
+            str(exc),
+            exc=exc,
+            account_id=account_id,
+            position_id=position_id,
+            symbol_id=symbol_id,
+            volume=volume,
+        )
+        raise exc
 
     symbol_name = None
     if symbol_id is not None:
-        symbol_id = int(symbol_id)
-        symbol_name = _resolve_symbol_name_from_id(self, symbol_id)
-        volume = self.snap_volume_for_symbol(symbol_id, volume)
+        try:
+            symbol_name = _resolve_symbol_name_from_id(self, int(symbol_id))
+        except Exception:
+            symbol_name = None
+
+    _auth_guard(
+        "ctrader_close_position_not_authed",
+        self_ref=self,
+        **_base_event_context(
+            account_id=account_id,
+            position_id=position_id,
+            symbol_id=symbol_id,
+            symbol_name=symbol_name,
+            volume=volume,
+        ),
+    )
+
+    try:
+        account_id = int(account_id)
+        position_id = int(position_id)
+        volume = int(volume)
+
+        if symbol_id is not None:
+            symbol_id = int(symbol_id)
+            symbol_name = _resolve_symbol_name_from_id(self, symbol_id)
+            volume = self.snap_volume_for_symbol(symbol_id, volume)
+    except Exception as e:
+        _notify_resp_error(
+            "ctrader_close_position_prepare_failed",
+            str(e),
+            exc=e,
+            **_base_event_context(
+                account_id=account_id,
+                position_id=position_id,
+                symbol_id=symbol_id,
+                symbol_name=symbol_name,
+                volume=volume,
+            ),
+        )
+        raise
 
     req = ProtoOAClosePositionReq()
     req.ctidTraderAccountId = account_id
@@ -689,7 +1216,22 @@ def close_position(self, *args: Any, **kwargs: Any):
         volume,
     )
 
-    d = self.send(req)
+    try:
+        d = self.send(req)
+    except Exception as e:
+        _notify_resp_error(
+            "ctrader_close_position_send_failed",
+            str(e),
+            exc=e,
+            **_base_event_context(
+                account_id=account_id,
+                position_id=position_id,
+                symbol_id=symbol_id,
+                symbol_name=symbol_name,
+                volume=volume,
+            ),
+        )
+        raise
 
     def _on_resp(result):
         try:
@@ -703,7 +1245,25 @@ def close_position(self, *args: Any, **kwargs: Any):
             if context.get("position_id") is None:
                 context["position_id"] = int(position_id)
             logger.info("Close response: %s\n%s", _format_context(context), extracted)
-        except Exception:
+            _notify_resp_ok(
+                "ctrader_close_position_response",
+                "Close position response received",
+                **context,
+            )
+        except Exception as e:
+            _notify_resp_warn(
+                "ctrader_close_position_response_parse_warning",
+                "Failed to parse close position response; raw response logged",
+                **_base_event_context(
+                    account_id=account_id,
+                    position_id=position_id,
+                    symbol_id=symbol_id,
+                    symbol_name=symbol_name,
+                    volume=volume,
+                ),
+                error=str(e),
+                raw_type=type(result).__name__,
+            )
             logger.warning(
                 "Close response (raw): account_id=%s positionId=%s symbol=%s symbolId=%s volume=%s raw=%r",
                 account_id,
@@ -714,6 +1274,21 @@ def close_position(self, *args: Any, **kwargs: Any):
                 result,
             )
 
+    def _on_err(failure):
+        _notify_resp_error(
+            "ctrader_close_position_errback",
+            str(failure),
+            exc=Exception(str(failure)),
+            **_base_event_context(
+                account_id=account_id,
+                position_id=position_id,
+                symbol_id=symbol_id,
+                symbol_name=symbol_name,
+                volume=volume,
+            ),
+        )
+        return self._on_error(failure)
+
     d.addCallback(_on_resp)
-    d.addErrback(self._on_error)
+    d.addErrback(_on_err)
     return d
