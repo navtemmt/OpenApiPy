@@ -5,7 +5,7 @@ Handles volume conversion and order placement.
 
 from config_loader import get_multi_account_config
 from symbol_mapper import SymbolMapper
-from app_state import logger
+from app_state import logger, alert_trade_failure, alert_trade_warning
 
 
 def _snap_volume_units(
@@ -88,10 +88,20 @@ def _calc_volume_units(account_name, client, config, symbol_id: int, mt5_symbol:
     resolved_symbol = _resolve_ctrader_symbol_name(client, symbol_id, fallback=mt5_symbol)
 
     if symbol is None:
-        logger.error(
-            f"[{account_name}] Missing cTrader symbol_details for mt5_symbol={mt5_symbol} "
+        msg = (
+            f"Missing cTrader symbol_details for mt5_symbol={mt5_symbol} "
             f"resolved_symbol={resolved_symbol} symbolId={symbol_id}. "
             f"Wait for symbols to load before trading."
+        )
+        logger.error(f"[{account_name}] {msg}")
+        alert_trade_warning(
+            account_name=account_name,
+            action="volume_conversion_missing_symbol_details",
+            ticket=0,
+            message=msg,
+            mt5_symbol=mt5_symbol,
+            resolved_symbol=resolved_symbol,
+            symbol_id=symbol_id,
         )
         return 0
 
@@ -101,10 +111,24 @@ def _calc_volume_units(account_name, client, config, symbol_id: int, mt5_symbol:
     step_units = int(getattr(symbol, "stepVolume", 0) or 0)
 
     if lot_size <= 0 or min_units <= 0 or step_units <= 0:
-        logger.error(
-            f"[{account_name}] Invalid cTrader symbol specs for mt5_symbol={mt5_symbol} "
+        msg = (
+            f"Invalid cTrader symbol specs for mt5_symbol={mt5_symbol} "
             f"resolved_symbol={resolved_symbol} symbolId={symbol_id}: "
             f"lotSize={lot_size}, minVolume={min_units}, stepVolume={step_units}, maxVolume={max_units}"
+        )
+        logger.error(f"[{account_name}] {msg}")
+        alert_trade_warning(
+            account_name=account_name,
+            action="volume_conversion_invalid_symbol_specs",
+            ticket=0,
+            message=msg,
+            mt5_symbol=mt5_symbol,
+            resolved_symbol=resolved_symbol,
+            symbol_id=symbol_id,
+            lot_size=lot_size,
+            min_units=min_units,
+            max_units=max_units,
+            step_units=step_units,
         )
         return 0
 
@@ -134,11 +158,33 @@ def copy_open_to_account(
 ):
     """Execute a new market order on cTrader for a given account."""
 
-    symbol_id = _map_symbol_id(client, config, mt5_symbol)
+    try:
+        symbol_id = _map_symbol_id(client, config, mt5_symbol)
+    except Exception as e:
+        alert_trade_failure(
+            account_name=account_name,
+            action="map_symbol_market_open",
+            ticket=int(ticket),
+            exc=e,
+            mt5_symbol=mt5_symbol,
+            side=side,
+            volume=volume,
+            magic=magic,
+        )
+        raise
+
     if symbol_id is None:
-        logger.error(
-            f"[{account_name}] Could not map MT5 symbol to cTrader symbolId | "
-            f"ticket={ticket} mt5_symbol={mt5_symbol}"
+        msg = f"Could not map MT5 symbol to cTrader symbolId | ticket={ticket} mt5_symbol={mt5_symbol}"
+        logger.error(f"[{account_name}] {msg}")
+        alert_trade_warning(
+            account_name=account_name,
+            action="map_symbol_market_open_none",
+            ticket=int(ticket),
+            message=msg,
+            mt5_symbol=mt5_symbol,
+            side=side,
+            volume=volume,
+            magic=magic,
         )
         return
 
@@ -163,9 +209,20 @@ def copy_open_to_account(
     )
 
     if volume_to_send <= 0:
-        logger.warning(
-            f"[{account_name}] Skipping zero or negative volume | "
+        msg = (
+            f"Skipping zero or negative volume | "
             f"ticket={ticket} symbol={resolved_symbol} symbolId={symbol_id}"
+        )
+        logger.warning(f"[{account_name}] {msg}")
+        alert_trade_warning(
+            account_name=account_name,
+            action="market_open_zero_volume",
+            ticket=int(ticket),
+            message=msg,
+            mt5_symbol=mt5_symbol,
+            resolved_symbol=resolved_symbol,
+            symbol_id=symbol_id,
+            adjusted_lots=adjusted_lots,
         )
         return
 
@@ -196,9 +253,20 @@ def copy_open_to_account(
         return response
 
     except Exception as e:
-        logger.error(
-            f"[{account_name}] Failed to open position | "
-            f"ticket={ticket} symbol={resolved_symbol} symbolId={symbol_id} error={e}"
+        alert_trade_failure(
+            account_name=account_name,
+            action="send_market_order",
+            ticket=int(ticket),
+            exc=e,
+            mt5_symbol=mt5_symbol,
+            resolved_symbol=resolved_symbol,
+            symbol_id=symbol_id,
+            side=trade_side,
+            volume_units=volume_to_send,
+            adjusted_lots=adjusted_lots,
+            sl=sl,
+            tp=tp,
+            magic=magic,
         )
         raise
 
@@ -227,11 +295,35 @@ def copy_pending_to_account(
     expiration_ms: optional (ms since epoch), 0 means no expiry
     """
 
-    symbol_id = _map_symbol_id(client, config, mt5_symbol)
+    try:
+        symbol_id = _map_symbol_id(client, config, mt5_symbol)
+    except Exception as e:
+        alert_trade_failure(
+            account_name=account_name,
+            action="map_symbol_pending_open",
+            ticket=int(ticket),
+            exc=e,
+            mt5_symbol=mt5_symbol,
+            side=side,
+            volume=volume,
+            magic=magic,
+            pending_type=pending_type,
+        )
+        raise
+
     if symbol_id is None:
-        logger.error(
-            f"[{account_name}] Could not map MT5 symbol to cTrader symbolId | "
-            f"ticket={ticket} mt5_symbol={mt5_symbol}"
+        msg = f"Could not map MT5 symbol to cTrader symbolId | ticket={ticket} mt5_symbol={mt5_symbol}"
+        logger.error(f"[{account_name}] {msg}")
+        alert_trade_warning(
+            account_name=account_name,
+            action="map_symbol_pending_open_none",
+            ticket=int(ticket),
+            message=msg,
+            mt5_symbol=mt5_symbol,
+            side=side,
+            volume=volume,
+            magic=magic,
+            pending_type=pending_type,
         )
         return
 
@@ -256,27 +348,57 @@ def copy_pending_to_account(
     )
 
     if volume_to_send <= 0:
-        logger.warning(
-            f"[{account_name}] Skipping zero or negative pending volume | "
+        msg = (
+            f"Skipping zero or negative pending volume | "
             f"ticket={ticket} symbol={resolved_symbol} symbolId={symbol_id}"
+        )
+        logger.warning(f"[{account_name}] {msg}")
+        alert_trade_warning(
+            account_name=account_name,
+            action="pending_open_zero_volume",
+            ticket=int(ticket),
+            message=msg,
+            mt5_symbol=mt5_symbol,
+            resolved_symbol=resolved_symbol,
+            symbol_id=symbol_id,
+            adjusted_lots=adjusted_lots,
+            pending_type=pending_type,
         )
         return
 
     trade_side = "BUY" if str(side or "").upper() in ("BUY", "LONG") else "SELL"
     ptype = (pending_type or "").strip().lower()
 
-    sl_r = client.round_price_for_symbol(symbol_id, float(sl)) if sl and float(sl) > 0 else None
-    tp_r = client.round_price_for_symbol(symbol_id, float(tp)) if tp and float(tp) > 0 else None
-    stop_r = (
-        client.round_price_for_symbol(symbol_id, float(stop_price))
-        if stop_price and float(stop_price) > 0
-        else 0.0
-    )
-    limit_r = (
-        client.round_price_for_symbol(symbol_id, float(limit_price))
-        if limit_price and float(limit_price) > 0
-        else 0.0
-    )
+    try:
+        sl_r = client.round_price_for_symbol(symbol_id, float(sl)) if sl and float(sl) > 0 else None
+        tp_r = client.round_price_for_symbol(symbol_id, float(tp)) if tp and float(tp) > 0 else None
+        stop_r = (
+            client.round_price_for_symbol(symbol_id, float(stop_price))
+            if stop_price and float(stop_price) > 0
+            else 0.0
+        )
+        limit_r = (
+            client.round_price_for_symbol(symbol_id, float(limit_price))
+            if limit_price and float(limit_price) > 0
+            else 0.0
+        )
+    except Exception as e:
+        alert_trade_failure(
+            account_name=account_name,
+            action="round_pending_prices",
+            ticket=int(ticket),
+            exc=e,
+            mt5_symbol=mt5_symbol,
+            resolved_symbol=resolved_symbol,
+            symbol_id=symbol_id,
+            side=trade_side,
+            pending_type=ptype,
+            sl=sl,
+            tp=tp,
+            stop_price=stop_price,
+            limit_price=limit_price,
+        )
+        raise
 
     logger.info(
         f"[{account_name}] Creating pending {ptype.upper()} {trade_side} | "
@@ -307,8 +429,23 @@ def copy_pending_to_account(
         return resp
 
     except Exception as e:
-        logger.error(
-            f"[{account_name}] Failed to create pending order | "
-            f"ticket={ticket} symbol={resolved_symbol} symbolId={symbol_id} error={e}"
+        alert_trade_failure(
+            account_name=account_name,
+            action="send_pending_order",
+            ticket=int(ticket),
+            exc=e,
+            mt5_symbol=mt5_symbol,
+            resolved_symbol=resolved_symbol,
+            symbol_id=symbol_id,
+            side=trade_side,
+            volume_units=volume_to_send,
+            adjusted_lots=adjusted_lots,
+            pending_type=ptype,
+            stop_price=stop_r,
+            limit_price=limit_r,
+            sl=sl_r,
+            tp=tp_r,
+            expiration_ms=int(expiration_ms or 0),
+            magic=magic,
         )
         raise
