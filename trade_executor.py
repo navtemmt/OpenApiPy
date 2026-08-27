@@ -25,18 +25,25 @@ def _base_context(
     stop_price=None,
     limit_price=None,
     expiration_ms=None,
+    reason=None,
 ):
     ctx = {}
     if account_name is not None:
-        ctx["account_name"] = account_name
+        ctx["account_name"] = str(account_name)
     if ticket is not None:
-        ctx["ticket"] = int(ticket)
+        try:
+            ctx["ticket"] = int(ticket)
+        except Exception:
+            ctx["ticket"] = ticket
     if mt5_symbol is not None:
         ctx["mt5_symbol"] = str(mt5_symbol)
     if resolved_symbol is not None:
         ctx["resolved_symbol"] = str(resolved_symbol)
     if symbol_id is not None:
-        ctx["symbol_id"] = int(symbol_id)
+        try:
+            ctx["symbol_id"] = int(symbol_id)
+        except Exception:
+            ctx["symbol_id"] = symbol_id
     if side is not None:
         ctx["side"] = str(side)
     if volume is not None:
@@ -48,7 +55,10 @@ def _base_context(
     if adjusted_lots is not None:
         ctx["adjusted_lots"] = float(adjusted_lots)
     if volume_units is not None:
-        ctx["volume_units"] = int(volume_units)
+        try:
+            ctx["volume_units"] = int(volume_units)
+        except Exception:
+            ctx["volume_units"] = volume_units
     if sl is not None:
         ctx["sl"] = sl
     if tp is not None:
@@ -58,8 +68,27 @@ def _base_context(
     if limit_price is not None:
         ctx["limit_price"] = limit_price
     if expiration_ms is not None:
-        ctx["expiration_ms"] = int(expiration_ms)
+        try:
+            ctx["expiration_ms"] = int(expiration_ms)
+        except Exception:
+            ctx["expiration_ms"] = expiration_ms
+    if reason is not None:
+        ctx["reason"] = str(reason)
     return ctx
+
+
+def _to_float(value, default=0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _to_int(value, default=0) -> int:
+    try:
+        return int(float(value))
+    except Exception:
+        return int(default)
 
 
 def _normalize_trade_side(side: str) -> str:
@@ -91,7 +120,21 @@ def _normalize_pending_type(pending_type: str) -> str:
         "buystoplimit": "stop_limit",
         "sellstoplimit": "stop_limit",
     }
-    return aliases.get(ptype, ptype)
+    normalized = aliases.get(ptype, ptype)
+    if normalized not in ("limit", "stop", "stop_limit"):
+        raise ValueError(f"Unsupported pending type: {pending_type}")
+    return normalized
+
+
+def _clamp_lots(config, lots: float) -> float:
+    raw_lots = float(lots or 0.0)
+    min_lot = float(getattr(config, "min_lot_size", 0.01) or 0.01)
+    max_lot = float(getattr(config, "max_lot_size", 100.0) or 100.0)
+
+    if max_lot < min_lot:
+        max_lot = min_lot
+
+    return max(min_lot, min(raw_lots, max_lot))
 
 
 def _snap_volume_units(
@@ -117,6 +160,8 @@ def _snap_volume_units(
 
     if min_units and int(min_units) > 0:
         v = max(v, int(min_units))
+    if max_units and int(max_units) > 0:
+        v = min(v, int(max_units))
 
     return int(v)
 
@@ -126,7 +171,7 @@ def _map_symbol_id(client, config, mt5_symbol: str):
         prefix=getattr(config, "symbol_prefix", ""),
         suffix=getattr(config, "symbol_suffix", ""),
         custom_map=getattr(config, "custom_symbols", {}),
-        broker_symbol_map=client.symbol_name_to_id,
+        broker_symbol_map=getattr(client, "symbol_name_to_id", {}) or {},
         strict=True,
     )
     return mapper.get_symbol_id(mt5_symbol)
@@ -155,6 +200,25 @@ def _resolve_ctrader_symbol_name(client, symbol_id: int, fallback: str = "") -> 
     return str(fallback or f"symbolId={symbol_id}")
 
 
+def _get_symbol_details(client, symbol_id: int):
+    try:
+        return client.symbol_details.get(int(symbol_id)) if hasattr(client, "symbol_details") else None
+    except Exception:
+        return None
+
+
+def _round_price_or_none(client, symbol_id: int, price):
+    price_f = _to_float(price, 0.0)
+    if price_f <= 0:
+        return None
+    return client.round_price_for_symbol(int(symbol_id), float(price_f))
+
+
+def _normalize_expiration_ms(expiration_ms) -> int:
+    value = _to_int(expiration_ms, 0)
+    return value if value > 0 else 0
+
+
 def _should_copy(account_name, config, mt5_symbol, magic, volume):
     multi_config = get_multi_account_config()
     should_copy, reason = multi_config.should_copy_trade(config, mt5_symbol, magic, volume)
@@ -179,7 +243,7 @@ def _calc_volume_units(account_name, client, config, symbol_id: int, mt5_symbol:
     """
     Convert MT5 lots -> cTrader volume UNITS using cTrader symbol lotSize, then snap.
     """
-    symbol = client.symbol_details.get(symbol_id) if hasattr(client, "symbol_details") else None
+    symbol = _get_symbol_details(client, symbol_id)
     resolved_symbol = _resolve_ctrader_symbol_name(client, symbol_id, fallback=mt5_symbol)
 
     if symbol is None:
@@ -222,10 +286,6 @@ def _calc_volume_units(account_name, client, config, symbol_id: int, mt5_symbol:
                 resolved_symbol=resolved_symbol,
                 symbol_id=symbol_id,
             ),
-            lot_size=lot_size,
-            min_units=min_units,
-            max_units=max_units,
-            step_units=step_units,
         )
         return 0
 
@@ -297,11 +357,8 @@ def copy_open_to_account(
 
     try:
         trade_side = _normalize_trade_side(side)
-        adjusted_lots = getattr(config, "lot_multiplier", 1.0) * float(volume)
-        adjusted_lots = max(
-            float(getattr(config, "min_lot_size", 0.01)),
-            min(adjusted_lots, float(getattr(config, "max_lot_size", 100.0))),
-        )
+        multiplier = float(getattr(config, "lot_multiplier", 1.0) or 1.0)
+        adjusted_lots = _clamp_lots(config, multiplier * float(volume))
     except Exception as e:
         notify_error(
             event="prepare_market_open",
@@ -481,11 +538,8 @@ def copy_pending_to_account(
     try:
         trade_side = _normalize_trade_side(side)
         ptype = _normalize_pending_type(pending_type)
-        adjusted_lots = getattr(config, "lot_multiplier", 1.0) * float(volume)
-        adjusted_lots = max(
-            float(getattr(config, "min_lot_size", 0.01)),
-            min(adjusted_lots, float(getattr(config, "max_lot_size", 100.0))),
-        )
+        multiplier = float(getattr(config, "lot_multiplier", 1.0) or 1.0)
+        adjusted_lots = _clamp_lots(config, multiplier * float(volume))
     except Exception as e:
         notify_error(
             event="prepare_pending_open",
@@ -536,18 +590,19 @@ def copy_pending_to_account(
         return
 
     try:
-        sl_r = client.round_price_for_symbol(symbol_id, float(sl)) if sl and float(sl) > 0 else None
-        tp_r = client.round_price_for_symbol(symbol_id, float(tp)) if tp and float(tp) > 0 else None
-        stop_r = (
-            client.round_price_for_symbol(symbol_id, float(stop_price))
-            if stop_price and float(stop_price) > 0
-            else 0.0
-        )
-        limit_r = (
-            client.round_price_for_symbol(symbol_id, float(limit_price))
-            if limit_price and float(limit_price) > 0
-            else 0.0
-        )
+        sl_r = _round_price_or_none(client, symbol_id, sl)
+        tp_r = _round_price_or_none(client, symbol_id, tp)
+        stop_r = _round_price_or_none(client, symbol_id, stop_price)
+        limit_r = _round_price_or_none(client, symbol_id, limit_price)
+        expiration_ms_n = _normalize_expiration_ms(expiration_ms)
+
+        if ptype == "limit" and limit_r is None:
+            raise ValueError("Pending LIMIT order requires limit_price > 0")
+        if ptype == "stop" and stop_r is None:
+            raise ValueError("Pending STOP order requires stop_price > 0")
+        if ptype == "stop_limit" and (stop_r is None or limit_r is None):
+            raise ValueError("Pending STOP_LIMIT order requires both stop_price > 0 and limit_price > 0")
+
     except Exception as e:
         notify_error(
             event="round_pending_prices",
@@ -560,11 +615,12 @@ def copy_pending_to_account(
                 resolved_symbol=resolved_symbol,
                 symbol_id=symbol_id,
                 side=trade_side,
-                pending_type=ptype,
+                pending_type=ptype if "ptype" in locals() else pending_type,
                 sl=sl,
                 tp=tp,
                 stop_price=stop_price,
                 limit_price=limit_price,
+                expiration_ms=expiration_ms,
             ),
         )
         raise
@@ -574,7 +630,7 @@ def copy_pending_to_account(
         f"ticket={ticket} symbol={resolved_symbol} symbolId={symbol_id} mt5_symbol={mt5_symbol} | "
         f"Volume={volume_to_send} units ({adjusted_lots:.4f} lots before cTrader snap) | "
         f"stop={stop_r} limit={limit_r} SL={sl_r} TP={tp_r} | "
-        f"Label=MT5_{ticket} | expiry_ms={int(expiration_ms or 0)}"
+        f"Label=MT5_{ticket} | expiry_ms={expiration_ms_n}"
     )
 
     try:
@@ -589,7 +645,7 @@ def copy_pending_to_account(
             sl=sl_r,
             tp=tp_r,
             label=f"MT5_{ticket}",
-            expiration_ms=int(expiration_ms or 0),
+            expiration_ms=expiration_ms_n,
         )
         logger.info(
             f"[{account_name}] Pending order submitted | "
@@ -612,7 +668,7 @@ def copy_pending_to_account(
                 limit_price=limit_r,
                 sl=sl_r,
                 tp=tp_r,
-                expiration_ms=int(expiration_ms or 0),
+                expiration_ms=expiration_ms_n,
                 magic=magic,
             ),
         )
@@ -637,7 +693,7 @@ def copy_pending_to_account(
                 limit_price=limit_r,
                 sl=sl_r,
                 tp=tp_r,
-                expiration_ms=int(expiration_ms or 0),
+                expiration_ms=expiration_ms_n,
                 magic=magic,
             ),
         )
