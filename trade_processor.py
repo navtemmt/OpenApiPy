@@ -5,6 +5,7 @@ Supports one MT5 magic -> multiple cTrader destination accounts.
 """
 
 import time
+from threading import Lock
 
 from app_state import (
     logger,
@@ -23,6 +24,9 @@ _PENDING_SLTP_MAX_AGE_MS = 5 * 60 * 1000
 _PENDING_SLTP_BASE_RETRY_MS = 350
 _PENDING_SLTP_MAX_RETRY_MS = 5000
 _PENDING_SLTP_MAX_ATTEMPTS = 12
+
+_PENDING_SLTP_LOCK = Lock()
+_MASTER_LOTS_LOCK = Lock()
 
 
 def _build_account_symbol_mapper(client, config) -> SymbolMapper:
@@ -84,7 +88,8 @@ def _to_bool(value, default=False):
 
 
 def _pending_sltp_bucket(account_name: str) -> dict:
-    return PENDING_SLTP.setdefault(str(account_name), {})
+    with _PENDING_SLTP_LOCK:
+        return PENDING_SLTP.setdefault(str(account_name), {})
 
 
 def _next_pending_retry_delay_ms(attempts: int) -> int:
@@ -94,42 +99,48 @@ def _next_pending_retry_delay_ms(attempts: int) -> int:
 
 
 def _set_pending_sltp(account_name: str, ticket: int, symbol: str, sl: float, tp: float):
-    existing = _pending_sltp_bucket(account_name).get(int(ticket), {})
+    ticket = int(ticket)
     now_ms = _now_ms()
-    _pending_sltp_bucket(account_name)[int(ticket)] = {
-        "symbol": symbol,
-        "sl": float(sl or 0.0),
-        "tp": float(tp or 0.0),
-        "created_ms": existing.get("created_ms", now_ms),
-        "updated_ms": now_ms,
-        "attempts": 0,
-        "next_retry_ms": now_ms,
-        "last_error": None,
-        "last_position_id": existing.get("last_position_id"),
-    }
+    with _PENDING_SLTP_LOCK:
+        bucket = PENDING_SLTP.setdefault(str(account_name), {})
+        existing = bucket.get(ticket, {})
+        bucket[ticket] = {
+            "symbol": symbol,
+            "sl": float(sl or 0.0),
+            "tp": float(tp or 0.0),
+            "created_ms": existing.get("created_ms", now_ms),
+            "updated_ms": now_ms,
+            "attempts": 0,
+            "next_retry_ms": now_ms,
+            "last_error": None,
+            "last_position_id": existing.get("last_position_id"),
+        }
 
 
 def _get_pending_sltp(account_name: str, ticket: int):
-    return _pending_sltp_bucket(account_name).get(int(ticket))
+    with _PENDING_SLTP_LOCK:
+        return PENDING_SLTP.setdefault(str(account_name), {}).get(int(ticket))
 
 
 def _clear_pending_sltp(account_name: str, ticket: int):
-    _pending_sltp_bucket(account_name).pop(int(ticket), None)
+    with _PENDING_SLTP_LOCK:
+        PENDING_SLTP.setdefault(str(account_name), {}).pop(int(ticket), None)
 
 
 def _touch_pending_sltp_retry(account_name: str, ticket: int, error: str = None, position_id=None):
-    pending = _get_pending_sltp(account_name, ticket)
-    if not pending:
-        return
+    with _PENDING_SLTP_LOCK:
+        pending = PENDING_SLTP.setdefault(str(account_name), {}).get(int(ticket))
+        if not pending:
+            return
 
-    attempts = int(pending.get("attempts", 0) or 0) + 1
-    delay_ms = _next_pending_retry_delay_ms(attempts - 1)
-    pending["attempts"] = attempts
-    pending["next_retry_ms"] = _now_ms() + delay_ms
-    pending["last_error"] = error
-    pending["updated_ms"] = _now_ms()
-    if position_id:
-        pending["last_position_id"] = int(position_id)
+        attempts = int(pending.get("attempts", 0) or 0) + 1
+        delay_ms = _next_pending_retry_delay_ms(attempts - 1)
+        pending["attempts"] = attempts
+        pending["next_retry_ms"] = _now_ms() + delay_ms
+        pending["last_error"] = error
+        pending["updated_ms"] = _now_ms()
+        if position_id:
+            pending["last_position_id"] = int(position_id)
 
 
 def _pending_sltp_expired(pending: dict) -> bool:
@@ -950,6 +961,22 @@ def _get_target_account_contexts(data, account_manager):
     return contexts
 
 
+def _safe_symbol_id_or_warn(account_name, client, config, ticket, mt5_symbol, action_name):
+    symbol_id = _get_symbol_id_for_account(client, config, mt5_symbol)
+    if symbol_id is None:
+        msg = f"{action_name} ignored for ticket {ticket} (symbol mapping failed for {mt5_symbol})"
+        logger.warning(f"[{account_name}] {msg}")
+        alert_trade_warning(
+            account_name=account_name,
+            action=f"{action_name.lower()}_symbol_mapping_failed",
+            ticket=int(ticket),
+            message=msg,
+            mt5_symbol=mt5_symbol,
+        )
+        return None
+    return int(symbol_id)
+
+
 def try_apply_pending_sltp(account_name, client, config, ticket, account_manager, force=False):
     pending = _get_pending_sltp(account_name, int(ticket))
     if not pending:
@@ -1045,7 +1072,8 @@ def drain_pending_sltp_repairs(account_manager, account_name=None, force=False):
         if account_name is not None:
             scanned_accounts = [str(account_name)]
         else:
-            scanned_accounts = list(PENDING_SLTP.keys())
+            with _PENDING_SLTP_LOCK:
+                scanned_accounts = list(PENDING_SLTP.keys())
     except Exception:
         scanned_accounts = []
 
@@ -1056,7 +1084,9 @@ def drain_pending_sltp_repairs(account_manager, account_name=None, force=False):
             if not client or not config:
                 continue
 
-            pending_bucket = dict(_pending_sltp_bucket(name))
+            with _PENDING_SLTP_LOCK:
+                pending_bucket = dict(PENDING_SLTP.setdefault(name, {}))
+
             for ticket in list(pending_bucket.keys()):
                 if try_apply_pending_sltp(
                     account_name=name,
@@ -1159,9 +1189,23 @@ def handle_open_event(data, account_manager):
         f"EntryPrice: {entry_price}, StartupRecovery: {is_startup_recovery}"
     )
 
+    if ticket <= 0:
+        msg = "OPEN ignored: invalid ticket"
+        logger.warning(msg)
+        alert_trade_warning(
+            account_name="router",
+            action="open_invalid_ticket",
+            ticket=ticket,
+            message=msg,
+            magic=magic,
+            mt5_symbol=mt5_symbol,
+        )
+        return
+
     if src_volume > 0:
-        MASTER_OPEN_LOTS[int(ticket)] = float(src_volume)
-        MASTER_CLOSED_LOTS[int(ticket)] = 0.0
+        with _MASTER_LOTS_LOCK:
+            MASTER_OPEN_LOTS[int(ticket)] = float(src_volume)
+            MASTER_CLOSED_LOTS[int(ticket)] = 0.0
 
     contexts = _get_target_account_contexts(data, account_manager)
     if not contexts:
@@ -1510,18 +1554,10 @@ def handle_pending_modify_event(data, account_manager):
                 )
                 continue
 
-            symbol_id = _get_symbol_id_for_account(client, config, mt5_symbol)
+            symbol_id = _safe_symbol_id_or_warn(
+                account_name, client, config, ticket, mt5_symbol, "pending_modify"
+            )
             if symbol_id is None:
-                msg = f"PENDING_MODIFY ignored for ticket {ticket} (symbol mapping failed for {mt5_symbol})"
-                logger.warning(f"[{account_name}] {msg}")
-                alert_trade_warning(
-                    account_name=account_name,
-                    action="pending_modify_symbol_mapping_failed",
-                    ticket=ticket,
-                    message=msg,
-                    mt5_symbol=mt5_symbol,
-                    order_id=order_id,
-                )
                 continue
 
             client.amend_pending_order(
@@ -1637,9 +1673,11 @@ def handle_modify_event(data, account_manager):
     for account_name, client, config in contexts:
         try:
             position_id = account_manager.get_position_id(account_name, ticket)
-            symbol_id = _get_symbol_id_for_account(client, config, mt5_symbol)
+            symbol_id = _safe_symbol_id_or_warn(
+                account_name, client, config, ticket, mt5_symbol, "modify"
+            )
 
-            if position_id:
+            if position_id and symbol_id is not None:
                 try:
                     client.amend_position(
                         account_id=config.account_id,
@@ -1707,8 +1745,10 @@ def handle_close_event(data, account_manager):
 
     logger.info(f"CLOSE event - Ticket: {ticket}, Symbol: {mt5_symbol}, close_lots={close_lots}")
 
-    master_open_lots = float(MASTER_OPEN_LOTS.get(int(ticket), 0) or 0)
-    master_closed_lots = float(MASTER_CLOSED_LOTS.get(int(ticket), 0) or 0)
+    with _MASTER_LOTS_LOCK:
+        master_open_lots = float(MASTER_OPEN_LOTS.get(int(ticket), 0) or 0)
+        master_closed_lots = float(MASTER_CLOSED_LOTS.get(int(ticket), 0) or 0)
+
     master_remaining_lots = max(0.0, master_open_lots - master_closed_lots)
 
     proportional_pct = None
@@ -1737,7 +1777,13 @@ def handle_close_event(data, account_manager):
                 _clear_pending_sltp(account_name, ticket)
                 continue
 
-            symbol_id = _get_symbol_id_for_account(client, config, mt5_symbol)
+            symbol_id = _safe_symbol_id_or_warn(
+                account_name, client, config, ticket, mt5_symbol, "close"
+            )
+            if symbol_id is None:
+                _clear_pending_sltp(account_name, ticket)
+                continue
+
             rm = _risk_mode(config)
             follower_units = account_manager.get_position_volume(account_name, position_id)
 
@@ -1818,11 +1864,13 @@ def handle_close_event(data, account_manager):
             )
 
     if close_lots is not None:
-        MASTER_CLOSED_LOTS[int(ticket)] = master_closed_lots + float(close_lots)
+        with _MASTER_LOTS_LOCK:
+            MASTER_CLOSED_LOTS[int(ticket)] = master_closed_lots + float(close_lots)
 
     try:
         if close_lots is None:
-            MASTER_OPEN_LOTS.pop(int(ticket), None)
-            MASTER_CLOSED_LOTS.pop(int(ticket), None)
+            with _MASTER_LOTS_LOCK:
+                MASTER_OPEN_LOTS.pop(int(ticket), None)
+                MASTER_CLOSED_LOTS.pop(int(ticket), None)
     except Exception:
         pass
