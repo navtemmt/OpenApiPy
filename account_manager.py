@@ -20,7 +20,7 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
 from trade_processor import _enforce_max_risk_on_fill, notify_position_update
 from app_state import logger, notify_error, notify_warning, notify_info
 
-# One-shot debug: confirm which _on_spot_event implementation is live
+
 try:
     logger.info(
         "DEBUG CTraderClient._on_spot_event SOURCE:\n%s",
@@ -46,6 +46,20 @@ class AccountManager:
         self.auth_seen: Dict[str, bool] = {}
         self.route_magic_map: Dict[int, str] = {}
         self.shared_token_files: Dict[str, str] = {}
+
+    @staticmethod
+    def _to_int(value, default=0) -> int:
+        try:
+            return int(float(value))
+        except Exception:
+            return int(default)
+
+    @staticmethod
+    def _to_float(value, default=None):
+        try:
+            return float(value)
+        except Exception:
+            return default
 
     @staticmethod
     def _extract_position_label(pos) -> str:
@@ -127,13 +141,13 @@ class AccountManager:
     def _config_account_id(config: AccountConfig) -> Optional[int]:
         try:
             v = getattr(config, "account_id", None)
-            if v is not None:
+            if v is not None and str(v).strip() != "":
                 return int(v)
         except Exception:
             pass
         try:
             v = getattr(config, "accountid", None)
-            if v is not None:
+            if v is not None and str(v).strip() != "":
                 return int(v)
         except Exception:
             pass
@@ -201,14 +215,22 @@ class AccountManager:
         configured_state_file = self._safe_str(getattr(account, "token_state_file", ""))
 
         existing = self.shared_token_files.get(token_key)
-        if existing:
+        if existing is not None:
             if configured_state_file and configured_state_file != existing:
-                msg = f"Shared token group detected; overriding token_state_file {configured_state_file} -> {existing}"
+                msg = (
+                    f"Shared token group detected; overriding token_state_file "
+                    f"{configured_state_file} -> {existing}"
+                )
                 logger.warning("[%s] %s", account.name, msg)
                 notify_warning(
                     event="shared_token_state_override",
                     message=msg,
-                    **self._notify_ctx(account.name, token_group=token_key, configured_state_file=configured_state_file, canonical_state_file=existing),
+                    **self._notify_ctx(
+                        account.name,
+                        token_group=token_key,
+                        configured_state_file=configured_state_file,
+                        canonical_state_file=existing,
+                    ),
                 )
             return existing or None
 
@@ -263,6 +285,312 @@ class AccountManager:
         self.route_magic_map[int(route_magic)] = account.name
         logger.info("[%s] Registered route magic %s", account.name, int(route_magic))
 
+    def _unregister_route_magic(self, account_name: str):
+        stale = [magic for magic, name in self.route_magic_map.items() if name == account_name]
+        for magic in stale:
+            self.route_magic_map.pop(magic, None)
+            logger.info("[%s] Unregistered route magic %s", account_name, magic)
+
+    def _cache_funds_from_reconcile(self, account_name: str, reconcile_res):
+        eq, bal = self._extract_account_equity_balance(reconcile_res)
+        if eq is not None:
+            self.account_equity[account_name] = float(eq)
+        if bal is not None:
+            self.account_balance[account_name] = float(bal)
+
+        if eq is not None or bal is not None:
+            logger.info(
+                "[%s] Funds cached: equity=%s, balance=%s",
+                account_name,
+                self.account_equity.get(account_name),
+                self.account_balance.get(account_name),
+            )
+
+    def _store_order_mapping(self, account_name: str, mt5_ticket: int, order_id: int):
+        self._ensure_account_maps(account_name)
+        self.order_maps[account_name][int(mt5_ticket)] = int(order_id)
+        logger.info(
+            "[%s] MT5 ticket %s -> cTrader orderId %s",
+            account_name,
+            int(mt5_ticket),
+            int(order_id),
+        )
+
+    def _store_position_mapping(self, account_name: str, mt5_ticket: int, position_id: int):
+        self._ensure_account_maps(account_name)
+        self.position_maps[account_name][int(mt5_ticket)] = int(position_id)
+        notify_position_update(account_name, int(mt5_ticket), self)
+        logger.info(
+            "[%s] MT5 ticket %s -> cTrader positionId %s",
+            account_name,
+            int(mt5_ticket),
+            int(position_id),
+        )
+
+    def _store_position_volume(self, account_name: str, position_id: int, volume: int):
+        if int(position_id) <= 0:
+            return
+
+        self._ensure_account_maps(account_name)
+
+        if int(volume or 0) > 0:
+            self.position_volumes[account_name][int(position_id)] = int(volume)
+            logger.info(
+                "[%s] positionId %s volume=%s cached",
+                account_name,
+                int(position_id),
+                int(volume),
+            )
+        else:
+            self.position_volumes[account_name].pop(int(position_id), None)
+
+    def _handle_execution_order(self, account_name: str, extracted):
+        order = getattr(extracted, "order", None)
+        if order is None:
+            return
+
+        order_id = int(getattr(order, "orderId", 0) or 0)
+        label = self._extract_order_label(order)
+        ticket = self._label_to_ticket(label)
+
+        if order_id and ticket is not None:
+            self._store_order_mapping(account_name, int(ticket), int(order_id))
+
+    def _handle_execution_position(self, account_name: str, extracted):
+        pos = getattr(extracted, "position", None)
+        if pos is None:
+            return
+
+        exec_type = getattr(extracted, "executionType", None)
+        position_id = int(getattr(pos, "positionId", 0) or 0)
+        label = self._extract_position_label(pos)
+        ticket = self._label_to_ticket(label)
+        volume = self._extract_position_volume(pos)
+
+        if position_id and ticket is not None:
+            self._store_position_mapping(account_name, int(ticket), int(position_id))
+
+        if position_id:
+            self._store_position_volume(account_name, int(position_id), int(volume))
+
+        if position_id:
+            logger.info(
+                "[%s] (exec pos) positionId=%s ticket=%s volume=%s exec_type=%s",
+                account_name,
+                position_id,
+                ticket,
+                volume,
+                exec_type,
+            )
+
+        self._try_enforce_max_risk_on_fill(account_name, extracted, pos, position_id, ticket)
+
+    def _try_enforce_max_risk_on_fill(self, account_name: str, extracted, pos, position_id: int, ticket: Optional[int]):
+        try:
+            if not position_id or ticket is None:
+                return
+
+            from ctrader_open_api.messages.OpenApiMessages_pb2 import (
+                ProtoOAExecutionType,
+                ProtoOAPositionStatus,
+            )
+
+            pos_status = getattr(pos, "positionStatus", None)
+            exec_type = getattr(extracted, "executionType", None)
+            is_open = pos_status == ProtoOAPositionStatus.POSITION_STATUS_OPEN
+            is_fill = exec_type == ProtoOAExecutionType.ORDER_FILLED
+
+            if not (is_open and is_fill):
+                return
+
+            config = self.get_config(account_name)
+            client_obj = self.get_client(account_name)
+            if not config or not client_obj:
+                return
+
+            symbol_id = int(
+                getattr(
+                    getattr(pos, "tradeData", None) or pos,
+                    "symbolId",
+                    0,
+                ) or 0
+            )
+            if symbol_id <= 0:
+                return
+
+            symbol = None
+            if hasattr(client_obj, "symbol_details"):
+                symbol = client_obj.symbol_details.get(symbol_id)
+
+            mt5_data = self.mt5_payloads.get(account_name, {}).get(int(ticket), None)
+
+            if symbol is not None:
+                _enforce_max_risk_on_fill(
+                    account_name=account_name,
+                    client=client_obj,
+                    config=config,
+                    account_manager=self,
+                    position=pos,
+                    symbol=symbol,
+                    mt5_symbol=None,
+                    mt5_data=mt5_data,
+                )
+        except Exception as e:
+            logger.debug("[%s] over-risk enforce failed: %s", account_name, e, exc_info=True)
+
+    def _handle_reconcile_positions(self, account_name: str, extracted) -> int:
+        count = 0
+        pos_list = list(getattr(extracted, "position", []) or [])
+
+        active_position_ids = set()
+
+        for pos in pos_list:
+            position_id = int(getattr(pos, "positionId", 0) or 0)
+            if not position_id:
+                continue
+
+            active_position_ids.add(int(position_id))
+
+            label = self._extract_position_label(pos)
+            ticket = self._label_to_ticket(label)
+            vol = self._extract_position_volume(pos)
+
+            self._store_position_volume(account_name, int(position_id), int(vol))
+
+            if ticket is not None:
+                self._store_position_mapping(account_name, int(ticket), int(position_id))
+                logger.info(
+                    "[%s] (reconcile pos) MT5 ticket %s -> cTrader positionId %s volume=%s",
+                    account_name,
+                    int(ticket),
+                    int(position_id),
+                    int(vol),
+                )
+                count += 1
+
+        stale_ids = [
+            pid for pid in self.position_volumes.get(account_name, {}).keys()
+            if pid not in active_position_ids
+        ]
+        for pid in stale_ids:
+            self.position_volumes[account_name].pop(pid, None)
+            logger.info("[%s] Removed stale cached volume for positionId %s", account_name, pid)
+
+        return count
+
+    def _handle_reconcile_orders(self, account_name: str, extracted) -> int:
+        order_count = 0
+        order_list = list(getattr(extracted, "order", []) or [])
+
+        active_order_ids = set()
+        active_order_tickets = set()
+
+        for order in order_list:
+            order_id = int(getattr(order, "orderId", 0) or 0)
+            label = self._extract_order_label(order)
+            ticket = self._label_to_ticket(label)
+
+            if order_id:
+                active_order_ids.add(int(order_id))
+
+            if order_id and ticket is not None:
+                active_order_tickets.add(int(ticket))
+                self._store_order_mapping(account_name, int(ticket), int(order_id))
+                logger.info(
+                    "[%s] (reconcile order) MT5 ticket %s -> cTrader orderId %s",
+                    account_name,
+                    int(ticket),
+                    int(order_id),
+                )
+                order_count += 1
+
+        stale_tickets = [
+            t for t in self.order_maps.get(account_name, {}).keys()
+            if t not in active_order_tickets
+        ]
+        for t in stale_tickets:
+            self.order_maps[account_name].pop(t, None)
+
+        return order_count
+
+    def _process_reconcile(self, account_name: str, extracted):
+        self._cache_funds_from_reconcile(account_name, extracted)
+
+        count = self._handle_reconcile_positions(account_name, extracted)
+
+        try:
+            order_count = self._handle_reconcile_orders(account_name, extracted)
+        except Exception as e:
+            logger.debug("[%s] Failed parsing reconcile orders", account_name, exc_info=True)
+            notify_error(
+                event="reconcile_parse_orders",
+                message="Failed parsing reconcile orders",
+                exc=e,
+                **self._notify_ctx(account_name),
+            )
+            order_count = 0
+
+        logger.info(
+            "[%s] Reconcile complete: %s MT5 positions (%s positions with volume cached), %s orders mapped",
+            account_name,
+            count,
+            len(self.position_volumes[account_name]),
+            order_count,
+        )
+
+    def _process_message(self, account_name: str, message):
+        self._ensure_account_maps(account_name)
+        extracted = Protobuf.extract(message)
+
+        if isinstance(extracted, ProtoOAAccountAuthRes):
+            if not self.auth_seen.get(account_name, False):
+                self.auth_seen[account_name] = True
+                logger.info("✓ Account %s connected and authenticated", account_name)
+                notify_info(
+                    event="account_authenticated",
+                    message="cTrader account authenticated",
+                    **self._notify_ctx(account_name),
+                )
+            self._send_reconcile_request(account_name)
+            return
+
+        if isinstance(extracted, ProtoOAExecutionEvent):
+            logger.info("[%s] RAW EXECUTION: %s", account_name, extracted)
+            self._handle_execution_order(account_name, extracted)
+            self._handle_execution_position(account_name, extracted)
+            return
+
+        if isinstance(extracted, ProtoOAReconcileRes):
+            self.reconcile_requested[account_name] = False
+            self._process_reconcile(account_name, extracted)
+            return
+
+        if not hasattr(extracted, "position"):
+            return
+
+        pos = extracted.position
+        position_id = int(getattr(pos, "positionId", 0) or 0)
+        if not position_id:
+            return
+
+        label = self._extract_position_label(pos)
+        ticket = self._label_to_ticket(label)
+        if ticket is None:
+            return
+
+        self._store_position_mapping(account_name, int(ticket), int(position_id))
+
+        vol = self._extract_position_volume(pos)
+        self._store_position_volume(account_name, int(position_id), int(vol))
+
+        logger.info(
+            "[%s] updated MT5 ticket %s -> cTrader positionId %s, volume=%s",
+            account_name,
+            int(ticket),
+            int(position_id),
+            int(vol),
+        )
+
     def _send_reconcile_request(self, account_name: str):
         client = self.get_client(account_name)
         config = self.get_config(account_name)
@@ -304,6 +632,7 @@ class AccountManager:
                 try:
                     extracted = Protobuf.extract(result)
                     if isinstance(extracted, ProtoOAReconcileRes):
+                        self.reconcile_requested[account_name] = False
                         logger.info("[%s] Reconcile response processed", account_name)
                     else:
                         logger.info(
@@ -312,6 +641,7 @@ class AccountManager:
                             type(extracted).__name__,
                         )
                 except Exception as e:
+                    self.reconcile_requested[account_name] = False
                     logger.warning("[%s] Failed to process reconcile response: %s", account_name, e)
                     notify_error(
                         event="reconcile_callback_parse",
@@ -345,6 +675,16 @@ class AccountManager:
         if not account.enabled:
             logger.info("Skipping disabled account: %s", account.name)
             return
+
+        if account.name in self.clients:
+            msg = "Account already initialized; replacing existing client"
+            logger.warning("[%s] %s", account.name, msg)
+            notify_warning(
+                event="account_reinitialized",
+                message=msg,
+                **self._notify_ctx(account.name),
+            )
+            self._unregister_route_magic(account.name)
 
         logger.info("Initializing account: %s", account.name)
 
@@ -382,213 +722,7 @@ class AccountManager:
 
         def on_message(message, acc_name=account.name):
             try:
-                self._ensure_account_maps(acc_name)
-                extracted = Protobuf.extract(message)
-
-                if isinstance(extracted, ProtoOAAccountAuthRes):
-                    if not self.auth_seen.get(acc_name, False):
-                        self.auth_seen[acc_name] = True
-                        logger.info("✓ Account %s connected and authenticated", acc_name)
-                        notify_info(
-                            event="account_authenticated",
-                            message="cTrader account authenticated",
-                            **self._notify_ctx(acc_name),
-                        )
-                    self._send_reconcile_request(acc_name)
-                    return
-
-                if isinstance(extracted, ProtoOAExecutionEvent):
-                    logger.info("[%s] RAW EXECUTION: %s", acc_name, extracted)
-
-                    exec_type = getattr(extracted, "executionType", None)
-
-                    order = getattr(extracted, "order", None)
-                    if order is not None:
-                        order_id = int(getattr(order, "orderId", 0) or 0)
-                        olabel = self._extract_order_label(order)
-                        oticket = self._label_to_ticket(olabel)
-                        if order_id and oticket is not None:
-                            self.order_maps[acc_name][int(oticket)] = int(order_id)
-                            logger.info(
-                                "[%s] (exec order) MT5 ticket %s -> cTrader orderId %s",
-                                acc_name,
-                                int(oticket),
-                                int(order_id),
-                            )
-
-                    pos = getattr(extracted, "position", None)
-                    if pos is not None:
-                        position_id = int(getattr(pos, "positionId", 0) or 0)
-                        label = self._extract_position_label(pos)
-                        ticket = self._label_to_ticket(label)
-
-                        if position_id and ticket is not None:
-                            self.position_maps[acc_name][int(ticket)] = position_id
-                            notify_position_update(acc_name, int(ticket), self)
-                            logger.info(
-                                "[%s] (exec pos) MT5 ticket %s -> cTrader positionId %s",
-                                acc_name,
-                                int(ticket),
-                                position_id,
-                            )
-
-                        vol = self._extract_position_volume(pos)
-                        if position_id and vol > 0:
-                            self.position_volumes[acc_name][position_id] = int(vol)
-                            logger.info(
-                                "[%s] (exec vol) positionId %s volume=%s (exec_type=%s)",
-                                acc_name,
-                                position_id,
-                                vol,
-                                exec_type,
-                            )
-
-                        try:
-                            if position_id and ticket is not None:
-                                from ctrader_open_api.messages.OpenApiMessages_pb2 import (
-                                    ProtoOAExecutionType,
-                                    ProtoOAPositionStatus,
-                                )
-
-                                pos_status = getattr(pos, "positionStatus", None)
-                                is_open = pos_status == ProtoOAPositionStatus.POSITION_STATUS_OPEN
-                                is_fill = exec_type == ProtoOAExecutionType.ORDER_FILLED
-
-                                if is_open and is_fill:
-                                    config = self.get_config(acc_name)
-                                    if config:
-                                        symbol_id = int(
-                                            getattr(
-                                                getattr(pos, "tradeData", None) or pos,
-                                                "symbolId",
-                                                0,
-                                            ) or 0
-                                        )
-                                        symbol = None
-                                        client_obj = self.get_client(acc_name)
-                                        if client_obj and hasattr(client_obj, "symbol_details"):
-                                            symbol = client_obj.symbol_details.get(symbol_id)
-
-                                        mt5_data = self.mt5_payloads.get(acc_name, {}).get(int(ticket), None)
-
-                                        if symbol is not None:
-                                            _enforce_max_risk_on_fill(
-                                                account_name=acc_name,
-                                                client=client_obj,
-                                                config=config,
-                                                account_manager=self,
-                                                position=pos,
-                                                symbol=symbol,
-                                                mt5_symbol=None,
-                                                mt5_data=mt5_data,
-                                            )
-                        except Exception as e:
-                            logger.debug("[%s] over-risk enforce failed: %s", acc_name, e)
-
-                    return
-
-                if isinstance(extracted, ProtoOAReconcileRes):
-                    eq, bal = self._extract_account_equity_balance(extracted)
-                    if eq is not None:
-                        self.account_equity[acc_name] = float(eq)
-                    if bal is not None:
-                        self.account_balance[acc_name] = float(bal)
-
-                    if eq is not None or bal is not None:
-                        logger.info(
-                            "[%s] Funds cached: equity=%s, balance=%s",
-                            acc_name,
-                            self.account_equity.get(acc_name),
-                            self.account_balance.get(acc_name),
-                        )
-
-                    count = 0
-                    pos_list = list(getattr(extracted, "position", []) or [])
-                    for pos in pos_list:
-                        position_id = int(getattr(pos, "positionId", 0) or 0)
-                        if not position_id:
-                            continue
-
-                        label = self._extract_position_label(pos)
-                        ticket = self._label_to_ticket(label)
-                        vol = self._extract_position_volume(pos)
-
-                        if vol > 0:
-                            self.position_volumes[acc_name][position_id] = int(vol)
-
-                        if ticket is not None:
-                            self.position_maps[acc_name][int(ticket)] = position_id
-                            notify_position_update(acc_name, int(ticket), self)
-                            logger.info(
-                                "[%s] (reconcile pos) MT5 ticket %s -> cTrader positionId %s volume=%s",
-                                acc_name,
-                                int(ticket),
-                                position_id,
-                                vol,
-                            )
-                            count += 1
-
-                    order_count = 0
-                    try:
-                        for o in list(getattr(extracted, "order", []) or []):
-                            order_id = int(getattr(o, "orderId", 0) or 0)
-                            olabel = self._extract_order_label(o)
-                            oticket = self._label_to_ticket(olabel)
-                            if order_id and oticket is not None:
-                                self.order_maps[acc_name][int(oticket)] = int(order_id)
-                                logger.info(
-                                    "[%s] (reconcile order) MT5 ticket %s -> cTrader orderId %s",
-                                    acc_name,
-                                    int(oticket),
-                                    int(order_id),
-                                )
-                                order_count += 1
-                    except Exception as e:
-                        logger.debug("[%s] Failed parsing reconcile orders", acc_name, exc_info=True)
-                        notify_error(
-                            event="reconcile_parse_orders",
-                            message="Failed parsing reconcile orders",
-                            exc=e,
-                            **self._notify_ctx(acc_name),
-                        )
-
-                    logger.info(
-                        "[%s] Reconcile complete: %s MT5 positions (%s positions with volume cached), %s orders mapped",
-                        acc_name,
-                        count,
-                        len(self.position_volumes[acc_name]),
-                        order_count,
-                    )
-                    return
-
-                if not hasattr(extracted, "position"):
-                    return
-
-                pos = extracted.position
-                position_id = int(getattr(pos, "positionId", 0) or 0)
-                if not position_id:
-                    return
-
-                label = self._extract_position_label(pos)
-                ticket = self._label_to_ticket(label)
-                if ticket is None:
-                    return
-
-                self.position_maps[acc_name][int(ticket)] = position_id
-                notify_position_update(acc_name, int(ticket), self)
-
-                vol = self._extract_position_volume(pos)
-                if vol > 0:
-                    self.position_volumes[acc_name][position_id] = int(vol)
-
-                logger.info(
-                    "[%s] updated MT5 ticket %s -> cTrader positionId %s, volume=%s",
-                    acc_name,
-                    int(ticket),
-                    position_id,
-                    vol,
-                )
-
+                self._process_message(acc_name, message)
             except Exception as e:
                 notify_error(
                     event="account_message_callback",
@@ -675,9 +809,12 @@ class AccountManager:
 
     def remove_mapping(self, account_name: str, mt5_ticket: int):
         try:
-            self.position_maps.get(account_name, {}).pop(int(mt5_ticket), None)
-            self.order_maps.get(account_name, {}).pop(int(mt5_ticket), None)
-            self.mt5_payloads.get(account_name, {}).pop(int(mt5_ticket), None)
+            ticket = int(mt5_ticket)
+            pos_id = self.position_maps.get(account_name, {}).pop(ticket, None)
+            self.order_maps.get(account_name, {}).pop(ticket, None)
+            self.mt5_payloads.get(account_name, {}).pop(ticket, None)
+            if pos_id:
+                self.position_volumes.get(account_name, {}).pop(int(pos_id), None)
         except Exception:
             pass
 
