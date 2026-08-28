@@ -40,6 +40,48 @@ DEFAULT_AUTH_TIMEOUT_SEC = 15
 TOKEN_REFRESH_URL = "https://openapi.ctrader.com/apps/token"
 
 
+def _notify_ctx(self, **extra):
+    ctx = {
+        "account_name": getattr(self, "account_name", None),
+        "account_id": getattr(self, "account_id", None),
+        "environment": getattr(self, "env", None),
+        "host": getattr(self, "host", None),
+        "token_source": getattr(self, "current_token_source", None),
+        "is_connected": getattr(self, "is_connected", None),
+        "is_app_authed": getattr(self, "is_app_authed", None),
+        "is_account_authed": getattr(self, "is_account_authed", None),
+    }
+    ctx.update(extra)
+    return ctx
+
+
+def _notify_info(self, message: str, event: str, **extra):
+    fn = getattr(self, "notify_info", None)
+    if callable(fn):
+        try:
+            return fn(event=event, message=message, **_notify_ctx(self, **extra))
+        except Exception:
+            pass
+
+
+def _notify_warning(self, message: str, event: str, **extra):
+    fn = getattr(self, "notify_warning", None)
+    if callable(fn):
+        try:
+            return fn(event=event, message=message, **_notify_ctx(self, **extra))
+        except Exception:
+            pass
+
+
+def _notify_error(self, message: str, event: str, exc=None, **extra):
+    fn = getattr(self, "notify_error", None)
+    if callable(fn):
+        try:
+            return fn(event=event, message=message, exc=exc, **_notify_ctx(self, **extra))
+        except Exception:
+            pass
+
+
 def _get_auth_timeout_sec(self) -> int:
     try:
         v = int(
@@ -98,12 +140,19 @@ def _mark_auth_dead(self, reason: str) -> None:
     self.is_account_authed = False
     self.auth_failed = True
     self.auth_failure_reason = reason
+
     logger.critical(
         "[%s] Account auth unrecoverable. Bot is NOT authorized and will not copy trades "
         "until credentials are fixed. account_id=%s reason=%s",
         getattr(self, "account_name", None) or getattr(self, "account_id", None),
         getattr(self, "account_id", None),
         reason,
+    )
+    _notify_error(
+        self,
+        event="ctrader_account_auth_dead",
+        message="Account authentication became unrecoverable",
+        reason=reason,
     )
 
 
@@ -123,6 +172,12 @@ def _refresh_access_token(self, reason: str = "") -> bool:
                 getattr(self, "account_name", None) or getattr(self, "account_id", None),
                 reason,
             )
+            _notify_warning(
+                self,
+                event="ctrader_refresh_missing_refresh_token",
+                message="Cannot refresh cTrader token because refresh_token is missing",
+                reason=reason,
+            )
             return False
 
         client_id = getattr(self, "client_id", "") or ""
@@ -131,6 +186,11 @@ def _refresh_access_token(self, reason: str = "") -> bool:
             logger.error(
                 "[%s] Cannot refresh token: client_id/client_secret missing",
                 getattr(self, "account_name", None) or getattr(self, "account_id", None),
+            )
+            _notify_error(
+                self,
+                event="ctrader_refresh_missing_client_credentials",
+                message="Cannot refresh cTrader token because client credentials are missing",
             )
             return False
 
@@ -161,6 +221,13 @@ def _refresh_access_token(self, reason: str = "") -> bool:
             _mask_token(refresh_token),
             reason,
         )
+        _notify_warning(
+            self,
+            event="ctrader_refresh_attempt",
+            message="Attempting cTrader token refresh",
+            reason=reason,
+            refresh_token=_mask_token(refresh_token),
+        )
 
         try:
             with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
@@ -178,12 +245,41 @@ def _refresh_access_token(self, reason: str = "") -> bool:
                 getattr(e, "code", None),
                 body,
             )
+            _notify_error(
+                self,
+                event="ctrader_refresh_http_error",
+                message="Token refresh HTTP error",
+                exc=e,
+                http_status=getattr(e, "code", None),
+                response_body=body[:1000],
+            )
             return False
         except Exception as e:
             logger.exception(
                 "[%s] Token refresh request failed: %s",
                 getattr(self, "account_name", None) or getattr(self, "account_id", None),
                 e,
+            )
+            _notify_error(
+                self,
+                event="ctrader_refresh_request_failed",
+                message="Token refresh request failed",
+                exc=e,
+                reason=reason,
+            )
+            return False
+
+        if not isinstance(payload, dict):
+            logger.error(
+                "[%s] Token refresh response is not a JSON object payload=%r",
+                getattr(self, "account_name", None) or getattr(self, "account_id", None),
+                payload,
+            )
+            _notify_error(
+                self,
+                event="ctrader_refresh_invalid_payload",
+                message="Token refresh response is not a JSON object",
+                response_type=type(payload).__name__,
             )
             return False
 
@@ -201,6 +297,12 @@ def _refresh_access_token(self, reason: str = "") -> bool:
                 "[%s] Token refresh response missing access token payload=%s",
                 getattr(self, "account_name", None) or getattr(self, "account_id", None),
                 payload,
+            )
+            _notify_error(
+                self,
+                event="ctrader_refresh_missing_access_token",
+                message="Token refresh response did not include an access token",
+                payload_preview=str(payload)[:1000],
             )
             return False
 
@@ -223,6 +325,13 @@ def _refresh_access_token(self, reason: str = "") -> bool:
             expires_in,
             expires_at,
         )
+        _notify_info(
+            self,
+            event="ctrader_refresh_success",
+            message="cTrader token refresh succeeded",
+            expires_in=expires_in,
+            expires_at=expires_at,
+        )
         return True
 
     return bool(_run_with_shared_token_lock(self, _do_refresh))
@@ -236,9 +345,20 @@ def _recover_account_auth(self, reason: str) -> None:
     3. Try bootstrap/.env fallback once
     4. Mark auth dead
     """
+    if getattr(self, "auth_failed", False):
+        logger.warning(
+            "[%s] Recovery skipped because auth is already marked dead. reason=%s",
+            getattr(self, "account_name", None) or getattr(self, "account_id", None),
+            reason,
+        )
+        return
+
+    self.is_account_authed = False
     _sync_shared_tokens(self, reason="recover_start")
 
     steps = getattr(self, "_auth_recovery_steps", set())
+    if not isinstance(steps, set):
+        steps = set()
 
     if "refresh" not in steps and getattr(self, "refresh_token", None):
         steps.add("refresh")
@@ -247,6 +367,12 @@ def _recover_account_auth(self, reason: str) -> None:
             logger.warning(
                 "[%s] Retrying account authorization after successful refresh",
                 getattr(self, "account_name", None) or getattr(self, "account_id", None),
+            )
+            _notify_warning(
+                self,
+                event="ctrader_reauth_after_refresh",
+                message="Retrying account authorization after token refresh",
+                reason=reason,
             )
             authorize_account(self)
             return
@@ -262,6 +388,12 @@ def _recover_account_auth(self, reason: str) -> None:
             logger.warning(
                 "[%s] Retrying account authorization with .env fallback tokens",
                 getattr(self, "account_name", None) or getattr(self, "account_id", None),
+            )
+            _notify_warning(
+                self,
+                event="ctrader_reauth_after_env_fallback",
+                message="Retrying account authorization with bootstrap tokens",
+                reason=reason,
             )
             authorize_account(self)
             return
@@ -280,6 +412,7 @@ def _recover_account_auth(self, reason: str) -> None:
 
 def authenticate_app(self) -> None:
     timeout_sec = _get_auth_timeout_sec(self)
+    self.is_app_authed = False
 
     logger.info(
         "Authenticating application... client_id=%s timeout=%ss",
@@ -289,6 +422,11 @@ def authenticate_app(self) -> None:
 
     if not self.client_id or not self.client_secret:
         logger.error("Client ID / Secret missing")
+        _notify_error(
+            self,
+            event="ctrader_app_auth_missing_client_credentials",
+            message="Client ID / Secret missing before app authentication",
+        )
         return
 
     req = ProtoOAApplicationAuthReq()
@@ -303,14 +441,21 @@ def authenticate_app(self) -> None:
             d.addTimeout(timeout_sec, self.client.reactor)
         except Exception:
             logger.debug("Unable to attach addTimeout() to app auth deferred", exc_info=True)
-    except Exception:
+    except Exception as e:
         logger.exception("Failed to send application auth request")
+        _notify_error(
+            self,
+            event="ctrader_app_auth_send_failed",
+            message="Failed to send application auth request",
+            exc=e,
+        )
         return
 
     def _ok(result):
         return on_app_auth_success(self, result)
 
     def _err(failure):
+        self.is_app_authed = False
         if failure.check(TwistedTimeoutError):
             logger.error(
                 "Application auth timed out after %ss for account_id=%s env=%s",
@@ -318,11 +463,23 @@ def authenticate_app(self) -> None:
                 getattr(self, "account_id", None),
                 getattr(self, "host", None),
             )
+            _notify_error(
+                self,
+                event="ctrader_app_auth_timeout",
+                message=f"Application auth timed out after {timeout_sec}s",
+                exc=Exception(str(failure)),
+            )
         else:
             logger.error(
                 "Application auth failed for account_id=%s: %s",
                 getattr(self, "account_id", None),
                 failure,
+            )
+            _notify_error(
+                self,
+                event="ctrader_app_auth_failed",
+                message="Application auth failed",
+                exc=Exception(_failure_text(failure)),
             )
         return self._on_error(failure)
 
@@ -333,16 +490,33 @@ def authenticate_app(self) -> None:
 def on_app_auth_success(self, result) -> None:
     try:
         payload = Protobuf.extract(result)
-    except Exception:
+    except Exception as e:
         logger.exception("Failed to extract app auth response")
+        _notify_error(
+            self,
+            event="ctrader_app_auth_extract_failed",
+            message="Failed to extract app auth response",
+            exc=e,
+        )
         return
 
     if not isinstance(payload, ProtoOAApplicationAuthRes):
         logger.error("Unexpected app auth response type: %s", type(payload))
+        _notify_error(
+            self,
+            event="ctrader_app_auth_unexpected_response",
+            message="Unexpected app auth response type",
+            response_type=type(payload).__name__,
+        )
         return
 
     logger.info("Application authenticated successfully")
     self.is_app_authed = True
+    _notify_info(
+        self,
+        event="ctrader_app_auth_success",
+        message="Application authenticated successfully",
+    )
 
     _sync_shared_tokens(self, reason="post_app_auth")
 
@@ -357,6 +531,11 @@ def on_app_auth_success(self, result) -> None:
         logger.warning(
             "Account credentials not set yet (call set_account_credentials before connect())"
         )
+        _notify_warning(
+            self,
+            event="ctrader_account_credentials_not_set",
+            message="Account credentials not set yet; call set_account_credentials before connect",
+        )
 
 
 # ----------------------------------------------------------------------
@@ -367,14 +546,32 @@ def on_app_auth_success(self, result) -> None:
 def authorize_account(self) -> None:
     timeout_sec = _get_auth_timeout_sec(self)
 
+    if getattr(self, "auth_failed", False):
+        logger.warning(
+            "[%s] authorize_account skipped because auth is marked dead",
+            getattr(self, "account_name", None) or getattr(self, "account_id", None),
+        )
+        return
+
     if not self.is_app_authed:
         logger.warning("Cannot authorize account before app authentication")
+        _notify_warning(
+            self,
+            event="ctrader_account_auth_before_app_auth",
+            message="Cannot authorize account before app authentication",
+        )
         return
 
     if not self.account_id:
         logger.error("Account ID missing")
+        _notify_error(
+            self,
+            event="ctrader_account_auth_missing_account_id",
+            message="Account ID missing before account authentication",
+        )
         return
 
+    self.is_account_authed = False
     _sync_shared_tokens(self, reason="before_authorize_account")
 
     if not self.access_token:
@@ -409,8 +606,14 @@ def authorize_account(self) -> None:
                 "Unable to attach addTimeout() to account auth deferred",
                 exc_info=True,
             )
-    except Exception:
+    except Exception as e:
         logger.exception("Failed to send account auth request")
+        _notify_error(
+            self,
+            event="ctrader_account_auth_send_failed",
+            message="Failed to send account auth request",
+            exc=e,
+        )
         _recover_account_auth(self, "send account auth request failed")
         return
 
@@ -426,11 +629,23 @@ def authorize_account(self) -> None:
                 self.account_id,
             )
             reason = f"account auth timeout after {timeout_sec}s"
+            _notify_error(
+                self,
+                event="ctrader_account_auth_timeout",
+                message=reason,
+                exc=Exception(str(failure)),
+            )
         else:
             logger.error(
                 "Account auth failed for account_id=%s: %s",
                 self.account_id,
                 failure,
+            )
+            _notify_error(
+                self,
+                event="ctrader_account_auth_failed",
+                message="Account auth failed",
+                exc=Exception(reason),
             )
 
         _recover_account_auth(self, reason)
@@ -443,12 +658,24 @@ def authorize_account(self) -> None:
 def on_account_auth_success(self, result) -> None:
     try:
         payload = Protobuf.extract(result)
-    except Exception:
+    except Exception as e:
         logger.exception("Failed to extract account auth response")
+        _notify_error(
+            self,
+            event="ctrader_account_auth_extract_failed",
+            message="Failed to extract account auth response",
+            exc=e,
+        )
         return
 
     if not isinstance(payload, ProtoOAAccountAuthRes):
         logger.error("Unexpected account auth response type: %s", type(payload))
+        _notify_error(
+            self,
+            event="ctrader_account_auth_unexpected_response",
+            message="Unexpected account auth response type",
+            response_type=type(payload).__name__,
+        )
         _recover_account_auth(self, f"unexpected account auth response type {type(payload)}")
         return
 
@@ -462,11 +689,23 @@ def on_account_auth_success(self, result) -> None:
         getattr(self, "current_token_source", None),
     )
     self.is_account_authed = True
+    _notify_info(
+        self,
+        event="ctrader_account_auth_success",
+        message="Account authorized successfully",
+        token_source=getattr(self, "current_token_source", None),
+    )
 
     if getattr(self, "current_token_source", None) == "env_fallback":
         self._save_token_state(source="env_fallback_recovered")
 
     try:
         self._load_symbol_map()
-    except Exception:
+    except Exception as e:
         logger.exception("Symbol map loading failed")
+        _notify_error(
+            self,
+            event="ctrader_symbol_map_load_failed_after_auth",
+            message="Symbol map loading failed after successful account auth",
+            exc=e,
+        )
