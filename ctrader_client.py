@@ -8,7 +8,7 @@ import json
 import os
 import time
 import threading
-from typing import Optional, Callable, Dict, Any, Iterable
+from typing import Optional, Callable, Dict, Any, Iterable, List
 
 from dotenv import load_dotenv
 from twisted.internet import reactor
@@ -90,7 +90,7 @@ class CTraderClient:
 
         self.host = (
             EndPoints.PROTOBUF_LIVE_HOST
-            if env == "live"
+            if str(env).strip().lower() == "live"
             else EndPoints.PROTOBUF_DEMO_HOST
         )
         self.port = EndPoints.PROTOBUF_PORT
@@ -136,12 +136,15 @@ class CTraderClient:
 
         self.heartbeat_task = None
         self.health_check_task = None
+        self._heartbeat_start_call = None
+        self._healthcheck_start_call = None
         self.heartbeat_interval = 30
         self.last_message_time = time.time()
         self.max_idle_time = 120
 
         self._on_connect_callback: Optional[Callable] = None
         self._on_message_callback: Optional[Callable] = None
+        self._state_lock = threading.RLock()
 
         self.client.setConnectedCallback(self._handle_connected)
         self.client.setDisconnectedCallback(self._handle_disconnected)
@@ -181,6 +184,20 @@ class CTraderClient:
             return token[:4] + "..."
         return f"{token[:6]}...{token[-4:]}"
 
+    @staticmethod
+    def _to_int(value, default=0) -> int:
+        try:
+            return int(float(value))
+        except Exception:
+            return int(default)
+
+    @staticmethod
+    def _normalize_string(value: Optional[str]) -> str:
+        try:
+            return str(value or "").strip()
+        except Exception:
+            return ""
+
     def _default_token_state_file(self) -> str:
         token_dir = os.getenv("CTRADER_TOKEN_STATE_DIR", "runtime_tokens")
         base_name = (self.account_name or str(self.account_id or "unknown")).strip()
@@ -190,6 +207,22 @@ class CTraderClient:
         if not path:
             return None
         return os.path.normpath(path)
+
+    def _normalize_symbol_ids(self, symbol_ids: Iterable[int]) -> List[int]:
+        normalized = []
+        seen = set()
+
+        for raw in list(symbol_ids or []):
+            try:
+                sid = int(raw)
+            except Exception:
+                continue
+            if sid <= 0 or sid in seen:
+                continue
+            seen.add(sid)
+            normalized.append(sid)
+
+        return normalized
 
     def _client_context(self, **extra) -> Dict[str, Any]:
         ctx = {
@@ -259,27 +292,28 @@ class CTraderClient:
         persist: bool = False,
         publish_shared: bool = True,
     ) -> None:
-        self.access_token = access_token or ""
-        self.refresh_token = refresh_token or self.refresh_token or ""
-        self.token_expires_at = int(expires_at) if expires_at else None
-        self.current_token_source = source
-        self.auth_failed = False
-        self.auth_failure_reason = None
+        with self._state_lock:
+            self.access_token = access_token or ""
+            self.refresh_token = refresh_token or self.refresh_token or ""
+            self.token_expires_at = int(expires_at) if expires_at else None
+            self.current_token_source = source
+            self.auth_failed = False
+            self.auth_failure_reason = None
 
-        if publish_shared:
-            self._publish_to_shared_state(source=source)
+            if publish_shared:
+                self._publish_to_shared_state(source=source)
 
-        logger.info(
-            "[%s] Runtime tokens updated source=%s access_token=%s refresh_present=%s expires_at=%s",
-            self.account_name or self.account_id,
-            source,
-            self._mask_token(self.access_token),
-            bool(self.refresh_token),
-            self.token_expires_at,
-        )
+            logger.info(
+                "[%s] Runtime tokens updated source=%s access_token=%s refresh_present=%s expires_at=%s",
+                self.account_name or self.account_id,
+                source,
+                self._mask_token(self.access_token),
+                bool(self.refresh_token),
+                self.token_expires_at,
+            )
 
-        if persist:
-            self._save_token_state(source=source)
+            if persist:
+                self._save_token_state(source=source)
 
     def _load_token_state(self) -> Optional[dict]:
         if not self.token_state_file:
@@ -489,6 +523,16 @@ class CTraderClient:
     def _sync_runtime_tokens_before_auth(self) -> None:
         self._sync_from_shared_state(reason="pre_auth")
 
+    def _cancel_delayed_starts(self):
+        for attr_name in ("_heartbeat_start_call", "_healthcheck_start_call"):
+            delayed = getattr(self, attr_name, None)
+            try:
+                if delayed is not None and delayed.active():
+                    delayed.cancel()
+            except Exception:
+                pass
+            setattr(self, attr_name, None)
+
     def with_shared_token_lock(self, fn: Callable[..., Any], *args: Any, **kwargs: Any):
         shared = self.shared_token_state
         if not shared:
@@ -496,8 +540,7 @@ class CTraderClient:
 
         with shared.lock:
             self._sync_from_shared_state(reason="lock_enter")
-            result = fn(*args, **kwargs)
-            return result
+            return fn(*args, **kwargs)
 
     def _client_send_with_timeout(self, req, timeout=None):
         effective_timeout = timeout
@@ -544,14 +587,17 @@ class CTraderClient:
             message="Connected to cTrader Open API",
             **self._client_context(),
         )
+
         self.is_connected = True
         self.last_message_time = time.time()
+        self._cancel_delayed_starts()
+        self._stop_periodic_tasks()
 
         self._sync_runtime_tokens_before_auth()
         self._authenticate_app()
 
-        reactor.callLater(5, self._start_heartbeat)
-        reactor.callLater(5, self._start_health_check)
+        self._heartbeat_start_call = reactor.callLater(5, self._start_heartbeat)
+        self._healthcheck_start_call = reactor.callLater(5, self._start_health_check)
 
         if self._on_connect_callback:
             try:
@@ -570,12 +616,15 @@ class CTraderClient:
             message=f"Disconnected from cTrader: {reason}",
             **self._client_context(reason=str(reason)),
         )
+
         self.is_connected = False
         self.is_app_authed = False
         self.is_account_authed = False
         self.symbol_name_to_id.clear()
         self.symbol_details.clear()
         self.spot_quotes.clear()
+
+        self._cancel_delayed_starts()
         self._stop_periodic_tasks()
 
         if self.auth_failed:
@@ -596,14 +645,14 @@ class CTraderClient:
             logger.debug(
                 "Received message payloadType=%s type=%s",
                 payload_type,
-                type(extracted),
+                type(extracted).__name__ if extracted is not None else None,
             )
         except Exception:
             logger.debug("Received raw message (extract failed): %r", message)
             extracted = None
 
         try:
-            if payload_type == PROTO_OA_SPOT_EVENT_TYPE:
+            if payload_type == PROTO_OA_SPOT_EVENT_TYPE and extracted is not None:
                 logger.debug("ROUTE: ProtoOASpotEvent by payloadType")
                 self._on_spot_event(extracted)
         except Exception:
@@ -685,19 +734,40 @@ class CTraderClient:
         return symbols_impl.snap_volume_for_symbol(self, symbol_id, volume_cents)
 
     def subscribe_spots(self, account_id: int, symbol_ids: Iterable[int]):
+        normalized_ids = self._normalize_symbol_ids(symbol_ids)
+        if not normalized_ids:
+            notify_warning(
+                event="ctrader_subscribe_spots_empty",
+                message="subscribe_spots called with no valid symbol ids",
+                **self._client_context(account_id=account_id),
+            )
+            return None
+
         req = ProtoOASubscribeSpotsReq()
         req.ctidTraderAccountId = int(account_id)
-        req.symbolId.extend([int(x) for x in symbol_ids if int(x) > 0])
+        req.symbolId.extend(normalized_ids)
         return self.send(req)
 
     def unsubscribe_spots(self, account_id: int, symbol_ids: Iterable[int]):
+        normalized_ids = self._normalize_symbol_ids(symbol_ids)
+        if not normalized_ids:
+            notify_warning(
+                event="ctrader_unsubscribe_spots_empty",
+                message="unsubscribe_spots called with no valid symbol ids",
+                **self._client_context(account_id=account_id),
+            )
+            return None
+
         req = ProtoOAUnsubscribeSpotsReq()
         req.ctidTraderAccountId = int(account_id)
-        req.symbolId.extend([int(x) for x in symbol_ids if int(x) > 0])
+        req.symbolId.extend(normalized_ids)
         return self.send(req)
 
     def get_last_quote(self, symbol_id: int) -> Optional[Dict[str, Any]]:
-        return self.spot_quotes.get(int(symbol_id))
+        try:
+            return self.spot_quotes.get(int(symbol_id))
+        except Exception:
+            return None
 
     def _on_error(self, failure):
         logger.error("Deferred error: %s", failure)
@@ -856,6 +926,7 @@ class CTraderClient:
 
     def stop(self):
         logger.info("Stopping reactor...")
+        self._cancel_delayed_starts()
         self._stop_periodic_tasks()
         if reactor.running:
             reactor.stop()
