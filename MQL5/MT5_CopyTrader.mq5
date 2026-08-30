@@ -3,7 +3,7 @@
 //| MT5 to cTrader Copy Trading EA                                   |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025"
-#property version   "1.15"
+#property version   "1.16"
 #property strict
 
 input string BridgeServerURL   = "http://127.0.0.1:3140";
@@ -31,18 +31,18 @@ input int    StateSyncMaxStartupRetries   = 3;
 #include <CopyTrader/CopyTrader_Trades.mqh>
 #include <CopyTrader/CopyTrader_Pendings.mqh>
 
-
 datetime g_lastStateSyncAt = 0;
 datetime g_lastStartupRetryAt = 0;
 int      g_startupSyncAttempts = 0;
 bool     g_stateSyncInProgress = false;
+bool     g_startupSyncCompleted = false;
 
 
 //+------------------------------------------------------------------+
 //| Execute a recovery/reconciliation pass.                          |
-//|                                                                    |
+//|                                                                  |
 //| Existing modules determine what is new/missing using their local |
-//| state lists and post only relevant OPEN/PENDING events.           |
+//| state lists and post only relevant OPEN/PENDING events.          |
 //+------------------------------------------------------------------+
 void RunStateSync(const string reason)
 {
@@ -64,17 +64,11 @@ void RunStateSync(const string reason)
       OrdersTotal()
    );
 
-   // Existing open MT5 market positions.
-   // Intended to recover positions missed while Python bridge was down.
    StartupSyncOpenTrades();
 
-   // Existing MT5 pending orders.
-   // First refreshes the baseline, then runs your existing pending
-   // change detector to emit PENDING_OPEN events when needed.
    if(CopyPendingOrders)
    {
-      UpdatePendingList();
-      CheckPendingChanges();
+      StartupSyncPendingOrders(reason);
    }
 
    g_lastStateSyncAt = TimeCurrent();
@@ -91,7 +85,75 @@ void RunStateSync(const string reason)
 
 
 //+------------------------------------------------------------------+
-//| Expert initialization                                             |
+//| Ask bridge whether recovery is needed.                           |
+//+------------------------------------------------------------------+
+bool BridgeNeedsStartupSync()
+{
+   if(!BridgeHealthCheck())
+   {
+      PrintFormat(
+         "Bridge health check failed | status=%d | error=%s",
+         BridgeLastStatusCode(),
+         BridgeLastError()
+      );
+      return true;
+   }
+
+   PrintFormat(
+      "Bridge health ok | status=%d | sync_required=%s | body=%s",
+      BridgeLastStatusCode(),
+      BridgeSyncRequired() ? "true" : "false",
+      BridgeLastResponseBody()
+   );
+
+   return BridgeSyncRequired();
+}
+
+
+//+------------------------------------------------------------------+
+//| Try startup sync only when required by the bridge.               |
+//+------------------------------------------------------------------+
+void TryStartupSyncIfNeeded(const string reason)
+{
+   bool syncRequired = BridgeNeedsStartupSync();
+
+   if(!syncRequired)
+   {
+      if(!g_startupSyncCompleted)
+      {
+         g_startupSyncCompleted = true;
+         PrintFormat(
+            "Startup sync not required | reason=%s",
+            reason
+         );
+      }
+      return;
+   }
+
+   RunStateSync(reason);
+
+   if(BridgeHealthCheck() && !BridgeSyncRequired())
+   {
+      g_startupSyncCompleted = true;
+      PrintFormat(
+         "Startup sync confirmed complete by bridge | reason=%s",
+         reason
+      );
+   }
+   else
+   {
+      PrintFormat(
+         "Startup sync requested but bridge still requires sync | reason=%s | status=%d | body=%s",
+         reason,
+         BridgeLastStatusCode(),
+         BridgeLastResponseBody()
+      );
+   }
+}
+
+
+//+------------------------------------------------------------------+
+//| Expert initialization                                            |
 //+------------------------------------------------------------------+
 int OnInit()
 {
@@ -144,10 +206,7 @@ int OnInit()
       RequestTimeout
    );
 
-   // Initial startup recovery. This is useful when both the EA and
-   // Python bridge come up together. Timed retries below handle the
-   // case where Python/cTrader is not ready yet.
-   RunStateSync("ea_init");
+   TryStartupSyncIfNeeded("ea_init");
 
    g_startupSyncAttempts = 1;
    g_lastStartupRetryAt = TimeCurrent();
@@ -162,7 +221,7 @@ int OnInit()
 
 
 //+------------------------------------------------------------------+
-//| Expert deinitialization                                           |
+//| Expert deinitialization                                          |
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
@@ -176,18 +235,16 @@ void OnDeinit(const int reason)
 
 
 //+------------------------------------------------------------------+
-//| Timer: bounded startup retries plus periodic drift recovery.      |
-//|                                                                    |
-//| The timer itself is lightweight. It only calls existing scan/post |
-//| logic on initial retries or when the fallback interval is due.    |
+//| Timer: bounded startup retries plus periodic drift recovery.     |
+//|                                                                  |
+//| The timer itself is lightweight. It only calls existing scan/post|
+//| logic on initial retries or when the fallback interval is due.   |
 //+------------------------------------------------------------------+
 void OnTimer()
 {
    datetime now = TimeCurrent();
 
-   // Startup retries make EA/bridge startup ordering less fragile.
-   // Example: EA starts while main.py or cTrader auth is still loading.
-   if(g_startupSyncAttempts < StateSyncMaxStartupRetries)
+   if(!g_startupSyncCompleted && g_startupSyncAttempts < StateSyncMaxStartupRetries)
    {
       if(
          g_lastStartupRetryAt == 0 ||
@@ -197,7 +254,7 @@ void OnTimer()
          g_startupSyncAttempts++;
          g_lastStartupRetryAt = now;
 
-         RunStateSync(
+         TryStartupSyncIfNeeded(
             StringFormat(
                "startup_retry_%d_of_%d",
                g_startupSyncAttempts,
@@ -216,12 +273,17 @@ void OnTimer()
       (now - g_lastStateSyncAt) >= StateSyncFallbackIntervalSec;
 
    if(fallbackDue)
-      RunStateSync("periodic_fallback");
+   {
+      if(BridgeNeedsStartupSync())
+         RunStateSync("periodic_bridge_requested");
+      else
+         RunStateSync("periodic_fallback");
+   }
 }
 
 
 //+------------------------------------------------------------------+
-//| Trade transaction event                                           |
+//| Trade transaction event                                          |
 //+------------------------------------------------------------------+
 void OnTradeTransaction(
    const MqlTradeTransaction &trans,
@@ -242,16 +304,13 @@ void OnTradeTransaction(
    if(CopyPendingOrders)
    {
       Pendings_OnTradeTransaction(trans);
-
-      // Backstop for unusual ordering or missing MT5 pending lifecycle
-      // events. Normal operation should remain driven by the event itself.
       CheckPendingChanges();
    }
 }
 
 
 //+------------------------------------------------------------------+
-//| Trade-list change event                                           |
+//| Trade-list change event                                          |
 //+------------------------------------------------------------------+
 void OnTrade()
 {
@@ -261,14 +320,12 @@ void OnTrade()
 
 
 //+------------------------------------------------------------------+
-//| Price tick event                                                  |
+//| Price tick event                                                 |
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   // Normal real-time market position copy path.
    CheckTradeChanges();
 
-   // Normal real-time pending order copy path.
    if(CopyPendingOrders)
       CheckPendingChanges();
 }
