@@ -3,7 +3,7 @@
 //| MT5 to cTrader Copy Trading EA                                   |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025"
-#property version   "1.16"
+#property version   "1.17"
 #property strict
 
 input string BridgeServerURL   = "http://127.0.0.1:3140";
@@ -12,17 +12,10 @@ input string MagicNumberFilter = "";
 input bool   CopyPendingOrders = true;
 
 // -------------------------------------------------------------------
-// State synchronization / recovery
-//
-// Timer runs frequently, but full reconciliation is controlled by
-// the intervals below. Existing Include modules remain responsible
-// for the actual bridge payloads and HTTP posts.
+// Bridge availability / startup sync
 // -------------------------------------------------------------------
-input bool   EnablePeriodicStateSync      = true;
-input int    StateSyncTimerIntervalSec    = 5;
-input int    StateSyncFallbackIntervalSec = 60;
-input int    StateSyncStartupRetrySec     = 10;
-input int    StateSyncMaxStartupRetries   = 3;
+input int    BridgeHealthCheckIntervalSec = 5;
+input int    BridgeDownAfterFailures      = 2;
 
 #include <CopyTrader/CopyTrader_State.mqh>
 #include <CopyTrader/CopyTrader_Common.mqh>
@@ -31,18 +24,31 @@ input int    StateSyncMaxStartupRetries   = 3;
 #include <CopyTrader/CopyTrader_Trades.mqh>
 #include <CopyTrader/CopyTrader_Pendings.mqh>
 
-datetime g_lastStateSyncAt = 0;
-datetime g_lastStartupRetryAt = 0;
-int      g_startupSyncAttempts = 0;
 bool     g_stateSyncInProgress = false;
-bool     g_startupSyncCompleted = false;
+bool     g_bridgeWasAvailable = false;
+int      g_bridgeHealthFailCount = 0;
+datetime g_lastBridgeHealthCheckAt = 0;
 
 
 //+------------------------------------------------------------------+
-//| Execute a recovery/reconciliation pass.                          |
-//|                                                                  |
-//| Existing modules determine what is new/missing using their local |
-//| state lists and post only relevant OPEN/PENDING events.          |
+//| Notify bridge that startup snapshot is complete                  |
+//+------------------------------------------------------------------+
+void SendSyncComplete(const string reason)
+{
+   string json = "{";
+   json += "\"event_type\":\"SYNC_COMPLETE\",";
+   json += "\"startupSync\":true,";
+   json += "\"startupRecovery\":true,";
+   json += "\"syncOrigin\":\"startup\",";
+   json += "\"reason\":\"" + JsonEscape(reason) + "\"";
+   json += "}";
+
+   SendToServer(json);
+}
+
+
+//+------------------------------------------------------------------+
+//| Execute a full recovery snapshot                                 |
 //+------------------------------------------------------------------+
 void RunStateSync(const string reason)
 {
@@ -67,11 +73,9 @@ void RunStateSync(const string reason)
    StartupSyncOpenTrades();
 
    if(CopyPendingOrders)
-   {
-      StartupSyncPendingOrders(reason);
-   }
+      StartupSyncPendingOrders("startup");
 
-   g_lastStateSyncAt = TimeCurrent();
+   SendSyncComplete(reason);
 
    PrintFormat(
       "State sync complete | reason=%s | tracked_positions=%d | tracked_pending=%d",
@@ -85,70 +89,50 @@ void RunStateSync(const string reason)
 
 
 //+------------------------------------------------------------------+
-//| Ask bridge whether recovery is needed.                           |
+//| Check whether bridge currently requests a resync                 |
 //+------------------------------------------------------------------+
-bool BridgeNeedsStartupSync()
+bool BridgeRequestsSyncNow()
 {
    if(!BridgeHealthCheck())
    {
+      g_bridgeHealthFailCount++;
+
+      if(g_bridgeHealthFailCount >= BridgeDownAfterFailures)
+      {
+         if(g_bridgeWasAvailable)
+         {
+            PrintFormat(
+               "Bridge marked unavailable after %d failed health checks",
+               g_bridgeHealthFailCount
+            );
+         }
+         g_bridgeWasAvailable = false;
+      }
+
       PrintFormat(
-         "Bridge health check failed | status=%d | error=%s",
+         "Bridge health check failed | failures=%d | status=%d | error=%s",
+         g_bridgeHealthFailCount,
          BridgeLastStatusCode(),
          BridgeLastError()
       );
-      return true;
+      return false;
    }
 
+   bool recovered = !g_bridgeWasAvailable && g_bridgeHealthFailCount >= BridgeDownAfterFailures;
+
+   g_bridgeWasAvailable = true;
+   g_bridgeHealthFailCount = 0;
+
    PrintFormat(
-      "Bridge health ok | status=%d | sync_required=%s | body=%s",
-      BridgeLastStatusCode(),
+      "Bridge health ok | sync_required=%s | body=%s",
       BridgeSyncRequired() ? "true" : "false",
       BridgeLastResponseBody()
    );
 
+   if(recovered)
+      Print("Bridge recovered after being unavailable");
+
    return BridgeSyncRequired();
-}
-
-
-//+------------------------------------------------------------------+
-//| Try startup sync only when required by the bridge.               |
-//+------------------------------------------------------------------+
-void TryStartupSyncIfNeeded(const string reason)
-{
-   bool syncRequired = BridgeNeedsStartupSync();
-
-   if(!syncRequired)
-   {
-      if(!g_startupSyncCompleted)
-      {
-         g_startupSyncCompleted = true;
-         PrintFormat(
-            "Startup sync not required | reason=%s",
-            reason
-         );
-      }
-      return;
-   }
-
-   RunStateSync(reason);
-
-   if(BridgeHealthCheck() && !BridgeSyncRequired())
-   {
-      g_startupSyncCompleted = true;
-      PrintFormat(
-         "Startup sync confirmed complete by bridge | reason=%s",
-         reason
-      );
-   }
-   else
-   {
-      PrintFormat(
-         "Startup sync requested but bridge still requires sync | reason=%s | status=%d | body=%s",
-         reason,
-         BridgeLastStatusCode(),
-         BridgeLastResponseBody()
-      );
-   }
 }
 
 
@@ -170,25 +154,19 @@ int OnInit()
       );
    }
 
-   if(StateSyncTimerIntervalSec < 1)
+   if(BridgeHealthCheckIntervalSec < 1)
    {
-      Print(
-         "ERROR StateSyncTimerIntervalSec must be at least 1 second."
-      );
+      Print("ERROR BridgeHealthCheckIntervalSec must be at least 1 second.");
       return(INIT_PARAMETERS_INCORRECT);
    }
 
-   if(StateSyncFallbackIntervalSec < StateSyncTimerIntervalSec)
+   if(BridgeDownAfterFailures < 1)
    {
-      PrintFormat(
-         "WARNING StateSyncFallbackIntervalSec=%d is below timer interval=%d; "
-         "it will effectively run every timer tick.",
-         StateSyncFallbackIntervalSec,
-         StateSyncTimerIntervalSec
-      );
+      Print("ERROR BridgeDownAfterFailures must be at least 1.");
+      return(INIT_PARAMETERS_INCORRECT);
    }
 
-   if(!EventSetTimer(StateSyncTimerIntervalSec))
+   if(!EventSetTimer(BridgeHealthCheckIntervalSec))
    {
       PrintFormat(
          "ERROR Failed to start EA timer. GetLastError=%d",
@@ -198,18 +176,16 @@ int OnInit()
    }
 
    PrintFormat(
-      "State sync configured | timer=%ds fallback=%ds startup_retry=%ds max_retries=%d HTTP_timeout=%dms",
-      StateSyncTimerIntervalSec,
-      StateSyncFallbackIntervalSec,
-      StateSyncStartupRetrySec,
-      StateSyncMaxStartupRetries,
+      "Bridge health configured | interval=%ds down_after_failures=%d HTTP_timeout=%dms",
+      BridgeHealthCheckIntervalSec,
+      BridgeDownAfterFailures,
       RequestTimeout
    );
 
-   TryStartupSyncIfNeeded("ea_init");
+   // MT5 restart always sends one authoritative snapshot.
+   RunStateSync("mt5_restart");
 
-   g_startupSyncAttempts = 1;
-   g_lastStartupRetryAt = TimeCurrent();
+   g_lastBridgeHealthCheckAt = TimeCurrent();
 
    Print(
       "Initial positions tracked: ", g_lastTradeCount,
@@ -235,50 +211,24 @@ void OnDeinit(const int reason)
 
 
 //+------------------------------------------------------------------+
-//| Timer: bounded startup retries plus periodic drift recovery.     |
-//|                                                                  |
-//| The timer itself is lightweight. It only calls existing scan/post|
-//| logic on initial retries or when the fallback interval is due.   |
+//| Timer: detect bridge recovery and bridge-requested sync          |
 //+------------------------------------------------------------------+
 void OnTimer()
 {
    datetime now = TimeCurrent();
 
-   if(!g_startupSyncCompleted && g_startupSyncAttempts < StateSyncMaxStartupRetries)
+   if(
+      g_lastBridgeHealthCheckAt != 0 &&
+      (now - g_lastBridgeHealthCheckAt) < BridgeHealthCheckIntervalSec
+   )
    {
-      if(
-         g_lastStartupRetryAt == 0 ||
-         (now - g_lastStartupRetryAt) >= StateSyncStartupRetrySec
-      )
-      {
-         g_startupSyncAttempts++;
-         g_lastStartupRetryAt = now;
-
-         TryStartupSyncIfNeeded(
-            StringFormat(
-               "startup_retry_%d_of_%d",
-               g_startupSyncAttempts,
-               StateSyncMaxStartupRetries
-            )
-         );
-         return;
-      }
-   }
-
-   if(!EnablePeriodicStateSync)
       return;
-
-   bool fallbackDue =
-      g_lastStateSyncAt == 0 ||
-      (now - g_lastStateSyncAt) >= StateSyncFallbackIntervalSec;
-
-   if(fallbackDue)
-   {
-      if(BridgeNeedsStartupSync())
-         RunStateSync("periodic_bridge_requested");
-      else
-         RunStateSync("periodic_fallback");
    }
+
+   g_lastBridgeHealthCheckAt = now;
+
+   if(BridgeRequestsSyncNow())
+      RunStateSync("bridge_restart");
 }
 
 
