@@ -1,40 +1,52 @@
 """HTTP server infrastructure for receiving MT4/MT5 trade events."""
-
-from __future__ import annotations
-
 import json
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from threading import Lock, Thread
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from threading import Thread, Lock
 
-from app_state import logger, notify_error, notify_info, notify_warning
-from event_normalizer import normalize_trade_event
+from app_state import logger, notify_error, notify_warning, notify_info
 from trade_processor import process_trade_event
+from event_normalizer import normalize_trade_event
+
 
 DEDUPE_WINDOW_MS = 2000
-_MAX_DEDUPE_CACHE_SIZE = 2000
-
-_event_dedupe: dict[tuple[str, int, str], int] = {}
+_event_dedupe = {}
 _event_dedupe_lock = Lock()
+
+_sync_state_lock = Lock()
+_sync_required = True
+_last_trade_event_at_ms = 0
 
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _safe_int(value, default: int = 0) -> int:
+def _safe_int(value, default=0) -> int:
     try:
         return int(value or default)
     except Exception:
         return int(default)
 
 
+def _safe_bool(value, default=False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    try:
+        raw = str(value).strip().lower()
+    except Exception:
+        return default
+    if raw in ("1", "true", "yes", "y", "on"):
+        return True
+    if raw in ("0", "false", "no", "n", "off"):
+        return False
+    return default
+
+
 def _json_bytes(payload: dict) -> bytes:
-    return json.dumps(
-        payload,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode("utf-8")
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
 def _event_type_from_data(data: dict) -> str:
@@ -46,12 +58,7 @@ def _event_type_from_data(data: dict) -> str:
     ).upper()
 
 
-def _event_context(
-    data: dict,
-    client_ip: str = "",
-    content_length: int = 0,
-    path: str = "",
-) -> dict:
+def _event_context(data: dict, client_ip: str = "", content_length: int = 0, path: str = "") -> dict:
     data = data or {}
     ctx = {
         "client_ip": client_ip,
@@ -66,7 +73,7 @@ def _event_context(
     return {k: v for k, v in ctx.items() if v not in (None, "", [])}
 
 
-def _dedupe_key(data: dict) -> tuple[str, int, str]:
+def _dedupe_key(data: dict):
     event_type = _event_type_from_data(data)
     ticket = _safe_int((data or {}).get("ticket", 0), 0)
     symbol = str((data or {}).get("symbol") or "").upper()
@@ -78,11 +85,11 @@ def _should_drop_duplicate(data: dict) -> bool:
     key = _dedupe_key(data)
 
     with _event_dedupe_lock:
-        if len(_event_dedupe) > _MAX_DEDUPE_CACHE_SIZE:
+        if len(_event_dedupe) > 2000:
             cutoff = now - (DEDUPE_WINDOW_MS * 4)
-            for dedupe_key, ts in list(_event_dedupe.items()):
+            for k, ts in list(_event_dedupe.items()):
                 if ts < cutoff:
-                    _event_dedupe.pop(dedupe_key, None)
+                    _event_dedupe.pop(k, None)
 
         last = _event_dedupe.get(key)
         if last is not None and (now - last) < DEDUPE_WINDOW_MS:
@@ -92,15 +99,73 @@ def _should_drop_duplicate(data: dict) -> bool:
         return False
 
 
+def _is_startup_sync_event(data: dict) -> bool:
+    data = data or {}
+
+    if _safe_bool(data.get("startupSync"), False):
+        return True
+    if _safe_bool(data.get("startupRecovery"), False):
+        return True
+    if _safe_bool(data.get("isStartupSync"), False):
+        return True
+    if _safe_bool(data.get("recovery"), False):
+        return True
+
+    sync_origin = str(
+        data.get("syncOrigin")
+        or data.get("origin")
+        or data.get("source")
+        or data.get("reason")
+        or ""
+    ).strip().lower()
+
+    return sync_origin in ("startup", "startupsync", "startuprecovery", "recovery")
+
+
+def _get_sync_required() -> bool:
+    with _sync_state_lock:
+        return bool(_sync_required)
+
+
+def _set_sync_required(value: bool):
+    global _sync_required
+    with _sync_state_lock:
+        _sync_required = bool(value)
+
+
+def _mark_runtime_event_seen():
+    global _last_trade_event_at_ms
+    with _sync_state_lock:
+        _last_trade_event_at_ms = _now_ms()
+
+
+def _mark_startup_sync_completed():
+    global _last_trade_event_at_ms
+    with _sync_state_lock:
+        _sync_required = False
+        _last_trade_event_at_ms = _now_ms()
+
+
+def _response_meta() -> dict:
+    return {
+        "sync_required": _get_sync_required(),
+        "dedupe_window_ms": DEDUPE_WINDOW_MS,
+    }
+
+
 class MT5BridgeHandler(BaseHTTPRequestHandler):
     account_manager = None
     server_version = "MT5Bridge/1.0"
 
-    def log_message(self, format: str, *args) -> None:
+    def log_message(self, format, *args):
         logger.info("%s - %s", self.address_string(), format % args)
 
-    def _send_json(self, status_code: int, payload: dict) -> None:
-        body = _json_bytes(payload)
+    def _send_json(self, status_code: int, payload: dict):
+        full_payload = dict(payload or {})
+        for k, v in _response_meta().items():
+            full_payload.setdefault(k, v)
+
+        body = _json_bytes(full_payload)
         self.send_response(int(status_code))
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -113,23 +178,22 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             raise ValueError("Empty request body")
 
         raw_body = self.rfile.read(content_length)
-
         try:
             body = raw_body.decode("utf-8")
-        except Exception as exc:
-            raise ValueError(f"Request body is not valid UTF-8: {exc}") from exc
+        except Exception as e:
+            raise ValueError(f"Request body is not valid UTF-8: {e}") from e
 
         try:
             data = json.loads(body)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Invalid JSON: {exc}") from exc
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON: {e}") from e
 
         if not isinstance(data, dict):
             raise ValueError("JSON payload must be an object")
 
         return data
 
-    def do_POST(self) -> None:
+    def do_POST(self):
         client_ip = self.address_string()
         content_length = _safe_int(self.headers.get("Content-Length", 0), 0)
 
@@ -143,18 +207,22 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             event_type = _event_type_from_data(data)
             ticket = _safe_int(data.get("ticket", 0), 0)
             symbol = data.get("symbol")
+            is_startup_sync = _is_startup_sync_event(data)
 
             logger.info(
-                "Received trade event: event_type=%s ticket=%s symbol=%s client_ip=%s",
+                "Received trade event: event_type=%s ticket=%s symbol=%s client_ip=%s startup_sync=%s",
                 event_type,
                 ticket,
                 symbol,
                 client_ip,
+                is_startup_sync,
             )
 
             notify_info(
                 event="bridge_trade_event_received",
                 message="Trade event received by bridge server",
+                startup_sync=is_startup_sync,
+                sync_required=_get_sync_required(),
                 **_event_context(
                     data,
                     client_ip=client_ip,
@@ -174,6 +242,8 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                 notify_warning(
                     event="bridge_trade_event_duplicate_dropped",
                     message="Duplicate trade event dropped",
+                    startup_sync=is_startup_sync,
+                    sync_required=_get_sync_required(),
                     **_event_context(
                         data,
                         client_ip=client_ip,
@@ -189,15 +259,33 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                         "duplicate": True,
                         "event_type": event_type,
                         "ticket": ticket,
+                        "startup_sync": is_startup_sync,
                     },
                 )
                 return
 
             process_trade_event(data, self.account_manager)
 
+            if is_startup_sync:
+                _mark_startup_sync_completed()
+                notify_info(
+                    event="bridge_startup_sync_completed",
+                    message="Startup sync event processed; bridge no longer requires sync",
+                    **_event_context(
+                        data,
+                        client_ip=client_ip,
+                        content_length=content_length,
+                        path=self.path,
+                    ),
+                )
+            else:
+                _mark_runtime_event_seen()
+
             notify_info(
                 event="bridge_trade_event_processed",
                 message="Trade event processed",
+                startup_sync=is_startup_sync,
+                sync_required=_get_sync_required(),
                 **_event_context(
                     data,
                     client_ip=client_ip,
@@ -214,35 +302,38 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                     "duplicate": False,
                     "event_type": event_type,
                     "ticket": ticket,
+                    "startup_sync": is_startup_sync,
                 },
             )
 
-        except ValueError as exc:
-            logger.warning("Rejected request: %s", exc)
+        except ValueError as e:
+            logger.warning("Rejected request: %s", e)
             notify_warning(
                 event="bridge_bad_request",
-                message=str(exc),
+                message=str(e),
                 client_ip=client_ip,
                 path=self.path,
                 content_length=content_length,
+                sync_required=_get_sync_required(),
             )
             self._send_json(
                 400,
                 {
                     "status": "error",
-                    "message": str(exc),
+                    "message": str(e),
                 },
             )
 
-        except Exception as exc:
-            logger.error("Error processing request: %s", exc, exc_info=True)
+        except Exception as e:
+            logger.error("Error processing request: %s", e, exc_info=True)
             notify_error(
                 event="bridge_request_processing_failed",
-                message=str(exc),
-                exc=exc,
+                message=str(e),
+                exc=e,
                 client_ip=client_ip,
                 path=self.path,
                 content_length=content_length,
+                sync_required=_get_sync_required(),
             )
             self._send_json(
                 500,
@@ -252,14 +343,14 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                 },
             )
 
-    def do_GET(self) -> None:
+    def do_GET(self):
         if self.path == "/health":
             self._send_json(
                 200,
                 {
                     "status": "ok",
                     "service": "MT5-to-cTrader Bridge",
-                    "dedupe_window_ms": DEDUPE_WINDOW_MS,
+                    "last_trade_event_at_ms": _last_trade_event_at_ms,
                 },
             )
             return
@@ -273,35 +364,34 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
         )
 
 
-def _serve_http(host: str, port: int, account_manager) -> None:
+def _serve_http(host, port, account_manager):
     MT5BridgeHandler.account_manager = account_manager
     server = HTTPServer((host, int(port)), MT5BridgeHandler)
-
     logger.info("HTTP server listening on %s:%s", host, int(port))
     notify_info(
         event="bridge_http_server_started",
         message="HTTP bridge server started",
         host=host,
         port=int(port),
+        sync_required=_get_sync_required(),
     )
-
     server.serve_forever()
 
 
-def run_http_servers(host: str, ports: list[int], account_manager):
-    threads: list[Thread] = []
+def run_http_servers(host, ports, account_manager):
+    threads = []
 
     for port in ports:
-        thread = Thread(
+        t = Thread(
             target=_serve_http,
             args=(host, int(port), account_manager),
             daemon=True,
         )
-        thread.start()
-        threads.append(thread)
+        t.start()
+        threads.append(t)
 
     return threads
 
 
-def run_http_server(host: str, port: int, account_manager) -> None:
+def run_http_server(host, port, account_manager):
     _serve_http(host, port, account_manager)
