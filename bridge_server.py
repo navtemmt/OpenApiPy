@@ -16,6 +16,7 @@ _event_dedupe_lock = Lock()
 _sync_state_lock = Lock()
 _sync_required = True
 _last_trade_event_at_ms = 0
+_last_sync_completed_at_ms = 0
 
 
 def _now_ms() -> int:
@@ -69,6 +70,8 @@ def _event_context(data: dict, client_ip: str = "", content_length: int = 0, pat
         "symbol": data.get("symbol"),
         "magic": data.get("magic"),
         "account_name": data.get("account_name"),
+        "reason": data.get("reason"),
+        "sync_origin": data.get("syncOrigin") or data.get("origin"),
     }
     return {k: v for k, v in ctx.items() if v not in (None, "", [])}
 
@@ -122,6 +125,10 @@ def _is_startup_sync_event(data: dict) -> bool:
     return sync_origin in ("startup", "startupsync", "startuprecovery", "recovery")
 
 
+def _is_sync_complete_event(data: dict) -> bool:
+    return _event_type_from_data(data) == "SYNC_COMPLETE"
+
+
 def _get_sync_required() -> bool:
     with _sync_state_lock:
         return bool(_sync_required)
@@ -140,16 +147,19 @@ def _mark_runtime_event_seen():
 
 
 def _mark_startup_sync_completed():
-    global _last_trade_event_at_ms
+    global _last_trade_event_at_ms, _last_sync_completed_at_ms, _sync_required
     with _sync_state_lock:
+        now = _now_ms()
         _sync_required = False
-        _last_trade_event_at_ms = _now_ms()
+        _last_trade_event_at_ms = now
+        _last_sync_completed_at_ms = now
 
 
 def _response_meta() -> dict:
     return {
         "sync_required": _get_sync_required(),
         "dedupe_window_ms": DEDUPE_WINDOW_MS,
+        "last_sync_completed_at_ms": _last_sync_completed_at_ms,
     }
 
 
@@ -208,20 +218,23 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             ticket = _safe_int(data.get("ticket", 0), 0)
             symbol = data.get("symbol")
             is_startup_sync = _is_startup_sync_event(data)
+            is_sync_complete = _is_sync_complete_event(data)
 
             logger.info(
-                "Received trade event: event_type=%s ticket=%s symbol=%s client_ip=%s startup_sync=%s",
+                "Received trade event: event_type=%s ticket=%s symbol=%s client_ip=%s startup_sync=%s sync_complete=%s",
                 event_type,
                 ticket,
                 symbol,
                 client_ip,
                 is_startup_sync,
+                is_sync_complete,
             )
 
             notify_info(
                 event="bridge_trade_event_received",
                 message="Trade event received by bridge server",
                 startup_sync=is_startup_sync,
+                sync_complete=is_sync_complete,
                 sync_required=_get_sync_required(),
                 **_event_context(
                     data,
@@ -230,6 +243,35 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                     path=self.path,
                 ),
             )
+
+            if is_sync_complete:
+                _mark_startup_sync_completed()
+                notify_info(
+                    event="bridge_startup_sync_completed",
+                    message="Startup sync completed; bridge no longer requires sync",
+                    startup_sync=is_startup_sync,
+                    sync_complete=True,
+                    sync_required=_get_sync_required(),
+                    **_event_context(
+                        data,
+                        client_ip=client_ip,
+                        content_length=content_length,
+                        path=self.path,
+                    ),
+                )
+                self._send_json(
+                    200,
+                    {
+                        "status": "success",
+                        "message": "Startup sync completed",
+                        "duplicate": False,
+                        "event_type": event_type,
+                        "ticket": ticket,
+                        "startup_sync": is_startup_sync,
+                        "sync_complete": True,
+                    },
+                )
+                return
 
             if _should_drop_duplicate(data):
                 logger.info(
@@ -243,6 +285,7 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                     event="bridge_trade_event_duplicate_dropped",
                     message="Duplicate trade event dropped",
                     startup_sync=is_startup_sync,
+                    sync_complete=False,
                     sync_required=_get_sync_required(),
                     **_event_context(
                         data,
@@ -260,31 +303,20 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                         "event_type": event_type,
                         "ticket": ticket,
                         "startup_sync": is_startup_sync,
+                        "sync_complete": False,
                     },
                 )
                 return
 
             process_trade_event(data, self.account_manager)
 
-            if is_startup_sync:
-                _mark_startup_sync_completed()
-                notify_info(
-                    event="bridge_startup_sync_completed",
-                    message="Startup sync event processed; bridge no longer requires sync",
-                    **_event_context(
-                        data,
-                        client_ip=client_ip,
-                        content_length=content_length,
-                        path=self.path,
-                    ),
-                )
-            else:
-                _mark_runtime_event_seen()
+            _mark_runtime_event_seen()
 
             notify_info(
                 event="bridge_trade_event_processed",
                 message="Trade event processed",
                 startup_sync=is_startup_sync,
+                sync_complete=False,
                 sync_required=_get_sync_required(),
                 **_event_context(
                     data,
@@ -303,6 +335,7 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                     "event_type": event_type,
                     "ticket": ticket,
                     "startup_sync": is_startup_sync,
+                    "sync_complete": False,
                 },
             )
 
