@@ -1,16 +1,20 @@
 """HTTP server infrastructure for receiving MT4/MT5 trade events."""
+
+from __future__ import annotations
+
 import json
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from threading import Thread, Lock
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Lock, Thread
 
-from app_state import logger, notify_error, notify_warning, notify_info
-from trade_processor import process_trade_event
+from app_state import logger, notify_error, notify_info, notify_warning
 from event_normalizer import normalize_trade_event
-
+from trade_processor import process_trade_event
 
 DEDUPE_WINDOW_MS = 2000
-_event_dedupe = {}
+_MAX_DEDUPE_CACHE_SIZE = 2000
+
+_event_dedupe: dict[tuple[str, int, str], int] = {}
 _event_dedupe_lock = Lock()
 
 
@@ -18,7 +22,7 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _safe_int(value, default=0) -> int:
+def _safe_int(value, default: int = 0) -> int:
     try:
         return int(value or default)
     except Exception:
@@ -26,7 +30,11 @@ def _safe_int(value, default=0) -> int:
 
 
 def _json_bytes(payload: dict) -> bytes:
-    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return json.dumps(
+        payload,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
 
 
 def _event_type_from_data(data: dict) -> str:
@@ -38,7 +46,12 @@ def _event_type_from_data(data: dict) -> str:
     ).upper()
 
 
-def _event_context(data: dict, client_ip: str = "", content_length: int = 0, path: str = "") -> dict:
+def _event_context(
+    data: dict,
+    client_ip: str = "",
+    content_length: int = 0,
+    path: str = "",
+) -> dict:
     data = data or {}
     ctx = {
         "client_ip": client_ip,
@@ -53,7 +66,7 @@ def _event_context(data: dict, client_ip: str = "", content_length: int = 0, pat
     return {k: v for k, v in ctx.items() if v not in (None, "", [])}
 
 
-def _dedupe_key(data: dict):
+def _dedupe_key(data: dict) -> tuple[str, int, str]:
     event_type = _event_type_from_data(data)
     ticket = _safe_int((data or {}).get("ticket", 0), 0)
     symbol = str((data or {}).get("symbol") or "").upper()
@@ -65,11 +78,11 @@ def _should_drop_duplicate(data: dict) -> bool:
     key = _dedupe_key(data)
 
     with _event_dedupe_lock:
-        if len(_event_dedupe) > 2000:
+        if len(_event_dedupe) > _MAX_DEDUPE_CACHE_SIZE:
             cutoff = now - (DEDUPE_WINDOW_MS * 4)
-            for k, ts in list(_event_dedupe.items()):
+            for dedupe_key, ts in list(_event_dedupe.items()):
                 if ts < cutoff:
-                    _event_dedupe.pop(k, None)
+                    _event_dedupe.pop(dedupe_key, None)
 
         last = _event_dedupe.get(key)
         if last is not None and (now - last) < DEDUPE_WINDOW_MS:
@@ -83,10 +96,10 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
     account_manager = None
     server_version = "MT5Bridge/1.0"
 
-    def log_message(self, format, *args):
+    def log_message(self, format: str, *args) -> None:
         logger.info("%s - %s", self.address_string(), format % args)
 
-    def _send_json(self, status_code: int, payload: dict):
+    def _send_json(self, status_code: int, payload: dict) -> None:
         body = _json_bytes(payload)
         self.send_response(int(status_code))
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -100,22 +113,23 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             raise ValueError("Empty request body")
 
         raw_body = self.rfile.read(content_length)
+
         try:
             body = raw_body.decode("utf-8")
-        except Exception as e:
-            raise ValueError(f"Request body is not valid UTF-8: {e}") from e
+        except Exception as exc:
+            raise ValueError(f"Request body is not valid UTF-8: {exc}") from exc
 
         try:
             data = json.loads(body)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON: {e}") from e
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSON: {exc}") from exc
 
         if not isinstance(data, dict):
             raise ValueError("JSON payload must be an object")
 
         return data
 
-    def do_POST(self):
+    def do_POST(self) -> None:
         client_ip = self.address_string()
         content_length = _safe_int(self.headers.get("Content-Length", 0), 0)
 
@@ -203,11 +217,11 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                 },
             )
 
-        except ValueError as e:
-            logger.warning("Rejected request: %s", e)
+        except ValueError as exc:
+            logger.warning("Rejected request: %s", exc)
             notify_warning(
                 event="bridge_bad_request",
-                message=str(e),
+                message=str(exc),
                 client_ip=client_ip,
                 path=self.path,
                 content_length=content_length,
@@ -216,16 +230,16 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                 400,
                 {
                     "status": "error",
-                    "message": str(e),
+                    "message": str(exc),
                 },
             )
 
-        except Exception as e:
-            logger.error("Error processing request: %s", e, exc_info=True)
+        except Exception as exc:
+            logger.error("Error processing request: %s", exc, exc_info=True)
             notify_error(
                 event="bridge_request_processing_failed",
-                message=str(e),
-                exc=e,
+                message=str(exc),
+                exc=exc,
                 client_ip=client_ip,
                 path=self.path,
                 content_length=content_length,
@@ -238,7 +252,7 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                 },
             )
 
-    def do_GET(self):
+    def do_GET(self) -> None:
         if self.path == "/health":
             self._send_json(
                 200,
@@ -259,9 +273,10 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
         )
 
 
-def _serve_http(host, port, account_manager):
+def _serve_http(host: str, port: int, account_manager) -> None:
     MT5BridgeHandler.account_manager = account_manager
     server = HTTPServer((host, int(port)), MT5BridgeHandler)
+
     logger.info("HTTP server listening on %s:%s", host, int(port))
     notify_info(
         event="bridge_http_server_started",
@@ -269,23 +284,24 @@ def _serve_http(host, port, account_manager):
         host=host,
         port=int(port),
     )
+
     server.serve_forever()
 
 
-def run_http_servers(host, ports, account_manager):
-    threads = []
+def run_http_servers(host: str, ports: list[int], account_manager):
+    threads: list[Thread] = []
 
     for port in ports:
-        t = Thread(
+        thread = Thread(
             target=_serve_http,
             args=(host, int(port), account_manager),
             daemon=True,
         )
-        t.start()
-        threads.append(t)
+        thread.start()
+        threads.append(thread)
 
     return threads
 
 
-def run_http_server(host, port, account_manager):
+def run_http_server(host: str, port: int, account_manager) -> None:
     _serve_http(host, port, account_manager)
