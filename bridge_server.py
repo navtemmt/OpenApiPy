@@ -156,11 +156,12 @@ def _mark_startup_sync_completed():
 
 
 def _response_meta() -> dict:
-    return {
-        "sync_required": _get_sync_required(),
-        "dedupe_window_ms": DEDUPE_WINDOW_MS,
-        "last_sync_completed_at_ms": _last_sync_completed_at_ms,
-    }
+    with _sync_state_lock:
+        return {
+            "sync_required": bool(_sync_required),
+            "dedupe_window_ms": DEDUPE_WINDOW_MS,
+            "last_sync_completed_at_ms": int(_last_sync_completed_at_ms),
+        }
 
 
 class MT5BridgeHandler(BaseHTTPRequestHandler):
@@ -172,15 +173,33 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, status_code: int, payload: dict):
         full_payload = dict(payload or {})
-        for k, v in _response_meta().items():
-            full_payload.setdefault(k, v)
+        full_payload.update(_response_meta())
 
         body = _json_bytes(full_payload)
+
+        logger.info(
+            "HTTP JSON response | path=%s status=%s bytes=%s payload=%s",
+            self.path,
+            int(status_code),
+            len(body),
+            body.decode("utf-8", errors="replace"),
+        )
+
         self.send_response(int(status_code))
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(body)
+
+        try:
+            self.wfile.write(body)
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError) as e:
+            logger.warning(
+                "Client disconnected before response write | path=%s error=%s",
+                self.path,
+                e,
+            )
 
     def _read_json_body(self) -> dict:
         content_length = _safe_int(self.headers.get("Content-Length", 0), 0)
@@ -245,7 +264,24 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             )
 
             if is_sync_complete:
+                logger.info(
+                    "SYNC_COMPLETE received | client_ip=%s path=%s sync_required_before=%s last_sync_completed_before=%s",
+                    client_ip,
+                    self.path,
+                    _get_sync_required(),
+                    _last_sync_completed_at_ms,
+                )
+
                 _mark_startup_sync_completed()
+
+                logger.info(
+                    "SYNC_COMPLETE applied | client_ip=%s path=%s sync_required_after=%s last_sync_completed_after=%s",
+                    client_ip,
+                    self.path,
+                    _get_sync_required(),
+                    _last_sync_completed_at_ms,
+                )
+
                 notify_info(
                     event="bridge_startup_sync_completed",
                     message="Startup sync completed; bridge no longer requires sync",
@@ -259,16 +295,19 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                         path=self.path,
                     ),
                 )
+
                 self._send_json(
                     200,
                     {
                         "status": "success",
                         "message": "Startup sync completed",
                         "duplicate": False,
-                        "event_type": event_type,
+                        "event_type": "SYNC_COMPLETE",
                         "ticket": ticket,
                         "startup_sync": is_startup_sync,
                         "sync_complete": True,
+                        "sync_required": False,
+                        "last_sync_completed_at_ms": _last_sync_completed_at_ms,
                     },
                 )
                 return
