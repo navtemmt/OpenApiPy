@@ -344,7 +344,7 @@ def _estimate_risk_ccy_per_1lot_from_symbol(symbol, entry_price: float, sl_price
         if pip_pos is not None:
             tick_size = 10 ** (-int(pip_pos))
         elif digits > 0:
-            tick_size = 10 ** (-digits)
+            tick_size = 10 ** (-digits))
         else:
             return 0.0
 
@@ -1412,6 +1412,14 @@ def handle_pending_open_event(data, account_manager):
 
     for account_name, client, config in contexts:
         try:
+            existing_order_id = account_manager.get_order_id(account_name, int(ticket))
+            if existing_order_id:
+                logger.info(
+                    f"[{account_name}] PENDING_OPEN skip for ticket {ticket} "
+                    f"(already mapped to orderId={existing_order_id})"
+                )
+                continue
+
             rm = _risk_mode(config)
             sizing_volume = float(volume)
 
