@@ -383,30 +383,44 @@ class AccountManager:
         pos = getattr(extracted, "position", None)
         if pos is None:
             return
-
+    
         exec_type = getattr(extracted, "executionType", None)
         position_id = int(getattr(pos, "positionId", 0) or 0)
         label = self._extract_position_label(pos)
         ticket = self._label_to_ticket(label)
         volume = self._extract_position_volume(pos)
-
+    
+        from ctrader_open_api.messages.OpenApiMessages_pb2 import (
+            ProtoOAExecutionType,
+            ProtoOAPositionStatus,
+        )
+    
+        pos_status = getattr(pos, "positionStatus", None)
+        is_fill = exec_type == ProtoOAExecutionType.ORDER_FILLED
+        is_open = pos_status == ProtoOAPositionStatus.POSITION_STATUS_OPEN
+    
         if position_id and ticket is not None:
             self._store_position_mapping(account_name, int(ticket), int(position_id))
-            self._remove_order_mapping(account_name, int(ticket))
-
+    
+            # Keep the pending-order mapping for ORDER_ACCEPTED / pending-created events.
+            # Remove it only when the order is truly filled into an open position.
+            if is_fill and is_open:
+                self._remove_order_mapping(account_name, int(ticket))
+    
         if position_id:
             self._store_position_volume(account_name, int(position_id), int(volume))
-
+    
         if position_id:
             logger.info(
-                "[%s] (exec pos) positionId=%s ticket=%s volume=%s exec_type=%s",
+                "[%s] (exec pos) positionId=%s ticket=%s volume=%s exec_type=%s pos_status=%s",
                 account_name,
                 position_id,
                 ticket,
                 volume,
                 exec_type,
+                pos_status,
             )
-
+    
         self._try_enforce_max_risk_on_fill(account_name, extracted, pos, position_id, ticket)
 
     def _try_enforce_max_risk_on_fill(self, account_name: str, extracted, pos, position_id: int, ticket: Optional[int]):
