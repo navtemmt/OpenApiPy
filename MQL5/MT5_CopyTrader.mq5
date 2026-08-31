@@ -14,7 +14,7 @@ input bool   CopyPendingOrders = true;
 // -------------------------------------------------------------------
 // Bridge availability / startup sync
 // -------------------------------------------------------------------
-input int    BridgeHealthCheckIntervalSec = 5;
+input int    BridgeHealthCheckIntervalSec = 15;
 input int    BridgeDownAfterFailures      = 2;
 
 #include <CopyTrader/CopyTrader_State.mqh>
