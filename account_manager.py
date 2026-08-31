@@ -316,6 +316,17 @@ class AccountManager:
             int(order_id),
         )
 
+    def _remove_order_mapping(self, account_name: str, mt5_ticket: int):
+        self._ensure_account_maps(account_name)
+        removed = self.order_maps[account_name].pop(int(mt5_ticket), None)
+        if removed:
+            logger.info(
+                "[%s] Removed MT5 ticket %s -> stale cTrader orderId %s mapping",
+                account_name,
+                int(mt5_ticket),
+                int(removed),
+            )
+
     def _store_position_mapping(self, account_name: str, mt5_ticket: int, position_id: int):
         self._ensure_account_maps(account_name)
         self.position_maps[account_name][int(mt5_ticket)] = int(position_id)
@@ -326,6 +337,18 @@ class AccountManager:
             int(mt5_ticket),
             int(position_id),
         )
+
+    def _remove_position_mapping(self, account_name: str, mt5_ticket: int):
+        self._ensure_account_maps(account_name)
+        removed = self.position_maps[account_name].pop(int(mt5_ticket), None)
+        if removed:
+            self.position_volumes[account_name].pop(int(removed), None)
+            logger.info(
+                "[%s] Removed MT5 ticket %s -> stale cTrader positionId %s mapping",
+                account_name,
+                int(mt5_ticket),
+                int(removed),
+            )
 
     def _store_position_volume(self, account_name: str, position_id: int, volume: int):
         if int(position_id) <= 0:
@@ -369,6 +392,7 @@ class AccountManager:
 
         if position_id and ticket is not None:
             self._store_position_mapping(account_name, int(ticket), int(position_id))
+            self._remove_order_mapping(account_name, int(ticket))
 
         if position_id:
             self._store_position_volume(account_name, int(position_id), int(volume))
@@ -443,6 +467,7 @@ class AccountManager:
         pos_list = list(getattr(extracted, "position", []) or [])
 
         active_position_ids = set()
+        active_position_tickets = set()
 
         for pos in pos_list:
             position_id = int(getattr(pos, "positionId", 0) or 0)
@@ -458,6 +483,7 @@ class AccountManager:
             self._store_position_volume(account_name, int(position_id), int(vol))
 
             if ticket is not None:
+                active_position_tickets.add(int(ticket))
                 self._store_position_mapping(account_name, int(ticket), int(position_id))
                 logger.info(
                     "[%s] (reconcile pos) MT5 ticket %s -> cTrader positionId %s volume=%s",
@@ -467,6 +493,13 @@ class AccountManager:
                     int(vol),
                 )
                 count += 1
+
+        stale_tickets = [
+            t for t in self.position_maps.get(account_name, {}).keys()
+            if t not in active_position_tickets
+        ]
+        for t in stale_tickets:
+            self._remove_position_mapping(account_name, int(t))
 
         stale_ids = [
             pid for pid in self.position_volumes.get(account_name, {}).keys()
@@ -482,16 +515,12 @@ class AccountManager:
         order_count = 0
         order_list = list(getattr(extracted, "order", []) or [])
 
-        active_order_ids = set()
         active_order_tickets = set()
 
         for order in order_list:
             order_id = int(getattr(order, "orderId", 0) or 0)
             label = self._extract_order_label(order)
             ticket = self._label_to_ticket(label)
-
-            if order_id:
-                active_order_ids.add(int(order_id))
 
             if order_id and ticket is not None:
                 active_order_tickets.add(int(ticket))
@@ -509,7 +538,7 @@ class AccountManager:
             if t not in active_order_tickets
         ]
         for t in stale_tickets:
-            self.order_maps[account_name].pop(t, None)
+            self._remove_order_mapping(account_name, int(t))
 
         return order_count
 
@@ -810,11 +839,9 @@ class AccountManager:
     def remove_mapping(self, account_name: str, mt5_ticket: int):
         try:
             ticket = int(mt5_ticket)
-            pos_id = self.position_maps.get(account_name, {}).pop(ticket, None)
-            self.order_maps.get(account_name, {}).pop(ticket, None)
+            self._remove_order_mapping(account_name, ticket)
+            self._remove_position_mapping(account_name, ticket)
             self.mt5_payloads.get(account_name, {}).pop(ticket, None)
-            if pos_id:
-                self.position_volumes.get(account_name, {}).pop(int(pos_id), None)
         except Exception:
             pass
 
