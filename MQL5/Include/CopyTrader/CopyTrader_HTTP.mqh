@@ -48,26 +48,15 @@ bool ParseBridgeResponse(const string responseBody)
    if(responseBody == "")
       return false;
 
-   CJAVal json;
-   if(!json.Deserialize(responseBody))
-   {
-      Print("Bridge response JSON parse failed: ", responseBody);
-      return false;
-   }
-
-   string raw = json["sync_required"].ToStr();
-   if(raw == "")
-      return true;
-
-   StringTrimLeft(raw);
-   StringTrimRight(raw);
-   StringToLower(raw);
+   string body = responseBody;
+   StringToLower(body);
 
    g_bridge_sync_required = (
-      raw == "true" ||
-      raw == "1" ||
-      raw == "yes" ||
-      raw == "on"
+      StringFind(body, "\"sync_required\":true") >= 0 ||
+      StringFind(body, "\"sync_required\": true") >= 0 ||
+      StringFind(body, "\"sync_required\":\"true\"") >= 0 ||
+      StringFind(body, "\"sync_required\":1") >= 0 ||
+      StringFind(body, "\"sync_required\": 1") >= 0
    );
 
    Print("Bridge sync_required parsed: ", g_bridge_sync_required);
