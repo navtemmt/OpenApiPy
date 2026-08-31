@@ -46,20 +46,38 @@ void ResetBridgeHttpState()
 bool ParseBridgeResponse(const string responseBody)
 {
    if(responseBody == "")
+   {
+      Print("Bridge response parse skipped: empty body");
       return false;
+   }
 
-   string body = responseBody;
-   StringToLower(body);
+   string normalized = responseBody;
+   StringToLower(normalized);
 
-   g_bridge_sync_required = (
-      StringFind(body, "\"sync_required\":true") >= 0 ||
-      StringFind(body, "\"sync_required\": true") >= 0 ||
-      StringFind(body, "\"sync_required\":\"true\"") >= 0 ||
-      StringFind(body, "\"sync_required\":1") >= 0 ||
-      StringFind(body, "\"sync_required\": 1") >= 0
+   StringReplace(normalized, " ", "");
+   StringReplace(normalized, "\t", "");
+   StringReplace(normalized, "\r", "");
+   StringReplace(normalized, "\n", "");
+
+   int sync_pos = StringFind(normalized, "\"sync_required\":");
+   if(sync_pos < 0)
+   {
+      Print("Bridge response has no sync_required field: ", responseBody);
+      return true;
+   }
+
+   g_bridge_sync_required =
+      StringFind(normalized, "\"sync_required\":true") >= 0 ||
+      StringFind(normalized, "\"sync_required\":\"true\"") >= 0 ||
+      StringFind(normalized, "\"sync_required\":1") >= 0;
+
+   Print(
+      "Bridge sync_required parsed: ",
+      g_bridge_sync_required,
+      " | normalized=",
+      normalized
    );
 
-   Print("Bridge sync_required parsed: ", g_bridge_sync_required);
    return true;
 }
 
