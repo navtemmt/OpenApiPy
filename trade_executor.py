@@ -26,6 +26,7 @@ def _base_context(
     limit_price=None,
     expiration_ms=None,
     reason=None,
+    order_id=None,
 ):
     ctx = {}
     if account_name is not None:
@@ -74,6 +75,11 @@ def _base_context(
             ctx["expiration_ms"] = expiration_ms
     if reason is not None:
         ctx["reason"] = str(reason)
+    if order_id is not None:
+        try:
+            ctx["order_id"] = int(order_id)
+        except Exception:
+            ctx["order_id"] = order_id
     return ctx
 
 
@@ -277,6 +283,14 @@ def _store_pending_mapping_immediately(account_name, ticket, order_id):
 
 
 def _clear_stale_position_mapping(account_name, ticket):
+    """
+    Clear only position mapping before creating a pending order.
+
+    This is safe because a pending order should not depend on an old positionId,
+    but we intentionally do NOT clear any order mapping here. Clearing the order
+    mapping during startup replay can cause duplicate pending orders to be sent
+    before the next accepted orderId is persisted.
+    """
     try:
         from account_manager import get_account_manager
         manager = get_account_manager()
@@ -291,6 +305,86 @@ def _clear_stale_position_mapping(account_name, ticket):
             ticket,
             exc_info=True,
         )
+
+
+def _get_existing_order_mapping(account_name, ticket) -> int:
+    try:
+        from account_manager import get_account_manager
+        manager = get_account_manager()
+        if manager is None:
+            return 0
+        if hasattr(manager, "get_order_id"):
+            return int(manager.get_order_id(account_name, int(ticket)) or 0)
+        if hasattr(manager, "getorderid"):
+            return int(manager.getorderid(account_name, int(ticket)) or 0)
+        if hasattr(manager, "get_orderid"):
+            return int(manager.get_orderid(account_name, int(ticket)) or 0)
+    except Exception:
+        logger.debug(
+            "[%s] Failed to read existing order mapping for ticket %s",
+            account_name,
+            ticket,
+            exc_info=True,
+        )
+    return 0
+
+
+def _has_active_pending_order(client, order_id: int) -> bool:
+    """
+    Best-effort check whether a cTrader pending order still appears active.
+
+    We keep this intentionally defensive because client implementations differ.
+    If we cannot verify, return False and let caller decide whether to proceed.
+    """
+    try:
+        if int(order_id or 0) <= 0:
+            return False
+
+        containers = []
+        for attr in ("pending_orders", "pendingOrders", "orders", "open_orders", "openOrders"):
+            try:
+                obj = getattr(client, attr, None)
+                if obj is not None:
+                    containers.append(obj)
+            except Exception:
+                pass
+
+        for container in containers:
+            try:
+                if isinstance(container, dict):
+                    if int(order_id) in [int(k) for k in container.keys()]:
+                        return True
+                    for _, val in container.items():
+                        oid = getattr(val, "orderId", None)
+                        if oid is not None and int(oid) == int(order_id):
+                            return True
+                else:
+                    values = container.values() if hasattr(container, "values") else container
+                    for val in values:
+                        oid = getattr(val, "orderId", None)
+                        if oid is not None and int(oid) == int(order_id):
+                            return True
+            except Exception:
+                continue
+    except Exception:
+        logger.debug("Failed active pending-order check for orderId=%s", order_id, exc_info=True)
+
+    return False
+
+
+def _should_skip_duplicate_pending(account_name, client, ticket) -> int:
+    """
+    Return existing orderId if this MT5 ticket is already mapped to a live/known
+    pending order and should be skipped.
+    """
+    order_id = _get_existing_order_mapping(account_name, ticket)
+    if order_id <= 0:
+        return 0
+
+    if _has_active_pending_order(client, order_id):
+        return int(order_id)
+
+    return 0
 
 
 def _should_copy(account_name, config, mt5_symbol, magic, volume):
@@ -609,6 +703,31 @@ def copy_pending_to_account(
     if not _should_copy(account_name, config, mt5_symbol, magic, volume):
         return
 
+    existing_order_id = _should_skip_duplicate_pending(account_name, client, ticket)
+    if existing_order_id > 0:
+        logger.info(
+            f"[{account_name}] PENDING_OPEN skip for ticket {ticket} "
+            f"(already mapped to active orderId={existing_order_id})"
+        )
+        notify_info(
+            event="pending_order_skipped_existing_mapping",
+            message="Pending order skipped because active cTrader order mapping already exists",
+            **_base_context(
+                account_name=account_name,
+                ticket=ticket,
+                mt5_symbol=mt5_symbol,
+                resolved_symbol=resolved_symbol,
+                symbol_id=symbol_id,
+                side=side,
+                volume=volume,
+                magic=magic,
+                pending_type=pending_type,
+                order_id=existing_order_id,
+                reason="existing_active_pending_mapping",
+            ),
+        )
+        return None
+
     try:
         trade_side = _normalize_trade_side(side)
         ptype = _normalize_pending_type(pending_type)
@@ -752,6 +871,7 @@ def copy_pending_to_account(
                 tp=tp_r,
                 expiration_ms=expiration_ms_n,
                 magic=magic,
+                order_id=order_id or None,
             ),
         )
         return resp
