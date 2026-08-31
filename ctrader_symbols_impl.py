@@ -10,6 +10,7 @@ This module:
 - Builds self.symbol_name_to_id from SymbolsList
 - Stores basic symbol objects in self.symbol_details
 - Then upgrades self.symbol_details entries with full ProtoOASymbol objects from SymbolById
+- Exposes self.symbols_ready only after all full symbol spec batches complete
 """
 
 import logging
@@ -30,11 +31,23 @@ STARTUP_SPOT_SYMBOLS = ["XAUUSD", "BTCUSD"]
 PROBE_SPOT_COUNT = 50
 
 
+def _set_symbols_ready(self, ready: bool) -> None:
+    try:
+        self.symbols_ready = bool(ready)
+    except Exception:
+        pass
+
+
 def load_symbol_map(self, debug_dump: bool = False) -> None:
     """Request SymbolsList then request full specs by id."""
     if not getattr(self, "account_id", None):
         logger.warning("Cannot load symbols: account_id not set")
+        _set_symbols_ready(self, False)
         return
+
+    _set_symbols_ready(self, False)
+    self._symbol_batch_total = 0
+    self._symbol_batch_done = 0
 
     logger.info("Loading symbols for account %s...", self.account_id)
 
@@ -53,7 +66,10 @@ def on_symbols_list(self, result, debug_dump: bool = False) -> None:
         symbols = getattr(msg, "symbol", None)
         if not symbols:
             logger.error("SymbolsList response has no symbols field: %r", msg)
+            _set_symbols_ready(self, False)
             return
+
+        _set_symbols_ready(self, False)
 
         self.symbol_name_to_id.clear()
         self.symbol_details.clear()
@@ -86,14 +102,12 @@ def on_symbols_list(self, result, debug_dump: bool = False) -> None:
 
         logger.info("Loaded %d symbols (light)", len(self.symbol_name_to_id))
 
-        # NEW: explicit BTC/XAU mapping debug
         logger.info(
             "SYMBOL MAP CHECK: BTCUSD=%s XAUUSD=%s",
             self.symbol_name_to_id.get("BTCUSD"),
             self.symbol_name_to_id.get("XAUUSD"),
         )
 
-        # TEMP: probe which symbols actually tick on OpenAPI
         try:
             probe_ids = ids[:PROBE_SPOT_COUNT]
             logger.info(
@@ -111,15 +125,19 @@ def on_symbols_list(self, result, debug_dump: bool = False) -> None:
         except Exception as e:
             logger.error("Failed probe spot subscription: %s", e)
 
-        # Track total batches expected for deferred spot subscription
-        total_batches = (len(ids) + 199) // 200  # ceiling division matching batch_size=200
+        total_batches = (len(ids) + 199) // 200
         self._symbol_batch_total = int(total_batches)
         self._symbol_batch_done = 0
 
-        # Now request full symbol specs (lotSize/minVolume/stepVolume/etc.).
+        if not ids:
+            logger.warning("No symbols returned from SymbolsList; marking symbols_ready=False")
+            _set_symbols_ready(self, False)
+            return
+
         request_symbol_specs(self, ids, batch_size=200, debug_dump=debug_dump)
 
     except Exception:
+        _set_symbols_ready(self, False)
         logger.exception("Failed parsing symbols list")
 
 
@@ -141,20 +159,22 @@ def request_symbol_specs(self, symbol_ids: List[int], batch_size: int = 200, deb
     Some OpenApiPy builds model req.symbolId as a repeated field; we use extend/append safely.
     """
     if not getattr(self, "account_id", None):
+        _set_symbols_ready(self, False)
         return
     if not symbol_ids:
+        _set_symbols_ready(self, False)
         return
+
+    _set_symbols_ready(self, False)
 
     sent = 0
     for batch in _chunked(symbol_ids, int(batch_size or 200)):
         req = ProtoOASymbolByIdReq()
         req.ctidTraderAccountId = int(self.account_id)
 
-        # Common Python protobuf API: repeated field supports extend()
         try:
             req.symbolId.extend([int(s) for s in batch])
         except Exception:
-            # Fallback: append one-by-one
             for sid in batch:
                 try:
                     req.symbolId.append(int(sid))
@@ -171,6 +191,8 @@ def request_symbol_specs(self, symbol_ids: List[int], batch_size: int = 200, deb
 
 def on_symbol_specs(self, result, debug_dump: bool = False) -> None:
     """Merge full ProtoOASymbol entities into symbol_details."""
+    parse_ok = False
+
     try:
         msg = Protobuf.extract(result)
         symbols = getattr(msg, "symbol", None)
@@ -185,7 +207,6 @@ def on_symbol_specs(self, result, debug_dump: bool = False) -> None:
                 if not sid:
                     continue
 
-                # Replace light symbol with full symbol
                 self.symbol_details[sid] = s
                 updated += 1
 
@@ -208,12 +229,16 @@ def on_symbol_specs(self, result, debug_dump: bool = False) -> None:
                 continue
 
         logger.info("Loaded full specs for %d symbols", updated)
+        parse_ok = True
 
     except Exception:
+        _set_symbols_ready(self, False)
         logger.exception("Failed parsing symbol specs response")
 
-    # ----- Batch completion tracking -----
     try:
+        if not parse_ok:
+            return
+
         self._symbol_batch_done = int(getattr(self, "_symbol_batch_done", 0)) + 1
         total = int(getattr(self, "_symbol_batch_total", 1))
 
@@ -224,16 +249,24 @@ def on_symbol_specs(self, result, debug_dump: bool = False) -> None:
         )
 
         if self._symbol_batch_done >= total:
+            _set_symbols_ready(self, True)
             logger.info("All symbol spec batches completed.")
-            # One-shot debug: dump key symbol specs
+            logger.info(
+                "Symbol specs ready for account %s: symbols_ready=%s",
+                getattr(self, "account_id", None),
+                getattr(self, "symbols_ready", False),
+            )
+
             try:
                 debug_symbol_details(self, "BTCUSD")
                 debug_symbol_details(self, "XAUUSD")
             except Exception:
                 logger.debug("debug_symbol_details call failed", exc_info=True)
+
             _subscribe_startup_spots(self)
 
     except Exception as e:
+        _set_symbols_ready(self, False)
         logger.warning("Failed to check batch completion: %s", e)
 
 
