@@ -219,6 +219,80 @@ def _normalize_expiration_ms(expiration_ms) -> int:
     return value if value > 0 else 0
 
 
+def _extract_pending_order_id(response) -> int:
+    try:
+        if response is None:
+            return 0
+
+        direct = getattr(response, "orderId", None)
+        if direct is not None and int(direct) > 0:
+            return int(direct)
+
+        order = getattr(response, "order", None)
+        if order is not None:
+            nested = getattr(order, "orderId", None)
+            if nested is not None and int(nested) > 0:
+                return int(nested)
+
+        extracted = None
+        try:
+            from ctrader_open_api import Protobuf
+            extracted = Protobuf.extract(response)
+        except Exception:
+            extracted = None
+
+        if extracted is not None:
+            direct = getattr(extracted, "orderId", None)
+            if direct is not None and int(direct) > 0:
+                return int(direct)
+
+            order = getattr(extracted, "order", None)
+            if order is not None:
+                nested = getattr(order, "orderId", None)
+                if nested is not None and int(nested) > 0:
+                    return int(nested)
+    except Exception:
+        pass
+
+    return 0
+
+
+def _store_pending_mapping_immediately(account_name, ticket, order_id):
+    try:
+        if int(order_id or 0) <= 0:
+            return
+        from account_manager import get_account_manager
+        manager = get_account_manager()
+        if manager is None:
+            return
+        if hasattr(manager, "_store_order_mapping"):
+            manager._store_order_mapping(account_name, int(ticket), int(order_id))
+    except Exception:
+        logger.debug(
+            "[%s] Failed to immediately store pending mapping for ticket %s",
+            account_name,
+            ticket,
+            exc_info=True,
+        )
+
+
+def _clear_stale_position_mapping(account_name, ticket):
+    try:
+        from account_manager import get_account_manager
+        manager = get_account_manager()
+        if manager is None:
+            return
+        if hasattr(manager, "_remove_position_mapping"):
+            manager._remove_position_mapping(account_name, int(ticket))
+    except Exception:
+        logger.debug(
+            "[%s] Failed to clear stale position mapping for ticket %s",
+            account_name,
+            ticket,
+            exc_info=True,
+        )
+
+
 def _should_copy(account_name, config, mt5_symbol, magic, volume):
     multi_config = get_multi_account_config()
     should_copy, reason = multi_config.should_copy_trade(config, mt5_symbol, magic, volume)
@@ -634,6 +708,8 @@ def copy_pending_to_account(
     )
 
     try:
+        _clear_stale_position_mapping(account_name, ticket)
+
         resp = client.send_pending_order(
             account_id=config.account_id,
             symbol_id=symbol_id,
@@ -647,9 +723,15 @@ def copy_pending_to_account(
             label=f"MT5_{ticket}",
             expiration_ms=expiration_ms_n,
         )
+
+        order_id = _extract_pending_order_id(resp)
+        if order_id > 0:
+            _store_pending_mapping_immediately(account_name, ticket, order_id)
+
         logger.info(
             f"[{account_name}] Pending order submitted | "
-            f"ticket={ticket} symbol={resolved_symbol} symbolId={symbol_id} label=MT5_{ticket}"
+            f"ticket={ticket} symbol={resolved_symbol} symbolId={symbol_id} "
+            f"label=MT5_{ticket} orderId={order_id or 'unknown'}"
         )
         notify_info(
             event="pending_order_submitted",
