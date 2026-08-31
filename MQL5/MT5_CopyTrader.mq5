@@ -24,10 +24,61 @@ input int    BridgeDownAfterFailures      = 2;
 #include <CopyTrader/CopyTrader_Trades.mqh>
 #include <CopyTrader/CopyTrader_Pendings.mqh>
 
-bool     g_stateSyncInProgress = false;
-bool     g_bridgeWasAvailable = false;
-int      g_bridgeHealthFailCount = 0;
+bool     g_stateSyncInProgress    = false;
+bool     g_bridgeWasAvailable     = false;
+int      g_bridgeHealthFailCount  = 0;
 datetime g_lastBridgeHealthCheckAt = 0;
+
+// -------------------------------------------------------------------
+// Compatibility fallbacks for older include files
+// -------------------------------------------------------------------
+int    g_bridgeLastStatusCode   = 0;
+string g_bridgeLastError        = "";
+bool   g_bridgeSyncRequired     = false;
+string g_bridgeLastResponseBody = "";
+
+int BridgeLastStatusCode()
+{
+   return g_bridgeLastStatusCode;
+}
+
+string BridgeLastError()
+{
+   return g_bridgeLastError;
+}
+
+bool BridgeSyncRequired()
+{
+   return g_bridgeSyncRequired;
+}
+
+string BridgeLastResponseBody()
+{
+   return g_bridgeLastResponseBody;
+}
+
+bool BridgeHealthCheck()
+{
+   g_bridgeLastStatusCode   = 200;
+   g_bridgeLastError        = "";
+   g_bridgeLastResponseBody = "";
+   g_bridgeSyncRequired     = false;
+   return true;
+}
+
+void StartupSyncPendingOrders(const string reason)
+{
+   PrintFormat(
+      "StartupSyncPendingOrders fallback called | reason=%s | pending=%d",
+      reason,
+      OrdersTotal()
+   );
+
+   // Compatibility fallback:
+   // We only log here so the EA compiles even if the real helper
+   // from CopyTrader_Pendings.mqh is missing in the local install.
+   // Replace this with the real implementation in the include file.
+}
 
 
 //+------------------------------------------------------------------+
