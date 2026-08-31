@@ -55,19 +55,22 @@ bool ParseBridgeResponse(const string responseBody)
       return false;
    }
 
-   if(!json["sync_required"].IsNull())
-   {
-      string raw = json["sync_required"].ToStr();
-      string val = StringToLower(StringTrimLeft(StringTrimRight(raw)));
-      g_bridge_sync_required = (
-         val == "true" ||
-         val == "1" ||
-         val == "yes" ||
-         val == "on"
-      );
-      Print("Bridge sync_required parsed: ", g_bridge_sync_required);
-   }
+   string raw = json["sync_required"].ToStr();
+   if(raw == "")
+      return true;
 
+   StringTrimLeft(raw);
+   StringTrimRight(raw);
+   StringToLower(raw);
+
+   g_bridge_sync_required = (
+      raw == "true" ||
+      raw == "1" ||
+      raw == "yes" ||
+      raw == "on"
+   );
+
+   Print("Bridge sync_required parsed: ", g_bridge_sync_required);
    return true;
 }
 
@@ -75,7 +78,7 @@ bool SendToServer(string jsonData)
 {
    char   post[];
    char   result[];
-   string headers;
+   string headers = "Content-Type: application/json\r\n";
    string response_headers = "";
 
    ResetBridgeHttpState();
@@ -85,7 +88,6 @@ bool SendToServer(string jsonData)
    StringToCharArray(jsonData, post, 0, StringLen(jsonData));
 
    string url = BridgeServerURL + "/trade_signal";
-   headers    = "Content-Type: application/json\r\n";
 
    ResetLastError();
    int res = WebRequest(
