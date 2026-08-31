@@ -129,6 +129,10 @@ def _is_sync_complete_event(data: dict) -> bool:
     return _event_type_from_data(data) == "SYNC_COMPLETE"
 
 
+def _is_pending_open_event(data: dict) -> bool:
+    return _event_type_from_data(data) == "PENDING_OPEN"
+
+
 def _get_sync_required() -> bool:
     with _sync_state_lock:
         return bool(_sync_required)
@@ -162,6 +166,81 @@ def _response_meta() -> dict:
             "dedupe_window_ms": DEDUPE_WINDOW_MS,
             "last_sync_completed_at_ms": int(_last_sync_completed_at_ms),
         }
+
+
+def _iter_accounts(account_manager):
+    if account_manager is None:
+        return []
+
+    for attr in ("accounts", "clients", "account_clients", "ctrader_clients"):
+        value = getattr(account_manager, attr, None)
+        if isinstance(value, dict):
+            return list(value.values())
+        if isinstance(value, (list, tuple)):
+            return list(value)
+
+    return []
+
+
+def _account_name_of(account) -> str:
+    for attr in ("name", "account_name"):
+        value = getattr(account, attr, None)
+        if value:
+            return str(value)
+    return ""
+
+
+def _account_matches_magic(account, magic) -> bool:
+    if magic in (None, "", 0, "0"):
+        return True
+
+    magic_str = str(magic).strip()
+
+    route_magic = getattr(account, "route_magic_number", None)
+    if route_magic is not None and str(route_magic).strip() == magic_str:
+        return True
+
+    magic_numbers = getattr(account, "magic_numbers", None)
+    if isinstance(magic_numbers, (list, tuple, set)):
+        return magic_str in {str(x).strip() for x in magic_numbers}
+
+    return False
+
+
+def _account_is_symbol_ready(account) -> bool:
+    for attr in ("symbols_ready", "symbol_specs_ready", "full_symbol_specs_ready"):
+        value = getattr(account, attr, None)
+        if value is not None:
+            return bool(value)
+
+    client = getattr(account, "client", None)
+    if client is not None:
+        for attr in ("symbols_ready", "symbol_specs_ready", "full_symbol_specs_ready"):
+            value = getattr(client, attr, None)
+            if value is not None:
+                return bool(value)
+
+    return False
+
+
+def _startup_pending_accounts_not_ready(account_manager, data: dict):
+    accounts = _iter_accounts(account_manager)
+    magic = data.get("magic")
+    targeted = []
+
+    for account in accounts:
+        if _account_matches_magic(account, magic):
+            targeted.append(account)
+
+    if not targeted:
+        return []
+
+    not_ready = []
+    for account in targeted:
+        if not _account_is_symbol_ready(account):
+            not_ready.append(_account_name_of(account) or "unknown")
+
+    return not_ready
 
 
 class MT5BridgeHandler(BaseHTTPRequestHandler):
@@ -238,6 +317,7 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
             symbol = data.get("symbol")
             is_startup_sync = _is_startup_sync_event(data)
             is_sync_complete = _is_sync_complete_event(data)
+            is_pending_open = _is_pending_open_event(data)
 
             logger.info(
                 "Received trade event: event_type=%s ticket=%s symbol=%s client_ip=%s startup_sync=%s sync_complete=%s",
@@ -346,6 +426,47 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return
+
+            if is_startup_sync and is_pending_open:
+                not_ready_accounts = _startup_pending_accounts_not_ready(self.account_manager, data)
+                if not_ready_accounts:
+                    logger.warning(
+                        "Deferring startup pending event | ticket=%s symbol=%s magic=%s target_accounts=%s reason=symbol_specs_not_ready",
+                        ticket,
+                        symbol,
+                        data.get("magic"),
+                        not_ready_accounts,
+                    )
+                    notify_warning(
+                        event="bridge_startup_pending_deferred",
+                        message="Startup pending order deferred because cTrader symbol specs are not ready",
+                        startup_sync=True,
+                        sync_complete=False,
+                        sync_required=_get_sync_required(),
+                        target_accounts=",".join(not_ready_accounts),
+                        **_event_context(
+                            data,
+                            client_ip=client_ip,
+                            content_length=content_length,
+                            path=self.path,
+                        ),
+                    )
+                    self._send_json(
+                        200,
+                        {
+                            "status": "retry",
+                            "message": "Startup pending order deferred; cTrader symbol specs are not ready",
+                            "duplicate": False,
+                            "retry_required": True,
+                            "retry_reason": "symbol_specs_not_ready",
+                            "event_type": event_type,
+                            "ticket": ticket,
+                            "startup_sync": True,
+                            "sync_complete": False,
+                            "target_accounts": not_ready_accounts,
+                        },
+                    )
+                    return
 
             process_trade_event(data, self.account_manager)
 
