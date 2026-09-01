@@ -469,6 +469,116 @@ def _calc_volume_units(account_name, client, config, symbol_id: int, mt5_symbol:
     return int(snapped)
 
 
+def transition_pending_to_market(
+    account_name,
+    client,
+    config,
+    ticket,
+    mt5_symbol,
+    side,
+    volume,
+    sl,
+    tp,
+    magic,
+    account_manager,
+):
+    """
+    Transition a pending cTrader order to a canonical market copy when MT5
+    sends OPEN for the same ticket.
+
+    Behavior:
+    - If a positive-volume cTrader position with label MT5_PENDING_<ticket>
+      already exists (account_manager has ticket -> positionId), adopt it and
+      do not send another market order.
+    - If the follower pending order is still resting, cancel it and then
+      send exactly one canonical market order with label MT5_<ticket>.
+    """
+    pending_label = f"MT5_PENDING_{ticket}"
+    canonical_label = f"MT5_{ticket}"
+
+    existing_order_id = account_manager.get_order_id(account_name, int(ticket))
+
+    # 1. Cancel the known resting follower pending order.
+    if existing_order_id:
+        try:
+            client.cancel_pending_order(
+                account_id=config.account_id,
+                order_id=int(existing_order_id),
+            )
+            logger.info(
+                f"[{account_name}] Transition pending-to-market: "
+                f"cancel sent for ticket {ticket} orderId={existing_order_id}"
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[{account_name}] Transition pending-to-market: "
+                f"cancel failed for ticket {ticket} orderId={existing_order_id}: {exc}"
+            )
+
+    # 2. Reconcile cTrader state after the cancel request.
+    #
+    # We do not have a direct "get_open_positions()" API in this client,
+    # so we rely on the account manager's existing reconciliation mechanism.
+    # The account manager will process incoming ProtoOAReconcileRes and
+    # execution events, and will promote any positive-volume position with
+    # label MT5_PENDING_<ticket> to a live position mapping.
+    #
+    # For now, we assume that if a positive-volume position exists, the
+    # account manager will have already promoted it by the time this
+    # transition runs. If it has not, we will send one canonical market order.
+
+    # 3. Check whether a live position mapping already exists.
+    existing_position_id = account_manager.get_position_id(
+        account_name,
+        int(ticket),
+    )
+
+    if existing_position_id:
+        logger.info(
+            f"[{account_name}] Transition pending-to-market: "
+            f"ticket {ticket} already has live positionId={existing_position_id}; "
+            f"adopting it and skipping market order"
+        )
+
+        # Apply SL/TP to the adopted position.
+        try:
+            client.amend_position(
+                account_id=config.account_id,
+                position_id=int(existing_position_id),
+                sl=sl if float(sl or 0) > 0 else None,
+                tp=tp if float(tp or 0) > 0 else None,
+            )
+            logger.info(
+                f"[{account_name}] Transition pending-to-market: "
+                f"SL/TP applied to adopted positionId={existing_position_id}"
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[{account_name}] Transition pending-to-market: "
+                f"SL/TP amend failed for positionId={existing_position_id}: {exc}"
+            )
+        return
+
+    # 4. No live position mapping exists yet. Send one canonical market copy.
+    logger.info(
+        f"[{account_name}] Transition pending-to-market: "
+        f"ticket {ticket} has no live position yet; sending one canonical market order"
+    )
+
+    return copy_open_to_account(
+        account_name=account_name,
+        client=client,
+        config=config,
+        ticket=ticket,
+        mt5_symbol=mt5_symbol,
+        side=side,
+        volume=float(volume),
+        sl=sl,
+        tp=tp,
+        magic=magic,
+    )
+
+
 def copy_open_to_account(
     account_name,
     client,
@@ -818,12 +928,14 @@ def copy_pending_to_account(
         )
         raise
 
+    pending_label = f"MT5_PENDING_{ticket}"
+
     logger.info(
         f"[{account_name}] Creating pending {ptype.upper()} {trade_side} | "
         f"ticket={ticket} symbol={resolved_symbol} symbolId={symbol_id} mt5_symbol={mt5_symbol} | "
         f"Volume={volume_to_send} units ({adjusted_lots:.4f} lots before cTrader snap) | "
         f"stop={stop_r} limit={limit_r} SL={sl_r} TP={tp_r} | "
-        f"Label=MT5_{ticket} | expiry_ms={expiration_ms_n}"
+        f"Label={pending_label} | expiry_ms={expiration_ms_n}"
     )
 
     try:
@@ -839,7 +951,7 @@ def copy_pending_to_account(
             limit_price=limit_r,
             sl=sl_r,
             tp=tp_r,
-            label=f"MT5_{ticket}",
+            label=pending_label,
             expiration_ms=expiration_ms_n,
         )
 
@@ -850,7 +962,7 @@ def copy_pending_to_account(
         logger.info(
             f"[{account_name}] Pending order submitted | "
             f"ticket={ticket} symbol={resolved_symbol} symbolId={symbol_id} "
-            f"label=MT5_{ticket} orderId={order_id or 'unknown'}"
+            f"label={pending_label} orderId={order_id or 'unknown'}"
         )
         notify_info(
             event="pending_order_submitted",
