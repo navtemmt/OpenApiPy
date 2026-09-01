@@ -2,6 +2,20 @@
 Account Manager for Multiple cTrader Connections
 
 Manages multiple cTrader client connections for different accounts.
+
+Important mapping lifecycle:
+    Pending accepted:
+        MT5 ticket -> cTrader orderId
+
+    Pending filled / market order filled:
+        MT5 ticket -> cTrader positionId
+        old orderId mapping removed
+
+    Closed:
+        mappings removed
+
+cTrader sends a position shell with volume=0 for ORDER_ACCEPTED. That shell is
+not a running position and must never be saved as the live position mapping.
 """
 
 import inspect
@@ -21,6 +35,26 @@ from trade_processor import _enforce_max_risk_on_fill, notify_position_update
 from app_state import logger, notify_error, notify_warning, notify_info
 
 
+# Do not import ProtoOAExecutionType / ProtoOAPositionStatus.
+# They are not exported by the generated protobuf module installed in this
+# project, which caused every execution callback to fail.
+#
+# Values below are confirmed by your cTrader execution logs:
+# - ORDER_ACCEPTED = 2
+# - ORDER_FILLED = 3
+# - ORDER_CANCELLED = 5
+#
+# POSITION_STATUS_CREATED / OPEN / CLOSED are treated defensively below:
+# accepted position shells always have volume=0; live positions have volume>0.
+ORDER_ACCEPTED = 2
+ORDER_FILLED = 3
+ORDER_CANCELLED = 5
+
+POSITION_STATUS_CREATED = 1
+POSITION_STATUS_OPEN = 2
+POSITION_STATUS_CLOSED = 3
+
+
 try:
     logger.info(
         "DEBUG CTraderClient._on_spot_event SOURCE:\n%s",
@@ -36,14 +70,25 @@ class AccountManager:
     def __init__(self):
         self.clients: Dict[str, CTraderClient] = {}
         self.configs: Dict[str, AccountConfig] = {}
+
+        # MT5 ticket -> cTrader running positionId.
         self.position_maps: Dict[str, Dict[int, int]] = {}
+
+        # cTrader positionId -> live cTrader volume in units.
         self.position_volumes: Dict[str, Dict[int, int]] = {}
+
+        # MT5 ticket -> cTrader pending orderId or temporary market orderId.
         self.order_maps: Dict[str, Dict[int, int]] = {}
+
         self.account_equity: Dict[str, float] = {}
         self.account_balance: Dict[str, float] = {}
+
+        # Stores latest MT5 event/payload per ticket. Used by the risk handler.
         self.mt5_payloads: Dict[str, Dict[int, dict]] = {}
+
         self.reconcile_requested: Dict[str, bool] = {}
         self.auth_seen: Dict[str, bool] = {}
+
         self.route_magic_map: Dict[int, str] = {}
         self.shared_token_files: Dict[str, str] = {}
 
@@ -64,29 +109,37 @@ class AccountManager:
     @staticmethod
     def _extract_position_label(pos) -> str:
         try:
-            td = getattr(pos, "tradeData", None)
-            if td is None:
+            trade_data = getattr(pos, "tradeData", None)
+            if trade_data is None:
                 return ""
-            lbl = getattr(td, "label", "")
-            return lbl if isinstance(lbl, str) else ""
+            label = getattr(trade_data, "label", "")
+            return label if isinstance(label, str) else ""
         except Exception:
             return ""
 
     @staticmethod
     def _extract_order_label(order) -> str:
         try:
-            td = getattr(order, "tradeData", None)
-            if td is None:
+            trade_data = getattr(order, "tradeData", None)
+            if trade_data is None:
                 return ""
-            lbl = getattr(td, "label", "")
-            return lbl if isinstance(lbl, str) else ""
+            label = getattr(trade_data, "label", "")
+            return label if isinstance(label, str) else ""
         except Exception:
             return ""
 
     @staticmethod
     def _label_to_ticket(label: str) -> Optional[int]:
+        """
+        Parse bridge labels in the form MT5_<ticket>.
+
+        Examples:
+            MT5_5854323 -> 5854323
+            MT5_5854324 -> 5854324
+        """
         if not (isinstance(label, str) and label.startswith("MT5_")):
             return None
+
         try:
             return int(label.split("_", 1)[1])
         except Exception:
@@ -94,18 +147,24 @@ class AccountManager:
 
     @staticmethod
     def _extract_position_volume(pos) -> int:
+        """
+        Return positive live volume. A zero value means no running volume.
+
+        cTrader's ORDER_ACCEPTED callback may include a position object with
+        positionId but zero volume. That object is only a pending-order shell.
+        """
         try:
-            td = getattr(pos, "tradeData", None)
-            if td is not None:
-                v = getattr(td, "volume", 0)
-                if int(v) > 0:
-                    return int(v)
+            trade_data = getattr(pos, "tradeData", None)
+            if trade_data is not None:
+                volume = getattr(trade_data, "volume", 0)
+                if int(volume or 0) > 0:
+                    return int(volume)
         except Exception:
             pass
 
         try:
-            v = getattr(pos, "volume", 0)
-            return int(v) if int(v) > 0 else 0
+            volume = getattr(pos, "volume", 0)
+            return int(volume) if int(volume or 0) > 0 else 0
         except Exception:
             return 0
 
@@ -114,59 +173,67 @@ class AccountManager:
         reconcile_res,
     ) -> Tuple[Optional[float], Optional[float]]:
         try:
-            acc_obj = getattr(reconcile_res, "account", None)
-            if acc_obj is None:
+            account_obj = getattr(reconcile_res, "account", None)
+            if account_obj is None:
                 return None, None
 
-            if hasattr(acc_obj, "__iter__") and not isinstance(acc_obj, (bytes, str)):
-                acc0 = None
-                for a in acc_obj:
-                    acc0 = a
+            if hasattr(account_obj, "__iter__") and not isinstance(
+                account_obj,
+                (bytes, str),
+            ):
+                first_account = None
+                for account in account_obj:
+                    first_account = account
                     break
-                acc_obj = acc0
+                account_obj = first_account
 
-            if acc_obj is None:
+            if account_obj is None:
                 return None, None
 
-            eq = getattr(acc_obj, "equity", None)
-            bal = getattr(acc_obj, "balance", None)
+            equity = getattr(account_obj, "equity", None)
+            balance = getattr(account_obj, "balance", None)
 
-            eq_f = float(eq) if eq is not None else None
-            bal_f = float(bal) if bal is not None else None
-            return eq_f, bal_f
+            equity_float = float(equity) if equity is not None else None
+            balance_float = float(balance) if balance is not None else None
+
+            return equity_float, balance_float
         except Exception:
             return None, None
 
     @staticmethod
     def _config_account_id(config: AccountConfig) -> Optional[int]:
         try:
-            v = getattr(config, "account_id", None)
-            if v is not None and str(v).strip() != "":
-                return int(v)
+            value = getattr(config, "account_id", None)
+            if value is not None and str(value).strip() != "":
+                return int(value)
         except Exception:
             pass
+
         try:
-            v = getattr(config, "accountid", None)
-            if v is not None and str(v).strip() != "":
-                return int(v)
+            value = getattr(config, "accountid", None)
+            if value is not None and str(value).strip() != "":
+                return int(value)
         except Exception:
             pass
+
         return None
 
     @staticmethod
     def _config_route_magic(config: AccountConfig) -> Optional[int]:
         try:
-            v = getattr(config, "route_magic_number", None)
-            if v is not None and str(v).strip() != "":
-                return int(v)
+            value = getattr(config, "route_magic_number", None)
+            if value is not None and str(value).strip() != "":
+                return int(value)
         except Exception:
             pass
+
         try:
-            v = getattr(config, "magic_number", None)
-            if v is not None and str(v).strip() != "":
-                return int(v)
+            value = getattr(config, "magic_number", None)
+            if value is not None and str(value).strip() != "":
+                return int(value)
         except Exception:
             pass
+
         return None
 
     @staticmethod
@@ -178,15 +245,15 @@ class AccountManager:
 
     @staticmethod
     def _token_preview(token: str) -> str:
-        tok = str(token or "")
-        if len(tok) <= 10:
-            return tok or "<empty>"
-        return f"{tok[:6]}...{tok[-4:]}"
+        token = str(token or "")
+        if len(token) <= 10:
+            return token or "<empty>"
+        return f"{token[:6]}...{token[-4:]}"
 
     def _notify_ctx(self, account_name: Optional[str] = None, **extra):
-        ctx = {"account_name": account_name}
-        ctx.update(extra)
-        return ctx
+        context = {"account_name": account_name}
+        context.update(extra)
+        return context
 
     def _build_token_group_key(self, account: AccountConfig) -> str:
         explicit_candidates = (
@@ -194,6 +261,7 @@ class AccountManager:
             getattr(account, "shared_token_group", None),
             getattr(account, "ctid_key", None),
         )
+
         for value in explicit_candidates:
             value = self._safe_str(value)
             if value:
@@ -201,6 +269,7 @@ class AccountManager:
 
         access_token = self._safe_str(getattr(account, "access_token", ""))
         refresh_token = self._safe_str(getattr(account, "refresh_token", ""))
+
         if access_token or refresh_token:
             return f"pair:{access_token}|{refresh_token}"
 
@@ -210,21 +279,29 @@ class AccountManager:
 
         return f"account:{self._safe_str(getattr(account, 'name', 'unknown'))}"
 
-    def _resolve_shared_token_state_file(self, account: AccountConfig) -> Optional[str]:
+    def _resolve_shared_token_state_file(
+        self,
+        account: AccountConfig,
+    ) -> Optional[str]:
         token_key = self._build_token_group_key(account)
-        configured_state_file = self._safe_str(getattr(account, "token_state_file", ""))
+        configured_state_file = self._safe_str(
+            getattr(account, "token_state_file", ""),
+        )
 
         existing = self.shared_token_files.get(token_key)
+
         if existing is not None:
             if configured_state_file and configured_state_file != existing:
-                msg = (
-                    f"Shared token group detected; overriding token_state_file "
+                message = (
+                    "Shared token group detected; overriding token_state_file "
                     f"{configured_state_file} -> {existing}"
                 )
-                logger.warning("[%s] %s", account.name, msg)
+
+                logger.warning("[%s] %s", account.name, message)
+
                 notify_warning(
                     event="shared_token_state_override",
-                    message=msg,
+                    message=message,
                     **self._notify_ctx(
                         account.name,
                         token_group=token_key,
@@ -232,16 +309,19 @@ class AccountManager:
                         canonical_state_file=existing,
                     ),
                 )
+
             return existing or None
 
         if configured_state_file:
             self.shared_token_files[token_key] = configured_state_file
+
             logger.info(
                 "[%s] Registered shared token group %s with state file %s",
                 account.name,
                 token_key,
                 configured_state_file,
             )
+
             return configured_state_file
 
         logger.info(
@@ -249,56 +329,77 @@ class AccountManager:
             account.name,
             token_key,
         )
+
         self.shared_token_files[token_key] = ""
         return None
 
-    def _ensure_account_maps(self, acc_name: str):
-        if acc_name not in self.position_maps:
-            self.position_maps[acc_name] = {}
-        if acc_name not in self.position_volumes:
-            self.position_volumes[acc_name] = {}
-        if acc_name not in self.order_maps:
-            self.order_maps[acc_name] = {}
-        if acc_name not in self.mt5_payloads:
-            self.mt5_payloads[acc_name] = {}
-        if acc_name not in self.reconcile_requested:
-            self.reconcile_requested[acc_name] = False
-        if acc_name not in self.auth_seen:
-            self.auth_seen[acc_name] = False
+    def _ensure_account_maps(self, account_name: str):
+        if account_name not in self.position_maps:
+            self.position_maps[account_name] = {}
+
+        if account_name not in self.position_volumes:
+            self.position_volumes[account_name] = {}
+
+        if account_name not in self.order_maps:
+            self.order_maps[account_name] = {}
+
+        if account_name not in self.mt5_payloads:
+            self.mt5_payloads[account_name] = {}
+
+        if account_name not in self.reconcile_requested:
+            self.reconcile_requested[account_name] = False
+
+        if account_name not in self.auth_seen:
+            self.auth_seen[account_name] = False
 
     def _register_route_magic(self, account: AccountConfig):
         route_magic = self._config_route_magic(account)
+
         if route_magic is None:
             logger.info(
-                "[%s] No route_magic_number configured; magic-based routing unavailable",
+                "[%s] No route_magic_number configured; "
+                "magic-based routing unavailable",
                 account.name,
             )
             return
 
-        existing = self.route_magic_map.get(int(route_magic))
-        if existing and existing != account.name:
+        existing_account = self.route_magic_map.get(int(route_magic))
+
+        if existing_account and existing_account != account.name:
             raise ValueError(
                 f"Duplicate route_magic_number={int(route_magic)} for accounts "
-                f"{existing!r} and {account.name!r}"
+                f"{existing_account!r} and {account.name!r}"
             )
 
         self.route_magic_map[int(route_magic)] = account.name
-        logger.info("[%s] Registered route magic %s", account.name, int(route_magic))
+
+        logger.info(
+            "[%s] Registered route magic %s",
+            account.name,
+            int(route_magic),
+        )
 
     def _unregister_route_magic(self, account_name: str):
-        stale = [magic for magic, name in self.route_magic_map.items() if name == account_name]
-        for magic in stale:
+        stale_magics = [
+            magic
+            for magic, mapped_name in self.route_magic_map.items()
+            if mapped_name == account_name
+        ]
+
+        for magic in stale_magics:
             self.route_magic_map.pop(magic, None)
             logger.info("[%s] Unregistered route magic %s", account_name, magic)
 
     def _cache_funds_from_reconcile(self, account_name: str, reconcile_res):
-        eq, bal = self._extract_account_equity_balance(reconcile_res)
-        if eq is not None:
-            self.account_equity[account_name] = float(eq)
-        if bal is not None:
-            self.account_balance[account_name] = float(bal)
+        equity, balance = self._extract_account_equity_balance(reconcile_res)
 
-        if eq is not None or bal is not None:
+        if equity is not None:
+            self.account_equity[account_name] = float(equity)
+
+        if balance is not None:
+            self.account_balance[account_name] = float(balance)
+
+        if equity is not None or balance is not None:
             logger.info(
                 "[%s] Funds cached: equity=%s, balance=%s",
                 account_name,
@@ -306,19 +407,39 @@ class AccountManager:
                 self.account_balance.get(account_name),
             )
 
-    def _store_order_mapping(self, account_name: str, mt5_ticket: int, order_id: int):
+    def _store_order_mapping(
+        self,
+        account_name: str,
+        mt5_ticket: int,
+        order_id: int,
+    ):
+        """
+        Store a cTrader orderId for an MT5 ticket.
+
+        This mapping is used while a pending order waits to be filled.
+        It is removed only after a positive-volume running position exists.
+        """
+        if int(order_id or 0) <= 0:
+            return
+
         self._ensure_account_maps(account_name)
+
+        previous_order_id = self.order_maps[account_name].get(int(mt5_ticket))
         self.order_maps[account_name][int(mt5_ticket)] = int(order_id)
-        logger.info(
-            "[%s] MT5 ticket %s -> cTrader orderId %s",
-            account_name,
-            int(mt5_ticket),
-            int(order_id),
-        )
+
+        if previous_order_id != int(order_id):
+            logger.info(
+                "[%s] MT5 ticket %s -> cTrader orderId %s",
+                account_name,
+                int(mt5_ticket),
+                int(order_id),
+            )
 
     def _remove_order_mapping(self, account_name: str, mt5_ticket: int):
         self._ensure_account_maps(account_name)
+
         removed = self.order_maps[account_name].pop(int(mt5_ticket), None)
+
         if removed:
             logger.info(
                 "[%s] Removed MT5 ticket %s -> stale cTrader orderId %s mapping",
@@ -327,22 +448,49 @@ class AccountManager:
                 int(removed),
             )
 
-    def _store_position_mapping(self, account_name: str, mt5_ticket: int, position_id: int):
+    def _store_position_mapping(
+        self,
+        account_name: str,
+        mt5_ticket: int,
+        position_id: int,
+    ):
+        """
+        Store a running cTrader positionId for an MT5 ticket.
+
+        This must only be called for a real running position; never call it
+        for cTrader's zero-volume ORDER_ACCEPTED pending-order shell.
+        """
+        if int(position_id or 0) <= 0:
+            return
+
         self._ensure_account_maps(account_name)
-        self.position_maps[account_name][int(mt5_ticket)] = int(position_id)
-        notify_position_update(account_name, int(mt5_ticket), self)
-        logger.info(
-            "[%s] MT5 ticket %s -> cTrader positionId %s",
-            account_name,
+
+        previous_position_id = self.position_maps[account_name].get(
             int(mt5_ticket),
-            int(position_id),
         )
+
+        self.position_maps[account_name][int(mt5_ticket)] = int(position_id)
+
+        if previous_position_id != int(position_id):
+            logger.info(
+                "[%s] MT5 ticket %s -> cTrader positionId %s",
+                account_name,
+                int(mt5_ticket),
+                int(position_id),
+            )
+
+        # This allows pending SL/TP updates to be applied only once a real
+        # position mapping exists.
+        notify_position_update(account_name, int(mt5_ticket), self)
 
     def _remove_position_mapping(self, account_name: str, mt5_ticket: int):
         self._ensure_account_maps(account_name)
+
         removed = self.position_maps[account_name].pop(int(mt5_ticket), None)
+
         if removed:
             self.position_volumes[account_name].pop(int(removed), None)
+
             logger.info(
                 "[%s] Removed MT5 ticket %s -> stale cTrader positionId %s mapping",
                 account_name,
@@ -350,256 +498,568 @@ class AccountManager:
                 int(removed),
             )
 
-    def _store_position_volume(self, account_name: str, position_id: int, volume: int):
-        if int(position_id) <= 0:
+    def _store_position_volume(
+        self,
+        account_name: str,
+        position_id: int,
+        volume: int,
+    ):
+        if int(position_id or 0) <= 0:
             return
 
         self._ensure_account_maps(account_name)
 
         if int(volume or 0) > 0:
-            self.position_volumes[account_name][int(position_id)] = int(volume)
-            logger.info(
-                "[%s] positionId %s volume=%s cached",
-                account_name,
+            previous_volume = self.position_volumes[account_name].get(
                 int(position_id),
-                int(volume),
             )
+
+            self.position_volumes[account_name][int(position_id)] = int(volume)
+
+            if previous_volume != int(volume):
+                logger.info(
+                    "[%s] positionId %s volume=%s cached",
+                    account_name,
+                    int(position_id),
+                    int(volume),
+                )
         else:
             self.position_volumes[account_name].pop(int(position_id), None)
 
     def _handle_execution_order(self, account_name: str, extracted):
+        """
+        Store cTrader order mapping from an execution event.
+
+        For pending acceptance, this stores:
+            ticket -> pending orderId
+
+        For a market order acceptance, this may temporarily store:
+            ticket -> market orderId
+
+        The mapping is removed when ORDER_FILLED creates the corresponding
+        positive-volume running position.
+        """
         order = getattr(extracted, "order", None)
         if order is None:
             return
 
-        order_id = int(getattr(order, "orderId", 0) or 0)
+        order_id = self._to_int(
+            getattr(order, "orderId", 0),
+            default=0,
+        )
+
         label = self._extract_order_label(order)
         ticket = self._label_to_ticket(label)
 
-        if order_id and ticket is not None:
-            self._store_order_mapping(account_name, int(ticket), int(order_id))
+        if order_id > 0 and ticket is not None:
+            self._store_order_mapping(
+                account_name,
+                int(ticket),
+                int(order_id),
+            )
 
     def _handle_execution_position(self, account_name: str, extracted):
-        pos = getattr(extracted, "position", None)
-        if pos is None:
-            return
-    
-        exec_type = getattr(extracted, "executionType", None)
-        position_id = int(getattr(pos, "positionId", 0) or 0)
-        label = self._extract_position_label(pos)
-        ticket = self._label_to_ticket(label)
-        volume = self._extract_position_volume(pos)
-    
-        from ctrader_open_api.messages.OpenApiMessages_pb2 import (
-            ProtoOAExecutionType,
-            ProtoOAPositionStatus,
-        )
-    
-        pos_status = getattr(pos, "positionStatus", None)
-        is_fill = exec_type == ProtoOAExecutionType.ORDER_FILLED
-        is_open = pos_status == ProtoOAPositionStatus.POSITION_STATUS_OPEN
-    
-        if position_id and ticket is not None:
-            self._store_position_mapping(account_name, int(ticket), int(position_id))
-    
-            # Keep the pending-order mapping for ORDER_ACCEPTED / pending-created events.
-            # Remove it only when the order is truly filled into an open position.
-            if is_fill and is_open:
-                self._remove_order_mapping(account_name, int(ticket))
-    
-        if position_id:
-            self._store_position_volume(account_name, int(position_id), int(volume))
-    
-        if position_id:
-            logger.info(
-                "[%s] (exec pos) positionId=%s ticket=%s volume=%s exec_type=%s pos_status=%s",
-                account_name,
-                position_id,
-                ticket,
-                volume,
-                exec_type,
-                pos_status,
-            )
-    
-        self._try_enforce_max_risk_on_fill(account_name, extracted, pos, position_id, ticket)
+        """
+        Handle cTrader execution-position lifecycle safely.
 
-    def _try_enforce_max_risk_on_fill(self, account_name: str, extracted, pos, position_id: int, ticket: Optional[int]):
+        Correct lifecycle:
+            ORDER_ACCEPTED + volume=0:
+                cTrader pending/market order acknowledgement shell.
+                Keep the order mapping.
+                Do not store a live position mapping.
+
+            ORDER_FILLED + volume>0:
+                A real running position exists.
+                Store ticket -> positionId.
+                Remove ticket -> orderId.
+
+            Position closed or filled with zero volume:
+                Remove stale mappings only if this is a close event.
+
+        The positive-volume check is intentional. It protects the bridge from
+        treating cTrader's pending-order position shell as a real position.
+        """
+        position = getattr(extracted, "position", None)
+        if position is None:
+            return
+
+        execution_type = self._to_int(
+            getattr(extracted, "executionType", 0),
+            default=0,
+        )
+
+        position_status = self._to_int(
+            getattr(position, "positionStatus", 0),
+            default=0,
+        )
+
+        position_id = self._to_int(
+            getattr(position, "positionId", 0),
+            default=0,
+        )
+
+        label = self._extract_position_label(position)
+        ticket = self._label_to_ticket(label)
+
+        volume = self._extract_position_volume(position)
+
+        if ticket is None:
+            return
+
+        is_order_accepted = execution_type == ORDER_ACCEPTED
+        is_order_filled = execution_type == ORDER_FILLED
+        is_order_cancelled = execution_type == ORDER_CANCELLED
+
+        # Some protobuf versions expose different status numbers. The volume
+        # is the authoritative indicator for a genuinely running position.
+        is_live_position = position_id > 0 and volume > 0
+        is_zero_volume_shell = position_id > 0 and volume <= 0
+
+        logger.info(
+            "[%s] Execution position | ticket=%s positionId=%s volume=%s "
+            "executionType=%s positionStatus=%s accepted=%s filled=%s "
+            "cancelled=%s live=%s shell=%s",
+            account_name,
+            ticket,
+            position_id,
+            volume,
+            execution_type,
+            position_status,
+            is_order_accepted,
+            is_order_filled,
+            is_order_cancelled,
+            is_live_position,
+            is_zero_volume_shell,
+        )
+
+        # Pending STOP/LIMIT accepted, or market order merely acknowledged.
+        # cTrader supplies a positionId even though volume remains zero.
+        # Never save it to position_maps.
+        if is_order_accepted and is_zero_volume_shell:
+            logger.info(
+                "[%s] Accepted order shell retained as order mapping only | "
+                "ticket=%s positionId=%s positionStatus=%s",
+                account_name,
+                ticket,
+                position_id,
+                position_status,
+            )
+            return
+
+        # A real filled/active cTrader position. This is the promotion point:
+        # ticket -> orderId becomes ticket -> positionId.
+        if is_live_position:
+            previous_order_id = self.get_order_id(
+                account_name,
+                int(ticket),
+            )
+
+            self._store_position_mapping(
+                account_name,
+                int(ticket),
+                int(position_id),
+            )
+
+            self._store_position_volume(
+                account_name,
+                int(position_id),
+                int(volume),
+            )
+
+            if previous_order_id:
+                self._remove_order_mapping(
+                    account_name,
+                    int(ticket),
+                )
+
+                logger.info(
+                    "[%s] Promoted MT5 ticket %s from orderId=%s "
+                    "to running positionId=%s volume=%s",
+                    account_name,
+                    ticket,
+                    previous_order_id,
+                    position_id,
+                    volume,
+                )
+            else:
+                logger.info(
+                    "[%s] Stored running position mapping without prior "
+                    "order mapping | ticket=%s positionId=%s volume=%s",
+                    account_name,
+                    ticket,
+                    position_id,
+                    volume,
+                )
+
+            # This only performs a risk enforcement check when appropriate.
+            self._try_enforce_max_risk_on_fill(
+                account_name,
+                extracted,
+                position,
+                int(position_id),
+                int(ticket),
+            )
+            return
+
+        # A cancelled pending order has no running position. Keep no position
+        # mapping for it; remove only the order mapping.
+        if is_order_cancelled:
+            self._remove_order_mapping(account_name, int(ticket))
+
+            logger.info(
+                "[%s] Cancelled order removed order mapping | "
+                "ticket=%s positionId=%s",
+                account_name,
+                ticket,
+                position_id,
+            )
+            return
+
+        # A closed filled position should have no live volume.
+        # Remove both mappings after a true closed lifecycle event.
+        if (
+            is_order_filled
+            and is_zero_volume_shell
+            and position_status == POSITION_STATUS_CLOSED
+        ):
+            self._remove_order_mapping(account_name, int(ticket))
+            self._remove_position_mapping(account_name, int(ticket))
+
+            logger.info(
+                "[%s] Closed position removed mappings | "
+                "ticket=%s positionId=%s",
+                account_name,
+                ticket,
+                position_id,
+            )
+            return
+
+        logger.info(
+            "[%s] Ignored non-live execution position update | "
+            "ticket=%s positionId=%s volume=%s executionType=%s "
+            "positionStatus=%s",
+            account_name,
+            ticket,
+            position_id,
+            volume,
+            execution_type,
+            position_status,
+        )
+
+    def _try_enforce_max_risk_on_fill(
+        self,
+        account_name: str,
+        extracted,
+        position,
+        position_id: int,
+        ticket: Optional[int],
+    ):
+        """
+        Run post-fill risk logic only when cTrader confirms a positive-volume
+        live position. No protobuf enum import is used here.
+        """
         try:
-            if not position_id or ticket is None:
+            if int(position_id or 0) <= 0 or ticket is None:
                 return
 
-            from ctrader_open_api.messages.OpenApiMessages_pb2 import (
-                ProtoOAExecutionType,
-                ProtoOAPositionStatus,
+            volume = self._extract_position_volume(position)
+            if volume <= 0:
+                return
+
+            execution_type = self._to_int(
+                getattr(extracted, "executionType", 0),
+                default=0,
             )
 
-            pos_status = getattr(pos, "positionStatus", None)
-            exec_type = getattr(extracted, "executionType", None)
-            is_open = pos_status == ProtoOAPositionStatus.POSITION_STATUS_OPEN
-            is_fill = exec_type == ProtoOAExecutionType.ORDER_FILLED
-
-            if not (is_open and is_fill):
+            # Risk trimming is relevant only on a filled execution.
+            if execution_type != ORDER_FILLED:
                 return
 
             config = self.get_config(account_name)
-            client_obj = self.get_client(account_name)
-            if not config or not client_obj:
+            client = self.get_client(account_name)
+
+            if not config or not client:
                 return
 
-            symbol_id = int(
-                getattr(
-                    getattr(pos, "tradeData", None) or pos,
-                    "symbolId",
-                    0,
-                ) or 0
+            trade_data = getattr(position, "tradeData", None) or position
+
+            symbol_id = self._to_int(
+                getattr(trade_data, "symbolId", 0),
+                default=0,
             )
+
             if symbol_id <= 0:
                 return
 
             symbol = None
-            if hasattr(client_obj, "symbol_details"):
-                symbol = client_obj.symbol_details.get(symbol_id)
+            if hasattr(client, "symbol_details"):
+                symbol = client.symbol_details.get(int(symbol_id))
 
-            mt5_data = self.mt5_payloads.get(account_name, {}).get(int(ticket), None)
-
-            if symbol is not None:
-                _enforce_max_risk_on_fill(
-                    account_name=account_name,
-                    client=client_obj,
-                    config=config,
-                    account_manager=self,
-                    position=pos,
-                    symbol=symbol,
-                    mt5_symbol=None,
-                    mt5_data=mt5_data,
+            if symbol is None:
+                logger.warning(
+                    "[%s] Over-risk check skipped: symbol details missing | "
+                    "ticket=%s positionId=%s symbolId=%s",
+                    account_name,
+                    ticket,
+                    position_id,
+                    symbol_id,
                 )
-        except Exception as e:
-            logger.debug("[%s] over-risk enforce failed: %s", account_name, e, exc_info=True)
+                return
+
+            mt5_data = self.mt5_payloads.get(
+                account_name,
+                {},
+            ).get(
+                int(ticket),
+                None,
+            )
+
+            _enforce_max_risk_on_fill(
+                account_name=account_name,
+                client=client,
+                config=config,
+                account_manager=self,
+                position=position,
+                symbol=symbol,
+                mt5_symbol=None,
+                mt5_data=mt5_data,
+            )
+
+        except Exception as error:
+            logger.debug(
+                "[%s] Over-risk enforcement failed | ticket=%s positionId=%s "
+                "error=%s",
+                account_name,
+                ticket,
+                position_id,
+                error,
+                exc_info=True,
+            )
 
     def _handle_reconcile_positions(self, account_name: str, extracted) -> int:
+        """
+        Rebuild position mappings from cTrader's authoritative reconcile state.
+
+        Only positions with positive live volume are considered running.
+        """
         count = 0
-        pos_list = list(getattr(extracted, "position", []) or [])
+        positions = list(getattr(extracted, "position", []) or [])
 
         active_position_ids = set()
         active_position_tickets = set()
 
-        for pos in pos_list:
-            position_id = int(getattr(pos, "positionId", 0) or 0)
-            if not position_id:
+        for position in positions:
+            position_id = self._to_int(
+                getattr(position, "positionId", 0),
+                default=0,
+            )
+
+            if position_id <= 0:
+                continue
+
+            volume = self._extract_position_volume(position)
+
+            # Ignore pending shells / zero-volume closed entries.
+            if volume <= 0:
                 continue
 
             active_position_ids.add(int(position_id))
 
-            label = self._extract_position_label(pos)
+            label = self._extract_position_label(position)
             ticket = self._label_to_ticket(label)
-            vol = self._extract_position_volume(pos)
 
-            self._store_position_volume(account_name, int(position_id), int(vol))
+            self._store_position_volume(
+                account_name,
+                int(position_id),
+                int(volume),
+            )
 
             if ticket is not None:
                 active_position_tickets.add(int(ticket))
-                self._store_position_mapping(account_name, int(ticket), int(position_id))
-                logger.info(
-                    "[%s] (reconcile pos) MT5 ticket %s -> cTrader positionId %s volume=%s",
+
+                self._store_position_mapping(
                     account_name,
                     int(ticket),
                     int(position_id),
-                    int(vol),
                 )
+
+                # If reconcile sees a live position with the same ticket,
+                # any previous pending-order mapping is obsolete.
+                if self.get_order_id(account_name, int(ticket)):
+                    self._remove_order_mapping(account_name, int(ticket))
+
+                logger.info(
+                    "[%s] (reconcile pos) MT5 ticket %s -> "
+                    "cTrader positionId %s volume=%s",
+                    account_name,
+                    int(ticket),
+                    int(position_id),
+                    int(volume),
+                )
+
                 count += 1
 
         stale_tickets = [
-            t for t in self.position_maps.get(account_name, {}).keys()
-            if t not in active_position_tickets
+            ticket
+            for ticket in self.position_maps.get(account_name, {}).keys()
+            if ticket not in active_position_tickets
         ]
-        for t in stale_tickets:
-            self._remove_position_mapping(account_name, int(t))
 
-        stale_ids = [
-            pid for pid in self.position_volumes.get(account_name, {}).keys()
-            if pid not in active_position_ids
+        for ticket in stale_tickets:
+            self._remove_position_mapping(account_name, int(ticket))
+
+        stale_position_ids = [
+            position_id
+            for position_id in self.position_volumes.get(account_name, {}).keys()
+            if position_id not in active_position_ids
         ]
-        for pid in stale_ids:
-            self.position_volumes[account_name].pop(pid, None)
-            logger.info("[%s] Removed stale cached volume for positionId %s", account_name, pid)
+
+        for position_id in stale_position_ids:
+            self.position_volumes[account_name].pop(position_id, None)
+
+            logger.info(
+                "[%s] Removed stale cached volume for positionId %s",
+                account_name,
+                position_id,
+            )
 
         return count
 
     def _handle_reconcile_orders(self, account_name: str, extracted) -> int:
+        """
+        Rebuild active pending order mappings from reconcile state.
+
+        If a ticket already has a live position mapping, do not put an order
+        mapping back for that ticket. This avoids a stale order mapping causing
+        the bridge to treat a filled pending ticket as pending again.
+        """
         order_count = 0
-        order_list = list(getattr(extracted, "order", []) or [])
+        orders = list(getattr(extracted, "order", []) or [])
 
         active_order_tickets = set()
 
-        for order in order_list:
-            order_id = int(getattr(order, "orderId", 0) or 0)
+        for order in orders:
+            order_id = self._to_int(
+                getattr(order, "orderId", 0),
+                default=0,
+            )
+
             label = self._extract_order_label(order)
             ticket = self._label_to_ticket(label)
 
-            if order_id and ticket is not None:
-                active_order_tickets.add(int(ticket))
-                self._store_order_mapping(account_name, int(ticket), int(order_id))
+            if order_id <= 0 or ticket is None:
+                continue
+
+            # A live position always wins over an order mapping for the same
+            # MT5 ticket. Do not overwrite the live lifecycle state.
+            if self.get_position_id(account_name, int(ticket)):
                 logger.info(
-                    "[%s] (reconcile order) MT5 ticket %s -> cTrader orderId %s",
+                    "[%s] (reconcile order) ignored orderId=%s for ticket=%s "
+                    "because live position mapping exists",
                     account_name,
-                    int(ticket),
-                    int(order_id),
+                    order_id,
+                    ticket,
                 )
-                order_count += 1
+                continue
+
+            active_order_tickets.add(int(ticket))
+
+            self._store_order_mapping(
+                account_name,
+                int(ticket),
+                int(order_id),
+            )
+
+            logger.info(
+                "[%s] (reconcile order) MT5 ticket %s -> cTrader orderId %s",
+                account_name,
+                int(ticket),
+                int(order_id),
+            )
+
+            order_count += 1
 
         stale_tickets = [
-            t for t in self.order_maps.get(account_name, {}).keys()
-            if t not in active_order_tickets
+            ticket
+            for ticket in self.order_maps.get(account_name, {}).keys()
+            if ticket not in active_order_tickets
+            and not self.get_position_id(account_name, int(ticket))
         ]
-        for t in stale_tickets:
-            self._remove_order_mapping(account_name, int(t))
+
+        for ticket in stale_tickets:
+            self._remove_order_mapping(account_name, int(ticket))
 
         return order_count
 
     def _process_reconcile(self, account_name: str, extracted):
         self._cache_funds_from_reconcile(account_name, extracted)
 
-        count = self._handle_reconcile_positions(account_name, extracted)
+        position_count = self._handle_reconcile_positions(
+            account_name,
+            extracted,
+        )
 
         try:
-            order_count = self._handle_reconcile_orders(account_name, extracted)
-        except Exception as e:
-            logger.debug("[%s] Failed parsing reconcile orders", account_name, exc_info=True)
+            order_count = self._handle_reconcile_orders(
+                account_name,
+                extracted,
+            )
+        except Exception as error:
+            logger.debug(
+                "[%s] Failed parsing reconcile orders",
+                account_name,
+                exc_info=True,
+            )
+
             notify_error(
                 event="reconcile_parse_orders",
                 message="Failed parsing reconcile orders",
-                exc=e,
+                exc=error,
                 **self._notify_ctx(account_name),
             )
+
             order_count = 0
 
         logger.info(
-            "[%s] Reconcile complete: %s MT5 positions (%s positions with volume cached), %s orders mapped",
+            "[%s] Reconcile complete: %s MT5 positions "
+            "(%s positions with volume cached), %s orders mapped",
             account_name,
-            count,
+            position_count,
             len(self.position_volumes[account_name]),
             order_count,
         )
 
     def _process_message(self, account_name: str, message):
         self._ensure_account_maps(account_name)
+
         extracted = Protobuf.extract(message)
 
         if isinstance(extracted, ProtoOAAccountAuthRes):
             if not self.auth_seen.get(account_name, False):
                 self.auth_seen[account_name] = True
-                logger.info("✓ Account %s connected and authenticated", account_name)
+
+                logger.info(
+                    "✓ Account %s connected and authenticated",
+                    account_name,
+                )
+
                 notify_info(
                     event="account_authenticated",
                     message="cTrader account authenticated",
                     **self._notify_ctx(account_name),
                 )
+
             self._send_reconcile_request(account_name)
             return
 
         if isinstance(extracted, ProtoOAExecutionEvent):
             logger.info("[%s] RAW EXECUTION: %s", account_name, extracted)
+
+            # First store an order ID if one is present.
             self._handle_execution_order(account_name, extracted)
+
+            # Then process the corresponding position state. On ORDER_FILLED,
+            # this promotes orderId -> positionId.
             self._handle_execution_position(account_name, extracted)
             return
 
@@ -608,30 +1068,60 @@ class AccountManager:
             self._process_reconcile(account_name, extracted)
             return
 
+        # Defensive position update path for non-execution messages.
         if not hasattr(extracted, "position"):
             return
 
-        pos = extracted.position
-        position_id = int(getattr(pos, "positionId", 0) or 0)
-        if not position_id:
+        position = extracted.position
+        position_id = self._to_int(
+            getattr(position, "positionId", 0),
+            default=0,
+        )
+
+        if position_id <= 0:
             return
 
-        label = self._extract_position_label(pos)
+        label = self._extract_position_label(position)
         ticket = self._label_to_ticket(label)
+
         if ticket is None:
             return
 
-        self._store_position_mapping(account_name, int(ticket), int(position_id))
+        volume = self._extract_position_volume(position)
 
-        vol = self._extract_position_volume(pos)
-        self._store_position_volume(account_name, int(position_id), int(vol))
+        # Do not save zero-volume shells as live cTrader positions.
+        if volume <= 0:
+            logger.info(
+                "[%s] Ignored non-execution zero-volume position update | "
+                "ticket=%s positionId=%s",
+                account_name,
+                ticket,
+                position_id,
+            )
+            return
 
-        logger.info(
-            "[%s] updated MT5 ticket %s -> cTrader positionId %s, volume=%s",
+        self._store_position_mapping(
             account_name,
             int(ticket),
             int(position_id),
-            int(vol),
+        )
+
+        self._store_position_volume(
+            account_name,
+            int(position_id),
+            int(volume),
+        )
+
+        # A real running position supersedes a previous order mapping.
+        if self.get_order_id(account_name, int(ticket)):
+            self._remove_order_mapping(account_name, int(ticket))
+
+        logger.info(
+            "[%s] Updated MT5 ticket %s -> cTrader positionId %s, volume=%s",
+            account_name,
+            int(ticket),
+            int(position_id),
+            int(volume),
         )
 
     def _send_reconcile_request(self, account_name: str):
@@ -639,78 +1129,118 @@ class AccountManager:
         config = self.get_config(account_name)
 
         if not client or not config:
-            msg = "Cannot send reconcile: missing client/config"
-            logger.warning("[%s] %s", account_name, msg)
+            message = "Cannot send reconcile: missing client/config"
+
+            logger.warning("[%s] %s", account_name, message)
+
             notify_warning(
                 event="reconcile_missing_context",
-                message=msg,
+                message=message,
                 **self._notify_ctx(account_name),
             )
             return
 
         account_id = self._config_account_id(config)
+
         if not account_id:
-            msg = "Cannot send reconcile: missing account_id"
-            logger.warning("[%s] %s", account_name, msg)
+            message = "Cannot send reconcile: missing account_id"
+
+            logger.warning("[%s] %s", account_name, message)
+
             notify_warning(
                 event="reconcile_missing_account_id",
-                message=msg,
+                message=message,
                 **self._notify_ctx(account_name),
             )
             return
 
         if self.reconcile_requested.get(account_name, False):
-            logger.info("[%s] Reconcile already requested for this connection", account_name)
+            logger.info(
+                "[%s] Reconcile already requested for this connection",
+                account_name,
+            )
             return
 
         try:
-            req = ProtoOAReconcileReq()
-            req.ctidTraderAccountId = int(account_id)
+            request = ProtoOAReconcileReq()
+            request.ctidTraderAccountId = int(account_id)
 
             logger.info("[%s] Sending reconcile request...", account_name)
-            d = client.send(req)
+
+            deferred = client.send(request)
             self.reconcile_requested[account_name] = True
 
             def _on_reconcile(result):
                 try:
-                    extracted = Protobuf.extract(result)
-                    if isinstance(extracted, ProtoOAReconcileRes):
+                    response = Protobuf.extract(result)
+
+                    if isinstance(response, ProtoOAReconcileRes):
                         self.reconcile_requested[account_name] = False
-                        logger.info("[%s] Reconcile response processed", account_name)
+
+                        # Do not only log this response. Process it so position
+                        # and pending-order maps are rebuilt after reconnect.
+                        self._process_reconcile(account_name, response)
+
+                        logger.info(
+                            "[%s] Reconcile response processed",
+                            account_name,
+                        )
                     else:
                         logger.info(
                             "[%s] Reconcile callback received message type %s",
                             account_name,
-                            type(extracted).__name__,
+                            type(response).__name__,
                         )
-                except Exception as e:
+
+                except Exception as error:
                     self.reconcile_requested[account_name] = False
-                    logger.warning("[%s] Failed to process reconcile response: %s", account_name, e)
+
+                    logger.warning(
+                        "[%s] Failed to process reconcile response: %s",
+                        account_name,
+                        error,
+                    )
+
                     notify_error(
                         event="reconcile_callback_parse",
                         message="Failed to process reconcile response",
-                        exc=e,
+                        exc=error,
                         **self._notify_ctx(account_name),
                     )
 
-            def _on_reconcile_err(failure):
+                return result
+
+            def _on_reconcile_error(failure):
                 self.reconcile_requested[account_name] = False
+
                 notify_error(
                     event="reconcile_request_errback",
                     message="Reconcile request errback triggered",
                     exc=Exception(str(failure)),
                     **self._notify_ctx(account_name),
                 )
-                client._on_error(failure)
 
-            d.addCallback(_on_reconcile)
-            d.addErrback(_on_reconcile_err)
-        except Exception as e:
+                try:
+                    client._on_error(failure)
+                except Exception:
+                    logger.debug(
+                        "[%s] Failed forwarding reconcile error to client",
+                        account_name,
+                        exc_info=True,
+                    )
+
+                return failure
+
+            deferred.addCallback(_on_reconcile)
+            deferred.addErrback(_on_reconcile_error)
+
+        except Exception as error:
             self.reconcile_requested[account_name] = False
+
             notify_error(
                 event="send_reconcile_request",
                 message="Failed to send reconcile request",
-                exc=e,
+                exc=error,
                 **self._notify_ctx(account_name),
             )
 
@@ -720,13 +1250,16 @@ class AccountManager:
             return
 
         if account.name in self.clients:
-            msg = "Account already initialized; replacing existing client"
-            logger.warning("[%s] %s", account.name, msg)
+            message = "Account already initialized; replacing existing client"
+
+            logger.warning("[%s] %s", account.name, message)
+
             notify_warning(
                 event="account_reinitialized",
-                message=msg,
+                message=message,
                 **self._notify_ctx(account.name),
             )
+
             self._unregister_route_magic(account.name)
 
         logger.info("Initializing account: %s", account.name)
@@ -735,7 +1268,8 @@ class AccountManager:
         account_id = self._config_account_id(account)
 
         logger.info(
-            "[%s] Token bootstrap: access=%s refresh_present=%s state_file=%s env=%s account_id=%s",
+            "[%s] Token bootstrap: access=%s refresh_present=%s "
+            "state_file=%s env=%s account_id=%s",
             account.name,
             self._token_preview(getattr(account, "access_token", "")),
             bool(self._safe_str(getattr(account, "refresh_token", ""))),
@@ -760,26 +1294,29 @@ class AccountManager:
 
         self.clients[account.name] = client
         self.configs[account.name] = account
+
         self._ensure_account_maps(account.name)
         self._register_route_magic(account)
 
-        def on_message(message, acc_name=account.name):
+        def on_message(message, account_name=account.name):
             try:
-                self._process_message(acc_name, message)
-            except Exception as e:
+                self._process_message(account_name, message)
+            except Exception as error:
                 notify_error(
                     event="account_message_callback",
                     message="Failed to parse/process account message",
-                    exc=e,
-                    **self._notify_ctx(acc_name),
+                    exc=error,
+                    **self._notify_ctx(account_name),
                 )
 
         client.set_message_callback(on_message)
 
         def on_connected():
             self._ensure_account_maps(account.name)
+
             self.reconcile_requested[account.name] = False
             self.auth_seen[account.name] = False
+
             logger.info(
                 "✓ Account %s socket connected; waiting for app/account authorization",
                 account.name,
@@ -799,23 +1336,41 @@ class AccountManager:
     def get_balance(self, account_name: str) -> Optional[float]:
         return self.account_balance.get(account_name)
 
-    def get_position_id(self, account_name: str, mt5_ticket: int) -> Optional[int]:
-        pos_map = self.position_maps.get(account_name) or {}
-        return pos_map.get(int(mt5_ticket))
+    def get_position_id(
+        self,
+        account_name: str,
+        mt5_ticket: int,
+    ) -> Optional[int]:
+        position_map = self.position_maps.get(account_name) or {}
+        return position_map.get(int(mt5_ticket))
 
-    def get_order_id(self, account_name: str, mt5_ticket: int) -> Optional[int]:
-        omap = self.order_maps.get(account_name) or {}
-        return omap.get(int(mt5_ticket))
+    def get_order_id(
+        self,
+        account_name: str,
+        mt5_ticket: int,
+    ) -> Optional[int]:
+        order_map = self.order_maps.get(account_name) or {}
+        return order_map.get(int(mt5_ticket))
 
-    def get_position_volume(self, account_name: str, position_id: int) -> Optional[int]:
-        vol_map = self.position_volumes.get(account_name) or {}
-        return vol_map.get(int(position_id))
+    def get_position_volume(
+        self,
+        account_name: str,
+        position_id: int,
+    ) -> Optional[int]:
+        volume_map = self.position_volumes.get(account_name) or {}
+        return volume_map.get(int(position_id))
 
-    def get_ticket_volume(self, account_name: str, mt5_ticket: int) -> Optional[int]:
-        pid = self.get_position_id(account_name, mt5_ticket)
-        if not pid:
+    def get_ticket_volume(
+        self,
+        account_name: str,
+        mt5_ticket: int,
+    ) -> Optional[int]:
+        position_id = self.get_position_id(account_name, mt5_ticket)
+
+        if not position_id:
             return None
-        return self.get_position_volume(account_name, pid)
+
+        return self.get_position_volume(account_name, position_id)
 
     def get_account_name_by_magic(self, magic: int) -> Optional[str]:
         try:
@@ -824,17 +1379,43 @@ class AccountManager:
             return None
 
     def get_account_context_by_magic(
-        self, magic: int
-    ) -> Tuple[Optional[str], Optional[CTraderClient], Optional[AccountConfig]]:
+        self,
+        magic: int,
+    ) -> Tuple[
+        Optional[str],
+        Optional[CTraderClient],
+        Optional[AccountConfig],
+    ]:
         account_name = self.get_account_name_by_magic(magic)
+
         if not account_name:
             return None, None, None
-        return account_name, self.get_client(account_name), self.get_config(account_name)
 
-    def store_mt5_payload(self, account_name: str, mt5_ticket: int, payload: dict):
+        return (
+            account_name,
+            self.get_client(account_name),
+            self.get_config(account_name),
+        )
+
+    def store_mt5_payload(
+        self,
+        account_name: str,
+        mt5_ticket: int,
+        payload: dict,
+    ):
+        """
+        Save latest MT5 payload for a ticket.
+
+        The position-fill handler uses this as the source of truth for risk
+        sizing and any later SL/TP repair logic.
+        """
         try:
             self._ensure_account_maps(account_name)
-            self.mt5_payloads[account_name][int(mt5_ticket)] = dict(payload or {})
+
+            self.mt5_payloads[account_name][int(mt5_ticket)] = dict(
+                payload or {},
+            )
+
         except Exception:
             logger.debug(
                 "[%s] Failed to store MT5 payload for ticket %s",
@@ -843,35 +1424,81 @@ class AccountManager:
                 exc_info=True,
             )
 
-    def store_mt5_payload_by_magic(self, magic: int, mt5_ticket: int, payload: dict) -> bool:
+    def store_mt5_payload_by_magic(
+        self,
+        magic: int,
+        mt5_ticket: int,
+        payload: dict,
+    ) -> bool:
         account_name = self.get_account_name_by_magic(magic)
+
         if not account_name:
             return False
-        self.store_mt5_payload(account_name, mt5_ticket, payload)
+
+        self.store_mt5_payload(
+            account_name,
+            mt5_ticket,
+            payload,
+        )
+
         return True
 
     def remove_mapping(self, account_name: str, mt5_ticket: int):
+        """
+        Remove all bridge state for a fully closed/cancelled MT5 ticket.
+
+        Call this only after cTrader received the close or cancel request, or
+        after a reconcile confirms that the cTrader entity no longer exists.
+        """
         try:
             ticket = int(mt5_ticket)
+
             self._remove_order_mapping(account_name, ticket)
             self._remove_position_mapping(account_name, ticket)
+
             self.mt5_payloads.get(account_name, {}).pop(ticket, None)
+
         except Exception:
-            pass
+            logger.debug(
+                "[%s] Failed removing mappings for ticket %s",
+                account_name,
+                mt5_ticket,
+                exc_info=True,
+            )
 
     def get_all_accounts(self) -> Dict[str, Tuple[CTraderClient, AccountConfig]]:
         return {
-            name: (self.clients[name], self.configs[name])
-            for name in self.clients.keys()
+            account_name: (
+                self.clients[account_name],
+                self.configs[account_name],
+            )
+            for account_name in self.clients.keys()
+            if account_name in self.configs
         }
 
-    def getpositionid(self, account_name: str, mt5_ticket: int) -> Optional[int]:
+    # -------------------------------------------------------------------------
+    # Backward-compatible aliases used by older trade_processor.py versions.
+    # -------------------------------------------------------------------------
+
+    def getpositionid(
+        self,
+        account_name: str,
+        mt5_ticket: int,
+    ) -> Optional[int]:
         return self.get_position_id(account_name, mt5_ticket)
 
-    def getorderid(self, account_name: str, mt5_ticket: int) -> Optional[int]:
+    def getorderid(
+        self,
+        account_name: str,
+        mt5_ticket: int,
+    ) -> Optional[int]:
         return self.get_order_id(account_name, mt5_ticket)
 
-    def getpositionvolume(self, account_name: str, position_id: int) -> Optional[int]:
+    def getpositionvolume(
+        self,
+        account_name: str,
+        position_id: int,
+    ) -> Optional[int]:
         return self.get_position_volume(account_name, position_id)
 
     def removemapping(self, account_name: str, mt5_ticket: int):
@@ -884,8 +1511,13 @@ class AccountManager:
         return self.get_account_name_by_magic(magic)
 
     def getaccountcontextbymagic(
-        self, magic: int
-    ) -> Tuple[Optional[str], Optional[CTraderClient], Optional[AccountConfig]]:
+        self,
+        magic: int,
+    ) -> Tuple[
+        Optional[str],
+        Optional[CTraderClient],
+        Optional[AccountConfig],
+    ]:
         return self.get_account_context_by_magic(magic)
 
 
@@ -894,6 +1526,8 @@ _manager_instance = None
 
 def get_account_manager() -> AccountManager:
     global _manager_instance
+
     if _manager_instance is None:
         _manager_instance = AccountManager()
+
     return _manager_instance
