@@ -123,17 +123,21 @@ bool BridgeRequestsSyncNow()
    g_bridgeWasAvailable = true;
    g_bridgeHealthFailCount = 0;
 
-   // Verbose health logging removed to avoid spam; only log state changes.
-   // PrintFormat(
-   //    "Bridge health ok | sync_required=%s | body=%s",
-   //    BridgeSyncRequired() ? "true" : "false",
-   //    BridgeLastResponseBody()
-   // );
+   bool syncRequired = BridgeSyncRequired();
+
+   // Only log when action will be taken (sync required)
+   if(syncRequired)
+   {
+      PrintFormat(
+         "Bridge requests sync | body=%s",
+         BridgeLastResponseBody()
+      );
+   }
 
    if(recovered)
       Print("Bridge recovered after being unavailable");
 
-   return BridgeSyncRequired();
+   return syncRequired;
 }
 
 
