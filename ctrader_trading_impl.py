@@ -42,21 +42,31 @@ from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
 )
 
 
-def _parse_mt5_ticket_from_label(label: str) -> Optional[int]:
+def parse_mt5_ticket_from_label(label: str) -> Optional[int]:
     """
-    Expected label format: MT5_<ticket>, e.g. MT5_1468550799.
-    Returns int ticket if parsable, else None.
+    Parse bridge labels.
+
+    Supported formats:
+    - MT5_<ticket>          canonical market-copy label
+    - MT5_PENDING_<ticket>  temporary follower-pending label
+    - MT5<ticket>           legacy label
     """
     if not label:
         return None
-    s = str(label).strip()
-    if not s.startswith("MT5_"):
+
+    value = str(label).strip()
+
+    if value.startswith("MT5_PENDING_"):
+        suffix = value[len("MT5_PENDING_"):]
+    elif value.startswith("MT5_"):
+        suffix = value[len("MT5_"):]
+    elif value.startswith("MT5"):
+        suffix = value[len("MT5"):]
+    else:
         return None
-    tail = s[4:]
-    if not tail.isdigit():
-        return None
+
     try:
-        return int(tail)
+        return int(suffix) if suffix.isdigit() else None
     except Exception:
         return None
 
