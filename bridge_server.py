@@ -248,6 +248,9 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
     server_version = "MT5Bridge/1.0"
 
     def log_message(self, format, *args):
+        # Suppress verbose /health access logs; keep everything else.
+        if self.path.split("?", 1)[0] == "/health":
+            return
         logger.info("%s - %s", self.address_string(), format % args)
 
     def _send_json(self, status_code: int, payload: dict):
@@ -256,13 +259,15 @@ class MT5BridgeHandler(BaseHTTPRequestHandler):
 
         body = _json_bytes(full_payload)
 
-        logger.info(
-            "HTTP JSON response | path=%s status=%s bytes=%s payload=%s",
-            self.path,
-            int(status_code),
-            len(body),
-            body.decode("utf-8", errors="replace"),
-        )
+        # Suppress verbose /health JSON response logs.
+        if self.path.split("?", 1)[0] != "/health":
+            logger.info(
+                "HTTP JSON response | path=%s status=%s bytes=%s payload=%s",
+                self.path,
+                int(status_code),
+                len(body),
+                body.decode("utf-8", errors="replace"),
+            )
 
         self.send_response(int(status_code))
         self.send_header("Content-Type", "application/json; charset=utf-8")
