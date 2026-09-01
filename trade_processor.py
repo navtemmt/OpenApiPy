@@ -16,7 +16,11 @@ from app_state import (
     alert_trade_warning,
     alert_trade_info,
 )
-from trade_executor import copy_open_to_account, copy_pending_to_account
+from trade_executor import (
+    copy_open_to_account,
+    copy_pending_to_account,
+    transition_pending_to_market,
+)
 from symbol_mapper import SymbolMapper
 
 
@@ -1241,9 +1245,22 @@ def handle_open_event(data, account_manager):
             
             if existing_order_id:
                 logger.info(
-                    f"[{account_name}] OPEN skip for ticket {ticket}: "
-                    f"already has active cTrader pending orderId={existing_order_id}; "
-                    f"do not create a duplicate market order"
+                    f"[{account_name}] OPEN pending-to-market transition for ticket {ticket}: "
+                    f"pending orderId={existing_order_id}"
+                )
+            
+                transition_pending_to_market(
+                    account_name=account_name,
+                    client=client,
+                    config=config,
+                    ticket=int(ticket),
+                    mt5_symbol=mt5_symbol,
+                    side=side,
+                    volume=src_volume,
+                    sl=sl,
+                    tp=tp,
+                    magic=magic,
+                    account_manager=account_manager,
                 )
                 continue
 
