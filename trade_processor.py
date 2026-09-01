@@ -1223,11 +1223,27 @@ def handle_open_event(data, account_manager):
 
     for account_name, client, config in contexts:
         try:
-            existing_position_id = account_manager.get_position_id(account_name, int(ticket))
+            existing_position_id = account_manager.get_position_id(
+                account_name,
+                int(ticket),
+            )
+            existing_order_id = account_manager.get_order_id(
+                account_name,
+                int(ticket),
+            )
+            
             if existing_position_id:
                 logger.info(
-                    f"[{account_name}] OPEN skip for ticket {ticket} "
-                    f"(already mapped to positionId={existing_position_id})"
+                    f"[{account_name}] OPEN skip for ticket {ticket}: "
+                    f"already mapped to positionId={existing_position_id}"
+                )
+                continue
+            
+            if existing_order_id:
+                logger.info(
+                    f"[{account_name}] OPEN skip for ticket {ticket}: "
+                    f"already has active cTrader pending orderId={existing_order_id}; "
+                    f"do not create a duplicate market order"
                 )
                 continue
 
