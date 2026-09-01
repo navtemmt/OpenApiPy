@@ -129,19 +129,31 @@ class AccountManager:
             return ""
 
     @staticmethod
-    def _label_to_ticket(label: str) -> Optional[int]:
+    def label_to_ticket(label: str) -> Optional[int]:
         """
-        Parse bridge labels in the form MT5_<ticket>.
-
-        Examples:
-            MT5_5854323 -> 5854323
-            MT5_5854324 -> 5854324
+        Parse bridge labels.
+    
+        Supported formats:
+        - MT5_<ticket>          canonical market-copy label
+        - MT5_PENDING_<ticket>  temporary follower-pending label
+        - MT5<ticket>           legacy label
         """
-        if not (isinstance(label, str) and label.startswith("MT5_")):
+        if not isinstance(label, str):
             return None
-
+    
+        value = label.strip()
+    
+        if value.startswith("MT5_PENDING_"):
+            suffix = value[len("MT5_PENDING_"):]
+        elif value.startswith("MT5_"):
+            suffix = value[len("MT5_"):]
+        elif value.startswith("MT5"):
+            suffix = value[len("MT5"):]
+        else:
+            return None
+    
         try:
-            return int(label.split("_", 1)[1])
+            return int(suffix) if suffix.isdigit() else None
         except Exception:
             return None
 
