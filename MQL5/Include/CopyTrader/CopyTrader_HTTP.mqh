@@ -62,7 +62,8 @@ bool ParseBridgeResponse(const string responseBody)
    int sync_pos = StringFind(normalized, "\"sync_required\":");
    if(sync_pos < 0)
    {
-      Print("Bridge response has no sync_required field: ", responseBody);
+      // Trade-signal replies may not include sync_required.
+      // Do not spam normal logs for a successful response.
       return true;
    }
 
@@ -71,13 +72,8 @@ bool ParseBridgeResponse(const string responseBody)
       StringFind(normalized, "\"sync_required\":\"true\"") >= 0 ||
       StringFind(normalized, "\"sync_required\":1") >= 0;
 
-   Print(
-      "Bridge sync_required parsed: ",
-      g_bridge_sync_required,
-      " | normalized=",
-      normalized
-   );
-
+   // Health responses are silent when sync_required=false.
+   // The EA will perform and log the actual sync action when this is true.
    return true;
 }
 
@@ -113,6 +109,7 @@ bool SendToServer(string jsonData)
    {
       int error = GetLastError();
       g_bridge_last_error = IntegerToString(error);
+
       Print(
          "WebRequest error: ",
          error,
@@ -125,10 +122,12 @@ bool SendToServer(string jsonData)
    if(result_size > 0 && result[result_size - 1] == 0)
       result_size--;
 
-   g_bridge_last_response_body = CharArrayToString(result, 0, result_size, CP_UTF8);
-
-   if(g_bridge_last_response_body != "")
-      Print("Bridge response body: ", g_bridge_last_response_body);
+   g_bridge_last_response_body = CharArrayToString(
+      result,
+      0,
+      result_size,
+      CP_UTF8
+   );
 
    ParseBridgeResponse(g_bridge_last_response_body);
 
@@ -171,6 +170,7 @@ bool BridgeHealthCheck()
    {
       int error = GetLastError();
       g_bridge_last_error = IntegerToString(error);
+
       Print(
          "Bridge health check WebRequest error: ",
          error,
@@ -183,16 +183,29 @@ bool BridgeHealthCheck()
    if(result_size > 0 && result[result_size - 1] == 0)
       result_size--;
 
-   g_bridge_last_response_body = CharArrayToString(result, 0, result_size, CP_UTF8);
-
-   if(g_bridge_last_response_body != "")
-      Print("Bridge health response: ", g_bridge_last_response_body);
+   g_bridge_last_response_body = CharArrayToString(
+      result,
+      0,
+      result_size,
+      CP_UTF8
+   );
 
    ParseBridgeResponse(g_bridge_last_response_body);
 
    if(res == 200)
    {
       g_bridge_last_request_ok = true;
+
+      // Silent for normal healthy responses.
+      // Log only when the bridge requests an action.
+      if(g_bridge_sync_required)
+      {
+         Print(
+            "Bridge requests sync | body=",
+            g_bridge_last_response_body
+         );
+      }
+
       return true;
    }
 
