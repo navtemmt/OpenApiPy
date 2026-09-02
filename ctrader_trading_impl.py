@@ -1,4 +1,3 @@
-```python
 #!/usr/bin/env python3
 """
 Trading helpers extracted from ctrader_client.py.
@@ -1325,4 +1324,3 @@ def close_position(self, *args: Any, **kwargs: Any):
     d.addCallback(on_resp)
     d.addErrback(on_err)
     return d
-```
