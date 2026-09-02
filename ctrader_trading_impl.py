@@ -1,3 +1,4 @@
+```python
 #!/usr/bin/env python3
 """
 Trading helpers extracted from ctrader_client.py.
@@ -42,7 +43,7 @@ from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
 )
 
 
-def parse_mt5_ticket_from_label(label: str) -> Optional[int]:
+def _parse_mt5_ticket_from_label(label: str) -> Optional[int]:
     """
     Parse bridge labels.
 
@@ -1147,7 +1148,7 @@ def modify_position(
 def close_position(self, *args: Any, **kwargs: Any):
     account_id = kwargs.get("account_id")
     position_id = kwargs.get("position_id", kwargs.get("pos_id"), kwargs.get("position"))
-    volume = kwargs.get("volume", kwargs.get("qty"), kwargs.get("volume_cents"))
+    volume = kwargs.get("volume", kwargs.get("qty", kwargs.get("volume_cents")))
     symbol_id = kwargs.get("symbol_id")
 
     if account_id is None and len(args) >= 1:
@@ -1324,3 +1325,4 @@ def close_position(self, *args: Any, **kwargs: Any):
     d.addCallback(on_resp)
     d.addErrback(on_err)
     return d
+```
