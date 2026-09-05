@@ -1227,6 +1227,10 @@ def handle_open_event(data, account_manager):
 
     for account_name, client, config in contexts:
         try:
+            pending_position_id = account_manager.get_pending_position_id(
+                account_name,
+                int(ticket),
+            )
             existing_position_id = account_manager.get_position_id(
                 account_name,
                 int(ticket),
@@ -1235,20 +1239,45 @@ def handle_open_event(data, account_manager):
                 account_name,
                 int(ticket),
             )
-            
-            if existing_position_id:
+            pending_type = account_manager.get_pending_type(
+                account_name,
+                int(ticket),
+            )
+            pending_state = account_manager.get_pending_state(
+                account_name,
+                int(ticket),
+            )
+
+            # A pending-origin position is authoritative.  This is the LIMIT
+            # race case: the LIMIT may have filled while MT5 was reporting OPEN.
+            # Never submit another market order and never replace the canonical
+            # pending-origin mapping with a market position.
+            if pending_position_id:
                 logger.info(
-                    f"[{account_name}] OPEN skip for ticket {ticket}: "
-                    f"already mapped to positionId={existing_position_id}"
+                    f"[{account_name}] OPEN ticket {ticket} already has "
+                    f"pending-origin positionId={pending_position_id}; "
+                    f"keeping it canonical"
+                )
+                try_apply_pending_sltp(
+                    account_name=account_name,
+                    client=client,
+                    config=config,
+                    ticket=int(ticket),
+                    account_manager=account_manager,
+                    force=True,
                 )
                 continue
-            
-            if existing_order_id:
+
+            # If the ticket is/was a cTrader pending order, let the executor
+            # apply the STOP-vs-LIMIT transition rules.  STOP/STOP_LIMIT must
+            # never create a market fallback.  LIMIT may create a fallback
+            # only when its cancellation/activation state permits it.
+            if existing_order_id or pending_type:
                 logger.info(
                     f"[{account_name}] OPEN pending-to-market transition for ticket {ticket}: "
-                    f"pending orderId={existing_order_id}"
+                    f"pending orderId={existing_order_id}, type={pending_type}, state={pending_state}"
                 )
-            
+
                 transition_pending_to_market(
                     account_name=account_name,
                     client=client,
@@ -1261,6 +1290,22 @@ def handle_open_event(data, account_manager):
                     tp=tp,
                     magic=magic,
                     account_manager=account_manager,
+                    pending_type=pending_type,
+                )
+                try_apply_pending_sltp(
+                    account_name=account_name,
+                    client=client,
+                    config=config,
+                    ticket=int(ticket),
+                    account_manager=account_manager,
+                    force=True,
+                )
+                continue
+
+            if existing_position_id:
+                logger.info(
+                    f"[{account_name}] OPEN skip for ticket {ticket}: "
+                    f"already mapped to positionId={existing_position_id}"
                 )
                 continue
 
@@ -1445,11 +1490,43 @@ def handle_pending_open_event(data, account_manager):
 
     for account_name, client, config in contexts:
         try:
+            existing_pending_position_id = account_manager.get_pending_position_id(
+                account_name,
+                int(ticket),
+            )
             existing_order_id = account_manager.get_order_id(account_name, int(ticket))
+            existing_pending_type = account_manager.get_pending_type(
+                account_name,
+                int(ticket),
+            )
+            existing_pending_state = account_manager.get_pending_state(
+                account_name,
+                int(ticket),
+            )
+
+            # If the pending order already activated, the pending-origin
+            # position is canonical and this duplicate PENDING_OPEN must not
+            # create or replace anything.
+            if existing_pending_position_id:
+                logger.info(
+                    f"[{account_name}] PENDING_OPEN skip for ticket {ticket}: "
+                    f"pending-origin positionId={existing_pending_position_id} already active"
+                )
+                continue
+
+            # A broker order mapping already exists.  Do not reset its state
+            # (especially CANCEL_REQUESTED/UNKNOWN) merely because MT5 repeats
+            # the PENDING_OPEN event.
             if existing_order_id:
+                if existing_pending_type and existing_pending_type != pending_type:
+                    logger.warning(
+                        f"[{account_name}] PENDING_OPEN type mismatch for ticket {ticket}: "
+                        f"existing={existing_pending_type}, incoming={pending_type}; keeping existing type"
+                    )
                 logger.info(
                     f"[{account_name}] PENDING_OPEN skip for ticket {ticket} "
-                    f"(already mapped to orderId={existing_order_id})"
+                    f"(already mapped to orderId={existing_order_id}, "
+                    f"type={existing_pending_type or pending_type}, state={existing_pending_state})"
                 )
                 continue
 
@@ -1658,9 +1735,22 @@ def handle_pending_cancel_event(data, account_manager):
 
     for account_name, client, config in contexts:
         try:
+            # If the pending order already activated, there is nothing left to
+            # cancel.  Keep the activated pending-origin position canonical.
+            if account_manager.get_pending_position_id(account_name, int(ticket)):
+                logger.info(
+                    f"[{account_name}] PENDING_CANCEL ignored for ticket {ticket}: "
+                    f"pending-origin position is already active"
+                )
+                continue
+
             order_id = account_manager.get_order_id(account_name, int(ticket))
             if not order_id:
-                msg = f"PENDING_CANCEL ignored for ticket {ticket} (no orderId mapping yet)"
+                current_state = account_manager.get_pending_state(account_name, int(ticket))
+                if current_state != "CANCELLED":
+                    account_manager.set_pending_state(account_name, int(ticket), "UNKNOWN")
+                    account_manager.request_reconcile(account_name)
+                msg = f"PENDING_CANCEL uncertain for ticket {ticket}: no orderId mapping"
                 logger.warning(f"[{account_name}] {msg}")
                 alert_trade_warning(
                     account_name=account_name,
@@ -1672,9 +1762,32 @@ def handle_pending_cancel_event(data, account_manager):
                 continue
 
             client.cancel_pending_order(account_id=config.account_id, order_id=int(order_id))
-            logger.info(f"[{account_name}] Cancel sent: ticket {ticket} -> orderId {int(order_id)}")
+
+            # Sending the cancel request is not confirmation that the broker
+            # cancelled it.  Keep the state unresolved until the execution or
+            # reconciliation path confirms CANCELLED (or discovers activation).
+            account_manager.set_pending_state(account_name, int(ticket), "CANCEL_REQUESTED")
+            logger.info(
+                f"[{account_name}] Cancel requested: ticket {ticket} -> orderId {int(order_id)}"
+            )
 
         except Exception as e:
+            text = str(e).upper()
+            account_manager.set_pending_state(account_name, int(ticket), "UNKNOWN")
+            account_manager.request_reconcile(account_name)
+
+            if "ORDER_NOT_FOUND" in text or "ORDER NOT FOUND" in text:
+                logger.warning(
+                    f"[{account_name}] PENDING_CANCEL ORDER_NOT_FOUND for ticket {ticket} "
+                    f"orderId={order_id if 'order_id' in locals() else None}; "
+                    f"treating cancellation as UNKNOWN and reconciling"
+                )
+            else:
+                logger.warning(
+                    f"[{account_name}] PENDING_CANCEL failed for ticket {ticket} "
+                    f"orderId={order_id if 'order_id' in locals() else None}: {e}"
+                )
+
             alert_trade_failure(
                 account_name=account_name,
                 action="handle_pending_cancel_event",
@@ -1885,7 +1998,27 @@ def handle_close_event(data, account_manager):
             )
 
             if follower_units is not None and int(close_units) >= int(follower_units):
-                account_manager.remove_mapping(account_name, ticket)
+                # If both LIMIT-origin and market-fallback positions exist,
+                # closing the canonical LIMIT position must not erase the
+                # still-live fallback mapping.  Remove only the closed origin;
+                # the manager then promotes the remaining market position.
+                fallback_position_id = account_manager.get_fallback_position_id(
+                    account_name,
+                    int(ticket),
+                )
+                if fallback_position_id and int(fallback_position_id) != int(position_id):
+                    account_manager._remove_position_mapping(
+                        account_name,
+                        int(ticket),
+                        origin="pending",
+                    )
+                    logger.warning(
+                        f"[{account_name}] Preserving market fallback positionId="
+                        f"{fallback_position_id} for ticket={ticket} after canonical "
+                        f"pending close"
+                    )
+                else:
+                    account_manager.remove_mapping(account_name, ticket)
 
             _clear_pending_sltp(account_name, ticket)
 
