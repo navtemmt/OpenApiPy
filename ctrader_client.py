@@ -294,24 +294,33 @@ class CTraderClient:
     ) -> None:
         with self._state_lock:
             self.access_token = access_token or ""
-            self.refresh_token = refresh_token or self.refresh_token or ""
+    
+            # None means "keep the existing refresh token".
+            # Empty string means "replace/clear the refresh token".
+            self.refresh_token = (
+                self.refresh_token
+                if refresh_token is None
+                else refresh_token
+            )
+    
             self.token_expires_at = int(expires_at) if expires_at else None
             self.current_token_source = source
             self.auth_failed = False
             self.auth_failure_reason = None
-
+    
             if publish_shared:
                 self._publish_to_shared_state(source=source)
-
+    
             logger.info(
-                "[%s] Runtime tokens updated source=%s access_token=%s refresh_present=%s expires_at=%s",
+                "[%s] Runtime tokens updated source=%s access_token=%s "
+                "refresh_present=%s expires_at=%s",
                 self.account_name or self.account_id,
                 source,
                 self._mask_token(self.access_token),
                 bool(self.refresh_token),
                 self.token_expires_at,
             )
-
+    
             if persist:
                 self._save_token_state(source=source)
 
