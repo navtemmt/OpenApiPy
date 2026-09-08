@@ -339,69 +339,243 @@ def _refresh_access_token(self, reason: str = "") -> bool:
 
 def _recover_account_auth(self, reason: str) -> None:
     """
-    Recovery path order:
-    1. Sync from shared token state
-    2. Try refresh once
-    3. Try bootstrap/.env fallback once
-    4. Mark auth dead
+    Recover account authentication.
+
+    Recovery order:
+        1. Sync from shared token state.
+        2. Try refresh token once.
+           - If refresh succeeds, the newly issued access/refresh tokens are
+             persisted by _refresh_access_token().
+        3. If refresh fails, load bootstrap/.env tokens.
+           - The working fallback tokens immediately replace the failed
+             runtime/shared tokens.
+           - They are persisted before account authorization is retried.
+        4. If all recovery paths fail, mark authentication dead.
+
+    IMPORTANT:
+        If the configured/shared access token is bad but the .env fallback
+        works, the fallback becomes the new canonical runtime token pair.
+        This prevents the next reconnect/account from continuing to use the
+        broken token.
     """
+
     if getattr(self, "auth_failed", False):
         logger.warning(
             "[%s] Recovery skipped because auth is already marked dead. reason=%s",
-            getattr(self, "account_name", None) or getattr(self, "account_id", None),
+            getattr(self, "account_name", None)
+            or getattr(self, "account_id", None),
             reason,
         )
         return
 
     self.is_account_authed = False
+
+    # Always synchronize first so that, when multiple accounts share the same
+    # token state file, we start recovery from the newest known token pair.
     _sync_shared_tokens(self, reason="recover_start")
 
     steps = getattr(self, "_auth_recovery_steps", set())
+
     if not isinstance(steps, set):
         steps = set()
 
-    if "refresh" not in steps and getattr(self, "refresh_token", None):
+    # --------------------------------------------------------------
+    # 1. REFRESH TOKEN
+    # --------------------------------------------------------------
+    #
+    # If the refresh token is still valid, _refresh_access_token()
+    # generates the new access/refresh pair and persists it through:
+    #
+    #     _apply_runtime_tokens(..., persist=True)
+    #
+    if (
+        "refresh" not in steps
+        and getattr(self, "refresh_token", None)
+    ):
         steps.add("refresh")
         self._auth_recovery_steps = steps
+
+        old_access_token = getattr(self, "access_token", "") or ""
+        old_refresh_token = getattr(self, "refresh_token", "") or ""
+
         if _refresh_access_token(self, reason=reason):
+            new_access_token = getattr(self, "access_token", "") or ""
+            new_refresh_token = getattr(self, "refresh_token", "") or ""
+
             logger.warning(
-                "[%s] Retrying account authorization after successful refresh",
-                getattr(self, "account_name", None) or getattr(self, "account_id", None),
+                "[%s] Refresh recovery succeeded. Replacing failed runtime "
+                "tokens with refreshed tokens. access_changed=%s "
+                "refresh_changed=%s",
+                getattr(self, "account_name", None)
+                or getattr(self, "account_id", None),
+                new_access_token != old_access_token,
+                new_refresh_token != old_refresh_token,
             )
+
             _notify_warning(
                 self,
                 event="ctrader_reauth_after_refresh",
-                message="Retrying account authorization after token refresh",
+                message=(
+                    "Retrying account authorization after token refresh; "
+                    "new tokens are now active"
+                ),
                 reason=reason,
             )
+
             authorize_account(self)
             return
+
         logger.warning(
-            "[%s] Refresh recovery failed; will try .env fallback next",
-            getattr(self, "account_name", None) or getattr(self, "account_id", None),
+            "[%s] Refresh recovery failed; trying .env fallback next",
+            getattr(self, "account_name", None)
+            or getattr(self, "account_id", None),
         )
 
+    # --------------------------------------------------------------
+    # 2. .ENV / BOOTSTRAP FALLBACK
+    # --------------------------------------------------------------
+    #
+    # If the configured/shared token is broken and refresh also fails,
+    # load the bootstrap credentials.
+    #
+    # CRITICAL:
+    # _use_bootstrap_tokens() may only update the runtime credentials.
+    # Therefore explicitly persist the working fallback pair here.
+    #
     if "env" not in steps:
         steps.add("env")
         self._auth_recovery_steps = steps
+
+        old_access_token = getattr(self, "access_token", "") or ""
+        old_refresh_token = getattr(self, "refresh_token", "") or ""
+
         if self._use_bootstrap_tokens(source="env_fallback"):
-            logger.warning(
-                "[%s] Retrying account authorization with .env fallback tokens",
-                getattr(self, "account_name", None) or getattr(self, "account_id", None),
+            fallback_access_token = (
+                getattr(self, "access_token", "") or ""
             )
-            _notify_warning(
-                self,
-                event="ctrader_reauth_after_env_fallback",
-                message="Retrying account authorization with bootstrap tokens",
-                reason=reason,
+            fallback_refresh_token = (
+                getattr(self, "refresh_token", "") or ""
             )
-            authorize_account(self)
-            return
+
+            if not fallback_access_token:
+                logger.error(
+                    "[%s] .env fallback reported success but produced "
+                    "no access token",
+                    getattr(self, "account_name", None)
+                    or getattr(self, "account_id", None),
+                )
+
+                _notify_error(
+                    self,
+                    event="ctrader_env_fallback_no_access_token",
+                    message=(
+                        ".env fallback did not provide an access token"
+                    ),
+                    reason=reason,
+                )
+            else:
+                # ------------------------------------------------------
+                # IMPORTANT PATCH:
+                #
+                # Make the working fallback credentials the new
+                # canonical runtime/shared credentials immediately.
+                #
+                # This replaces the previously broken token pair rather
+                # than merely using the fallback for one authorization
+                # attempt.
+                # ------------------------------------------------------
+                try:
+                    self._apply_runtime_tokens(
+                        access_token=fallback_access_token,
+                        refresh_token=fallback_refresh_token,
+                        expires_at=getattr(
+                            self,
+                            "token_expires_at",
+                            None,
+                        ),
+                        source="env_fallback",
+                        persist=True,
+                    )
+
+                    logger.warning(
+                        "[%s] .env fallback tokens are now canonical. "
+                        "Replaced failed runtime tokens. "
+                        "access_changed=%s refresh_changed=%s",
+                        getattr(self, "account_name", None)
+                        or getattr(self, "account_id", None),
+                        fallback_access_token != old_access_token,
+                        fallback_refresh_token != old_refresh_token,
+                    )
+
+                    _notify_warning(
+                        self,
+                        event="ctrader_env_fallback_tokens_replaced",
+                        message=(
+                            "Working .env fallback tokens replaced the "
+                            "failed cTrader runtime/shared tokens"
+                        ),
+                        reason=reason,
+                    )
+
+                    # Retry account authorization using the newly installed
+                    # fallback credentials.
+                    logger.warning(
+                        "[%s] Retrying account authorization with persisted "
+                        ".env fallback tokens",
+                        getattr(self, "account_name", None)
+                        or getattr(self, "account_id", None),
+                    )
+
+                    _notify_warning(
+                        self,
+                        event="ctrader_reauth_after_env_fallback",
+                        message=(
+                            "Retrying account authorization with bootstrap "
+                            "fallback tokens"
+                        ),
+                        reason=reason,
+                    )
+
+                    authorize_account(self)
+                    return
+
+                except Exception as e:
+                    logger.exception(
+                        "[%s] Failed to persist .env fallback tokens",
+                        getattr(self, "account_name", None)
+                        or getattr(self, "account_id", None),
+                    )
+
+                    _notify_error(
+                        self,
+                        event="ctrader_env_fallback_persist_failed",
+                        message=(
+                            "Working .env fallback tokens could not be "
+                            "persisted as the new canonical tokens"
+                        ),
+                        exc=e,
+                        reason=reason,
+                    )
+
+                    # Do NOT silently continue pretending recovery succeeded.
+                    # The fallback may be usable in memory, but the token
+                    # replacement failed, so another connection could still
+                    # load the broken credentials.
+                    _mark_auth_dead(
+                        self,
+                        "working .env fallback tokens could not be persisted",
+                    )
+                    return
+
         logger.warning(
             "[%s] .env fallback unavailable or unchanged",
-            getattr(self, "account_name", None) or getattr(self, "account_id", None),
+            getattr(self, "account_name", None)
+            or getattr(self, "account_id", None),
         )
 
+    # --------------------------------------------------------------
+    # 3. NO RECOVERY LEFT
+    # --------------------------------------------------------------
     _mark_auth_dead(self, reason)
 
 
