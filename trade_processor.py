@@ -3759,16 +3759,14 @@ def handle_pending_open_event(
                     )
 
                 logger.info(
-                    f"[{account_name}] "
-                    f"PENDING_OPEN skip for ticket "
-                    f"{ticket} "
-                    f"(already mapped to "
-                    f"orderId={existing_order_id}, "
-                    f"type="
-                    f"{existing_pending_type "
-                    "or pending_type}, "
-                    f"state={existing_pending_state})"
-                )
+                        f"[{account_name}] "
+                        f"PENDING_OPEN skip for ticket "
+                        f"{ticket} "
+                        f"(already mapped to "
+                        f"orderId={existing_order_id}, "
+                        f"type={existing_pending_type or pending_type}, "
+                        f"state={existing_pending_state})"
+                    )
 
                 continue
 
