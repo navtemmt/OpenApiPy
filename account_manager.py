@@ -471,28 +471,83 @@ class AccountManager:
         }
         return aliases.get(value, value)
 
-    @staticmethod
-    def _extract_order_pending_type(order):
-        """Best-effort textual pending-type extraction; never guess numeric enums."""
+    @classmethod
+    def _extract_order_pending_type(cls, order):
+        """Extract cTrader pending order type, including protobuf numeric enums.
+
+        Reconcile responses expose ``orderType`` as a protobuf enum. Depending
+        on the generated protobuf runtime, ``getattr(order, "orderType")``
+        may return either a readable enum name or its integer value. Resolve
+        numeric values through the protobuf field descriptor instead of
+        guessing enum numbers.
+        """
+        field_names = (
+            "orderType",
+            "order_type",
+            "type",
+            "pendingType",
+            "pending_type",
+        )
+
         for obj in (order, getattr(order, "tradeData", None)):
             if obj is None:
                 continue
-            for name in ("orderType", "order_type", "type", "pendingType", "pending_type"):
+
+            for name in field_names:
                 try:
                     value = getattr(obj, name, None)
                 except Exception:
                     value = None
+
                 if value is None:
                     continue
-                text = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+
+                # Protobuf Python objects often expose enum fields as ints.
+                # Resolve the integer using the message descriptor so STOP,
+                # LIMIT and STOP_LIMIT are recovered correctly during reconcile.
+                enum_name = None
+                try:
+                    descriptor = getattr(obj, "DESCRIPTOR", None)
+                    field = (
+                        descriptor.fields_by_name.get(name)
+                        if descriptor is not None
+                        else None
+                    )
+                    enum_type = getattr(field, "enum_type", None)
+                    if enum_type is not None:
+                        numeric_value = int(value)
+                        enum_value = enum_type.values_by_number.get(numeric_value)
+                        if enum_value is not None:
+                            enum_name = enum_value.name
+                except Exception:
+                    enum_name = None
+
+                text = (
+                    enum_name
+                    if enum_name
+                    else str(value)
+                )
+                text = (
+                    text.strip()
+                    .lower()
+                    .replace("-", "_")
+                    .replace(" ", "_")
+                )
+
+                # Ignore unresolved numeric values; never guess enum numbers.
                 if text.isdigit():
                     continue
-                if "stop_limit" in text or "stoplimit" in text:
+
+                if (
+                    "stop_limit" in text
+                    or "stoplimit" in text
+                ):
                     return "stop_limit"
                 if "limit" in text:
                     return "limit"
                 if "stop" in text:
                     return "stop"
+
         return None
 
     @staticmethod
