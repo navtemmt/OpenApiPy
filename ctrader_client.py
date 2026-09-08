@@ -283,180 +283,180 @@ class CTraderClient:
             shared.updated_at = int(time.time())
             shared.last_source = source
 
-def _apply_runtime_tokens(
-    self,
-    access_token: Optional[str],
-    refresh_token: Optional[str] = None,
-    expires_at: Optional[int] = None,
-    source: str = "runtime",
-    persist: bool = False,
-    publish_shared: bool = True,
-) -> bool:
-    """
-    Apply runtime token credentials.
-
-    refresh_token:
-        None -> preserve existing refresh token
-        ""   -> explicitly clear/replace refresh token
-        value -> replace with supplied refresh token
-
-    Returns:
-        True  = runtime update succeeded and persistence succeeded if requested
-        False = persistence was requested but failed
-    """
-    with self._state_lock:
-        self.access_token = access_token or ""
-
-        # IMPORTANT:
-        # None means "keep the existing refresh token".
-        # Empty string means "replace/clear the refresh token".
-        self.refresh_token = (
-            self.refresh_token
-            if refresh_token is None
-            else refresh_token
-        )
-
-        self.token_expires_at = int(expires_at) if expires_at else None
-        self.current_token_source = source
-        self.auth_failed = False
-        self.auth_failure_reason = None
-
-        if publish_shared:
-            self._publish_to_shared_state(source=source)
-
-        logger.info(
-            "[%s] Runtime tokens updated source=%s access_token=%s "
-            "refresh_present=%s expires_at=%s",
-            self.account_name or self.account_id,
-            source,
-            self._mask_token(self.access_token),
-            bool(self.refresh_token),
-            self.token_expires_at,
-        )
-
-        if persist:
-            return self._save_token_state(source=source)
-
-        return True
-
-
-def _load_token_state(self) -> Optional[dict]:
-    if not self.token_state_file:
-        return None
-
-    try:
-        with open(self.token_state_file, "r", encoding="utf-8") as f:
-            payload = json.load(f)
-
-        if not isinstance(payload, dict):
-            raise ValueError("token state payload is not a JSON object")
-
-        return payload
-
-    except FileNotFoundError:
-        return None
-
-    except Exception as e:
-        notify_error(
-            event="ctrader_token_state_read_failed",
-            message=f"Failed to read token state file: {self.token_state_file}",
-            exc=e,
-            **self._client_context(),
-        )
-        return None
-
-
-def _save_token_state(self, source: str = "runtime") -> bool:
-    """
-    Persist current runtime token state atomically.
-
-    Returns:
-        True  = successfully persisted
-        False = persistence failed or no state file configured
-    """
-    if not self.token_state_file:
-        logger.error(
-            "[%s] Cannot save token state: token_state_file is not configured",
-            self.account_name or self.account_id,
-        )
-
-        notify_error(
-            event="ctrader_token_state_save_failed",
-            message="Cannot save token state because token_state_file is not configured",
-            **self._client_context(source=source),
-        )
-
-        return False
-
-    shared = self.shared_token_state
-    lock = shared.lock if shared else None
-
-    def _write():
-        parent = os.path.dirname(self.token_state_file)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-
-        payload = {
-            "account_id": self.account_id,
-            "account_name": self.account_name,
-            "access_token": self.access_token or "",
-            "refresh_token": self.refresh_token or "",
-            "expires_at": self.token_expires_at,
-            "updated_at": int(time.time()),
-            "source": source,
-        }
-
-        tmp_path = self.token_state_file + ".tmp"
-
+    def _apply_runtime_tokens(
+        self,
+        access_token: Optional[str],
+        refresh_token: Optional[str] = None,
+        expires_at: Optional[int] = None,
+        source: str = "runtime",
+        persist: bool = False,
+        publish_shared: bool = True,
+    ) -> bool:
+        """
+        Apply runtime token credentials.
+    
+        refresh_token:
+            None -> preserve existing refresh token
+            ""   -> explicitly clear/replace refresh token
+            value -> replace with supplied refresh token
+    
+        Returns:
+            True  = runtime update succeeded and persistence succeeded if requested
+            False = persistence was requested but failed
+        """
+        with self._state_lock:
+            self.access_token = access_token or ""
+    
+            # IMPORTANT:
+            # None means "keep the existing refresh token".
+            # Empty string means "replace/clear the refresh token".
+            self.refresh_token = (
+                self.refresh_token
+                if refresh_token is None
+                else refresh_token
+            )
+    
+            self.token_expires_at = int(expires_at) if expires_at else None
+            self.current_token_source = source
+            self.auth_failed = False
+            self.auth_failure_reason = None
+    
+            if publish_shared:
+                self._publish_to_shared_state(source=source)
+    
+            logger.info(
+                "[%s] Runtime tokens updated source=%s access_token=%s "
+                "refresh_present=%s expires_at=%s",
+                self.account_name or self.account_id,
+                source,
+                self._mask_token(self.access_token),
+                bool(self.refresh_token),
+                self.token_expires_at,
+            )
+    
+            if persist:
+                return self._save_token_state(source=source)
+    
+            return True
+    
+    
+    def _load_token_state(self) -> Optional[dict]:
+        if not self.token_state_file:
+            return None
+    
         try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(
-                    payload,
-                    f,
-                    ensure_ascii=False,
-                    indent=2,
-                )
-
-            os.replace(tmp_path, self.token_state_file)
-
-        except Exception:
-            # Remove stale temporary file if writing/replacing fails.
+            with open(self.token_state_file, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+    
+            if not isinstance(payload, dict):
+                raise ValueError("token state payload is not a JSON object")
+    
+            return payload
+    
+        except FileNotFoundError:
+            return None
+    
+        except Exception as e:
+            notify_error(
+                event="ctrader_token_state_read_failed",
+                message=f"Failed to read token state file: {self.token_state_file}",
+                exc=e,
+                **self._client_context(),
+            )
+            return None
+    
+    
+    def _save_token_state(self, source: str = "runtime") -> bool:
+        """
+        Persist current runtime token state atomically.
+    
+        Returns:
+            True  = successfully persisted
+            False = persistence failed or no state file configured
+        """
+        if not self.token_state_file:
+            logger.error(
+                "[%s] Cannot save token state: token_state_file is not configured",
+                self.account_name or self.account_id,
+            )
+    
+            notify_error(
+                event="ctrader_token_state_save_failed",
+                message="Cannot save token state because token_state_file is not configured",
+                **self._client_context(source=source),
+            )
+    
+            return False
+    
+        shared = self.shared_token_state
+        lock = shared.lock if shared else None
+    
+        def _write():
+            parent = os.path.dirname(self.token_state_file)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+    
+            payload = {
+                "account_id": self.account_id,
+                "account_name": self.account_name,
+                "access_token": self.access_token or "",
+                "refresh_token": self.refresh_token or "",
+                "expires_at": self.token_expires_at,
+                "updated_at": int(time.time()),
+                "source": source,
+            }
+    
+            tmp_path = self.token_state_file + ".tmp"
+    
             try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(
+                        payload,
+                        f,
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+    
+                os.replace(tmp_path, self.token_state_file)
+    
             except Exception:
-                pass
-
-            raise
-
-        logger.info(
-            "[%s] Token state saved file=%s source=%s access_token=%s "
-            "refresh_present=%s",
-            self.account_name or self.account_id,
-            self.token_state_file,
-            source,
-            self._mask_token(self.access_token),
-            bool(self.refresh_token),
-        )
-
-    try:
-        if lock:
-            with lock:
+                # Remove stale temporary file if writing/replacing fails.
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except Exception:
+                    pass
+    
+                raise
+    
+            logger.info(
+                "[%s] Token state saved file=%s source=%s access_token=%s "
+                "refresh_present=%s",
+                self.account_name or self.account_id,
+                self.token_state_file,
+                source,
+                self._mask_token(self.access_token),
+                bool(self.refresh_token),
+            )
+    
+        try:
+            if lock:
+                with lock:
+                    _write()
+            else:
                 _write()
-        else:
-            _write()
-
-        return True
-
-    except Exception as e:
-        notify_error(
-            event="ctrader_token_state_save_failed",
-            message=f"Failed to save token state file: {self.token_state_file}",
-            exc=e,
-            **self._client_context(source=source),
-        )
-
-        return False
+    
+            return True
+    
+        except Exception as e:
+            notify_error(
+                event="ctrader_token_state_save_failed",
+                message=f"Failed to save token state file: {self.token_state_file}",
+                exc=e,
+                **self._client_context(source=source),
+            )
+    
+            return False
 
     def _use_bootstrap_tokens(self, source: str = "env_fallback") -> bool:
         access_token = self.bootstrap_access_token or ""
