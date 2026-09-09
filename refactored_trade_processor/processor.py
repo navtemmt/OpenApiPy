@@ -1,6 +1,6 @@
 """Trade event dispatcher facade."""
 from app_state import logger, alert_trade_failure, alert_trade_warning
-from .commom import _canonical_event_type, _to_int
+from .common import _canonical_event_type, _to_int
 from .sltp_repair import drain_pending_sltp_repairs
 from .handlers_open import handle_open_event
 from .handlers_pending import (handle_pending_open_event, handle_pending_modify_event, handle_pending_cancel_event)
