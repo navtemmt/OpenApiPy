@@ -84,19 +84,49 @@ def _estimate_risk_ccy_per_1lot_from_mt5(
     entry_price: float,
     sl_price: float,
 ) -> float:
+    logger.warning(
+        "[RISK DEBUG] ENTER _estimate_risk_ccy_per_1lot_from_mt5: "
+        f"data_type={type(data).__name__}, "
+        f"entry_price={entry_price!r}, "
+        f"sl_price={sl_price!r}"
+    )
+
     try:
         entry = float(entry_price or 0.0)
         sl = float(sl_price or 0.0)
 
+        logger.warning(
+            "[RISK DEBUG] Parsed prices: "
+            f"entry={entry!r}, "
+            f"sl={sl!r}"
+        )
+
         if entry <= 0 or sl <= 0:
+            logger.warning(
+                "[RISK DEBUG] RETURN 0: invalid entry/sl: "
+                f"entry={entry}, sl={sl}"
+            )
             return 0.0
 
         dist = abs(entry - sl)
 
+        logger.warning(
+            "[RISK DEBUG] Price distance: "
+            f"entry={entry:.8f}, "
+            f"sl={sl:.8f}, "
+            f"distance={dist:.8f}"
+        )
+
         if dist <= 0:
+            logger.warning(
+                "[RISK DEBUG] RETURN 0: distance <= 0"
+            )
             return 0.0
 
-        tick_size = _first_positive_float(
+        # ---------------------------------------------------------
+        # Read MT5 tick size
+        # ---------------------------------------------------------
+        raw_tick_size_values = (
             data.get("mt5_tick_size"),
             data.get("tick_size"),
             data.get("tickSize"),
@@ -105,7 +135,25 @@ def _estimate_risk_ccy_per_1lot_from_mt5(
             data.get("trade_tick_size"),
         )
 
-        tick_value = _first_positive_float(
+        logger.warning(
+            "[RISK DEBUG] Raw tick-size candidates: "
+            f"{raw_tick_size_values!r}"
+        )
+
+        tick_size = _first_positive_float(
+            *raw_tick_size_values
+        )
+
+        logger.warning(
+            "[RISK DEBUG] Resolved tick_size: "
+            f"value={tick_size!r}, "
+            f"type={type(tick_size).__name__}"
+        )
+
+        # ---------------------------------------------------------
+        # Read MT5 tick value
+        # ---------------------------------------------------------
+        raw_tick_value_values = (
             data.get("mt5_tick_value"),
             data.get("tick_value"),
             data.get("tickValue"),
@@ -113,6 +161,24 @@ def _estimate_risk_ccy_per_1lot_from_mt5(
             data.get("tradeTickValue"),
         )
 
+        logger.warning(
+            "[RISK DEBUG] Raw tick-value candidates: "
+            f"{raw_tick_value_values!r}"
+        )
+
+        tick_value = _first_positive_float(
+            *raw_tick_value_values
+        )
+
+        logger.warning(
+            "[RISK DEBUG] Resolved tick_value: "
+            f"value={tick_value!r}, "
+            f"type={type(tick_value).__name__}"
+        )
+
+        # ---------------------------------------------------------
+        # Primary MT5 tick-size / tick-value calculation
+        # ---------------------------------------------------------
         if (
             tick_size is not None
             and tick_value is not None
@@ -120,10 +186,38 @@ def _estimate_risk_ccy_per_1lot_from_mt5(
             and tick_value > 0
         ):
             ticks = dist / float(tick_size)
+            risk = float(ticks) * float(tick_value)
+
+            logger.warning(
+                "[RISK DEBUG] MT5 TICK CALCULATION: "
+                f"distance={dist:.8f}, "
+                f"tick_size={float(tick_size):.8f}, "
+                f"ticks={ticks:.8f}, "
+                f"tick_value={float(tick_value):.8f}, "
+                f"risk_per_1lot={risk:.8f}"
+            )
 
             if ticks > 0:
-                return float(ticks) * float(tick_value)
+                logger.warning(
+                    "[RISK DEBUG] RETURN MT5 TICK RISK: "
+                    f"{risk:.8f}"
+                )
+                return risk
 
+            logger.warning(
+                "[RISK DEBUG] Tick calculation produced "
+                f"ticks={ticks!r}, falling through"
+            )
+        else:
+            logger.warning(
+                "[RISK DEBUG] MT5 TICK CALCULATION NOT USED: "
+                f"tick_size={tick_size!r}, "
+                f"tick_value={tick_value!r}"
+            )
+
+        # ---------------------------------------------------------
+        # Fallback contract-size calculation
+        # ---------------------------------------------------------
         mt5_contract_size = float(
             data.get("mt5_contract_size", 0)
             or 0.0
@@ -136,22 +230,47 @@ def _estimate_risk_ccy_per_1lot_from_mt5(
             data.get("fx_conversion_rate"),
         )
 
+        logger.warning(
+            "[RISK DEBUG] FALLBACK CALCULATION: "
+            f"mt5_contract_size={mt5_contract_size!r}, "
+            f"quote_to_deposit={quote_to_deposit!r}"
+        )
+
         if (
             mt5_contract_size > 0
             and quote_to_deposit is not None
             and quote_to_deposit > 0
         ):
-            return (
+            risk = (
                 dist
                 * mt5_contract_size
                 * float(quote_to_deposit)
             )
 
+            logger.warning(
+                "[RISK DEBUG] RETURN CONTRACT-SIZE RISK: "
+                f"distance={dist:.8f}, "
+                f"contract_size={mt5_contract_size:.8f}, "
+                f"conversion={float(quote_to_deposit):.8f}, "
+                f"risk_per_1lot={risk:.8f}"
+            )
+
+            return risk
+
+        logger.warning(
+            "[RISK DEBUG] RETURN 0: "
+            "no valid MT5 tick calculation and "
+            "no valid contract-size fallback"
+        )
+
         return 0.0
 
     except Exception:
+        logger.exception(
+            "[RISK DEBUG] EXCEPTION in "
+            "_estimate_risk_ccy_per_1lot_from_mt5"
+        )
         return 0.0
-
 
 def _enforce_max_risk_on_fill(
     account_name,
