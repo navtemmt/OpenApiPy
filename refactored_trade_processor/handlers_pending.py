@@ -28,7 +28,7 @@ from .common import (
 )
 
 from .risk import *
-from .risk import *
+from .risk import _resolve_open_volume_for_account
 from .helpers import *
 from .routing import *
 from .routing import (
