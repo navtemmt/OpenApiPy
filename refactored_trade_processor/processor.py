@@ -1,10 +1,66 @@
 """Trade event dispatcher facade."""
-from app_state import logger, alert_trade_failure, alert_trade_warning
-from .common import _canonical_event_type, _to_int
-from .sltp_repair import drain_pending_sltp_repairs
-from .handlers_open import handle_open_event
-from .handlers_pending import (handle_pending_open_event, handle_pending_modify_event, handle_pending_cancel_event)
-from .handlers_modify_close import handle_modify_event, handle_close_event
+
+from app_state import (
+    logger,
+    alert_trade_failure,
+    alert_trade_warning,
+)
+
+from .common import (
+    _canonical_event_type,
+    _to_int,
+)
+
+from .risk import (
+    _enforce_max_risk_on_fill,
+)
+
+from .notifications import (
+    notify_position_update,
+)
+
+from .sltp_repair import (
+    drain_pending_sltp_repairs,
+)
+
+from .handlers_open import (
+    handle_open_event,
+)
+
+from .handlers_pending import (
+    handle_pending_open_event,
+    handle_pending_modify_event,
+    handle_pending_cancel_event,
+)
+
+from .handlers_modify_close import (
+    handle_modify_event,
+    handle_close_event,
+)
+
+
+# ---------------------------------------------------------------------------
+# Public compatibility exports
+# ---------------------------------------------------------------------------
+#
+# These are intentionally imported into this module so that the legacy
+# trade_processor facade can re-export them for existing callers such as
+# account_manager.py.
+#
+# Existing callers:
+#
+#     from trade_processor import (
+#         _enforce_max_risk_on_fill,
+#         notify_position_update,
+#     )
+#
+# The actual implementations now live in:
+#
+#     refactored_trade_processor.risk
+#     refactored_trade_processor.notifications
+#
+# ---------------------------------------------------------------------------
+
 
 def process_trade_event(
     data,
@@ -73,7 +129,9 @@ def process_trade_event(
                 f"{event_type}"
             )
 
-            logger.warning(msg)
+            logger.warning(
+                msg
+            )
 
             alert_trade_warning(
                 account_name="router",
@@ -109,9 +167,3 @@ def process_trade_event(
         )
 
         raise
-
-
-# ---------------------------------------------------------------------------
-# OPEN
-# ---------------------------------------------------------------------------
-
