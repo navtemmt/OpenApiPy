@@ -27,6 +27,7 @@ from .common import (
 )
 
 from .risk import *
+from .risk import _risk_mode
 from .helpers import *
 from .routing import *
 from .routing import (
