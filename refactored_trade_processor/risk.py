@@ -8,8 +8,10 @@ from app_state import (
 from trade_executor import (copy_open_to_account, copy_pending_to_account, transition_pending_to_market)
 from symbol_mapper import SymbolMapper
 from .common import *
-from .common import _risk_mode
-
+from .common import (
+    _risk_mode,
+    _has_valid_sl,
+)
 def _estimate_risk_ccy_per_1lot_from_symbol(
     symbol,
     entry_price: float,
