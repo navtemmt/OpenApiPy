@@ -1,3 +1,4 @@
+```python
 import time
 from threading import Lock
 
@@ -21,24 +22,24 @@ from symbol_mapper import SymbolMapper
 
 from .common import *
 from .common import (
-    _to_int,
-    _to_float,
-    _canonical_pending_type,
-    _risk_mode,
+    to_int,
+    to_float,
+    canonical_pending_type,
+    risk_mode,
 )
 
 from .risk import *
-from .risk import _resolve_open_volume_for_account
+from .risk import resolve_open_volume_for_account
 
 from .helpers import *
 
 from .routing import *
 from .routing import (
-    _get_target_account_contexts,
+    get_target_account_contexts,
 )
 
 from .sltp_repair import *
-from .sltp_repair import _safe_symbol_id_or_warn
+from .sltp_repair import safe_symbol_id_or_warn
 
 from .destination_recovery import recover_missing_destination
 
@@ -47,7 +48,7 @@ def handle_pending_open_event(
     data,
     account_manager,
 ):
-    ticket = _to_int(
+    ticket = to_int(
         data.get("ticket")
     )
 
@@ -59,46 +60,46 @@ def handle_pending_open_event(
         or ""
     ).strip().upper()
 
-    volume = _to_float(
+    volume = to_float(
         data.get("volume", 0),
         0.0,
     )
 
-    sl = _to_float(
+    sl = to_float(
         data.get("sl", 0),
         0.0,
     )
 
-    tp = _to_float(
+    tp = to_float(
         data.get("tp", 0),
         0.0,
     )
 
-    magic = _to_int(
+    magic = to_int(
         data.get("magic", 0),
         0,
     )
 
-    pending_type = _canonical_pending_type(
+    pending_type = canonical_pending_type(
         data
     )
 
-    entry_price = _to_float(
+    entry_price = to_float(
         data.get("entry_price", 0),
         0.0,
     )
 
-    stop_price = _to_float(
+    stop_price = to_float(
         data.get("stop_price", 0),
         0.0,
     )
 
-    limit_price = _to_float(
+    limit_price = to_float(
         data.get("limit_price", 0),
         0.0,
     )
 
-    expiration_ms = _to_int(
+    expiration_ms = to_int(
         data.get("expiration_ms", 0),
         0,
     )
@@ -178,7 +179,7 @@ def handle_pending_open_event(
             else float(stop_price or 0.0)
         )
 
-    contexts = _get_target_account_contexts(
+    contexts = get_target_account_contexts(
         data,
         account_manager,
     )
@@ -278,7 +279,7 @@ def handle_pending_open_event(
 
                 continue
 
-            rm = _risk_mode(config)
+            rm = risk_mode(config)
 
             sizing_volume = float(volume)
 
@@ -295,7 +296,7 @@ def handle_pending_open_event(
                 )
 
                 lots, decision = (
-                    _resolve_open_volume_for_account(
+                    resolve_open_volume_for_account(
                         sizing_data,
                         config,
                         account_name=account_name,
@@ -385,7 +386,7 @@ def handle_pending_modify_event(
     data,
     account_manager,
 ):
-    ticket = _to_int(
+    ticket = to_int(
         data.get("ticket"),
         0,
     )
@@ -398,46 +399,46 @@ def handle_pending_modify_event(
         or ""
     ).strip().upper()
 
-    volume = _to_float(
+    volume = to_float(
         data.get("volume", 0),
         0.0,
     )
 
-    sl = _to_float(
+    sl = to_float(
         data.get("sl", 0),
         0.0,
     )
 
-    tp = _to_float(
+    tp = to_float(
         data.get("tp", 0),
         0.0,
     )
 
-    magic = _to_int(
+    magic = to_int(
         data.get("magic", 0),
         0,
     )
 
-    pending_type = _canonical_pending_type(
+    pending_type = canonical_pending_type(
         data
     )
 
-    entry_price = _to_float(
+    entry_price = to_float(
         data.get("entry_price", 0),
         0.0,
     )
 
-    stop_price = _to_float(
+    stop_price = to_float(
         data.get("stop_price", 0),
         0.0,
     )
 
-    limit_price = _to_float(
+    limit_price = to_float(
         data.get("limit_price", 0),
         0.0,
     )
 
-    expiration_ms = _to_int(
+    expiration_ms = to_int(
         data.get("expiration_ms", 0),
         0,
     )
@@ -498,7 +499,7 @@ def handle_pending_modify_event(
         f"expiration_ms={expiration_ms}"
     )
 
-    contexts = _get_target_account_contexts(
+    contexts = get_target_account_contexts(
         data,
         account_manager,
     )
@@ -561,7 +562,7 @@ def handle_pending_modify_event(
 
                 continue
 
-            symbol_id = _safe_symbol_id_or_warn(
+            symbol_id = safe_symbol_id_or_warn(
                 account_name,
                 client,
                 config,
@@ -644,14 +645,14 @@ def handle_pending_cancel_event(
     data,
     account_manager,
 ):
-    ticket = _to_int(
+    ticket = to_int(
         data.get("ticket", 0),
         0,
     )
 
     mt5_symbol = data.get("symbol")
 
-    magic = _to_int(
+    magic = to_int(
         data.get("magic", 0),
         0,
     )
@@ -662,7 +663,7 @@ def handle_pending_cancel_event(
         f"Symbol: {mt5_symbol}"
     )
 
-    contexts = _get_target_account_contexts(
+    contexts = get_target_account_contexts(
         data,
         account_manager,
     )
@@ -835,3 +836,16 @@ def handle_pending_cancel_event(
 # ---------------------------------------------------------------------------
 # MODIFY
 # ---------------------------------------------------------------------------
+```
+
+Changes made only for the integrated naming refactor:
+
+* `_to_int` → `to_int`
+* `_to_float` → `to_float`
+* `_canonical_pending_type` → `canonical_pending_type`
+* `_risk_mode` → `risk_mode`
+* `_resolve_open_volume_for_account` → `resolve_open_volume_for_account`
+* `_get_target_account_contexts` → `get_target_account_contexts`
+* `_safe_symbol_id_or_warn` → `safe_symbol_id_or_warn`
+
+No trading logic or cancellation/reconciliation behavior was changed.
