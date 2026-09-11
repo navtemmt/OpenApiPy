@@ -13,13 +13,14 @@ from trade_executor import (
 from symbol_mapper import SymbolMapper
 
 from .common import *
-from .common import _to_int
+from .common import to_int
 
 from .risk import *
 from .helpers import *
 
-def _resolve_target_accounts(data, account_manager):
-    magic = _to_int(
+
+def resolve_target_accounts(data, account_manager):
+    magic = to_int(
         data.get("magic", 0),
         0,
     )
@@ -35,7 +36,7 @@ def _resolve_target_accounts(data, account_manager):
         alert_trade_warning(
             account_name="router",
             action="resolve_target_accounts_invalid_magic",
-            ticket=_to_int(
+            ticket=to_int(
                 data.get("ticket", 0),
                 0,
             ),
@@ -104,7 +105,7 @@ def _resolve_target_accounts(data, account_manager):
         alert_trade_failure(
             account_name="router",
             action="resolve_target_accounts_exception",
-            ticket=_to_int(
+            ticket=to_int(
                 data.get("ticket", 0),
                 0,
             ),
@@ -125,7 +126,7 @@ def _resolve_target_accounts(data, account_manager):
         alert_trade_warning(
             account_name="router",
             action="resolve_target_accounts_no_match",
-            ticket=_to_int(
+            ticket=to_int(
                 data.get("ticket", 0),
                 0,
             ),
@@ -143,11 +144,11 @@ def _resolve_target_accounts(data, account_manager):
     return matched
 
 
-def _get_target_account_contexts(
+def get_target_account_contexts(
     data,
     account_manager,
 ):
-    account_names = _resolve_target_accounts(
+    account_names = resolve_target_accounts(
         data,
         account_manager,
     )
@@ -168,7 +169,7 @@ def _get_target_account_contexts(
             alert_trade_failure(
                 account_name=account_name,
                 action="load_target_account_context",
-                ticket=_to_int(
+                ticket=to_int(
                     data.get("ticket", 0),
                     0,
                 ),
@@ -188,7 +189,7 @@ def _get_target_account_contexts(
             alert_trade_warning(
                 account_name=account_name,
                 action="target_account_unavailable",
-                ticket=_to_int(
+                ticket=to_int(
                     data.get("ticket", 0),
                     0,
                 ),
@@ -206,5 +207,3 @@ def _get_target_account_contexts(
         )
 
     return contexts
-
-
