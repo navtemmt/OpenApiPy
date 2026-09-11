@@ -52,7 +52,7 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAReconcileReq,
     ProtoOAReconcileRes,
 )
-from trade_processor import _enforce_max_risk_on_fill, notify_position_update
+from trade_processor import enforce_max_risk_on_fill, notify_position_update
 from app_state import logger, notify_error, notify_warning, notify_info
 
 
@@ -1180,9 +1180,6 @@ class AccountManager:
                 )
 
                 if pending_position_id:
-                    # A pending-origin position already exists.
-                    # The cancellation event is stale and must not disturb
-                    # the canonical live position.
                     logger.info(
                         "[%s] Ignoring pending ORDER_CANCELLED because "
                         "pending-origin position is already active | "
@@ -1420,7 +1417,7 @@ class AccountManager:
                 None,
             )
 
-            _enforce_max_risk_on_fill(
+            enforce_max_risk_on_fill(
                 account_name=account_name,
                 client=client,
                 config=config,
@@ -1744,7 +1741,7 @@ class AccountManager:
                 )
             ):
                 self.market_order_maps[account_name].pop(
-                    ticket,
+                    int(ticket),
                     None,
                 )
 
