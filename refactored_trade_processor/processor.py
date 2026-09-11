@@ -7,12 +7,12 @@ from app_state import (
 )
 
 from .common import (
-    _canonical_event_type,
-    _to_int,
+    canonical_event_type,
+    to_int,
 )
 
 from .risk import (
-    _enforce_max_risk_on_fill,
+    enforce_max_risk_on_fill,
 )
 
 from .notifications import (
@@ -50,7 +50,7 @@ from .handlers_modify_close import (
 # Existing callers:
 #
 #     from trade_processor import (
-#         _enforce_max_risk_on_fill,
+#         enforce_max_risk_on_fill,
 #         notify_position_update,
 #     )
 #
@@ -67,16 +67,16 @@ def process_trade_event(
     account_manager,
 ):
     try:
-        event_type = _canonical_event_type(
+        event_type = canonical_event_type(
             data
         )
 
-        ticket = _to_int(
+        ticket = to_int(
             data.get("ticket", 0),
             0,
         )
 
-        magic = _to_int(
+        magic = to_int(
             data.get("magic", 0),
             0,
         )
@@ -149,7 +149,7 @@ def process_trade_event(
         alert_trade_failure(
             account_name="router",
             action="process_trade_event",
-            ticket=_to_int(
+            ticket=to_int(
                 data.get("ticket", 0),
                 0,
             ),
@@ -159,7 +159,7 @@ def process_trade_event(
                 or data.get("action")
                 or data.get("event")
             ),
-            magic=_to_int(
+            magic=to_int(
                 data.get("magic", 0),
                 0,
             ),
