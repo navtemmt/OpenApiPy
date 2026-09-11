@@ -125,7 +125,7 @@ def recover_missing_destination(
     AccountManager is used.
     """
 
-    ticket = _to_int(ticket, 0)
+    ticket = to_int(ticket, 0)
 
     if ticket <= 0:
         return False
@@ -368,27 +368,27 @@ def recover_missing_destination(
         or ""
     ).strip().upper()
 
-    src_volume = _to_float(
+    src_volume = to_float(
         payload.get("volume", 0),
         0.0,
     )
 
-    sl = _to_float(
+    sl = to_float(
         payload.get("sl", 0),
         0.0,
     )
 
-    tp = _to_float(
+    tp = to_float(
         payload.get("tp", 0),
         0.0,
     )
 
-    magic = _to_int(
+    magic = to_int(
         payload.get("magic", 0),
         0,
     )
 
-    entry_price = _extract_open_entry_price(
+    entry_price = extract_open_entry_price(
         payload
     )
 
@@ -434,7 +434,7 @@ def recover_missing_destination(
     # Resolve follower sizing using the original MT5 source data.
     # ------------------------------------------------------------------
 
-    lots, decision = _resolve_open_volume_for_account(
+    lots, decision = resolve_open_volume_for_account(
         payload,
         config,
         account_name=account_name,
@@ -467,7 +467,7 @@ def recover_missing_destination(
     # ------------------------------------------------------------------
 
     if sl > 0 or tp > 0:
-        _set_pending_sltp(
+        set_pending_sltp(
             account_name,
             ticket,
             mt5_symbol,
@@ -475,7 +475,7 @@ def recover_missing_destination(
             tp,
         )
     else:
-        _clear_pending_sltp(
+        clear_pending_sltp(
             account_name,
             ticket,
         )
@@ -500,7 +500,7 @@ def recover_missing_destination(
     # Therefore we construct the plan directly using the same price/
     # distance logic below rather than honoring "skip".
 
-    symbol_id = _get_symbol_id_for_account(
+    symbol_id = get_symbol_id_for_account(
         client,
         config,
         mt5_symbol,
@@ -515,19 +515,19 @@ def recover_missing_destination(
             mt5_symbol,
         )
 
-        _clear_pending_sltp(
+        clear_pending_sltp(
             account_name,
             ticket,
         )
 
         return False
 
-    symbol = _get_symbol_details(
+    symbol = get_symbol_details(
         client,
         int(symbol_id),
     )
 
-    current_price = _extract_mt_current_market_price(
+    current_price = extract_mt_current_market_price(
         payload,
         side,
     )
@@ -538,7 +538,7 @@ def recover_missing_destination(
         current_price is None
         or float(current_price) <= 0
     ):
-        current_price = _get_current_market_price(
+        current_price = get_current_market_price(
             client,
             int(symbol_id),
             side,
@@ -560,13 +560,13 @@ def recover_missing_destination(
         return False
 
     pip_size = (
-        _symbol_pip_size(symbol)
+        symbol_pip_size(symbol)
         if symbol is not None
         else 0.0
     )
 
     if pip_size <= 0:
-        pip_size = _extract_mt_pip_size(
+        pip_size = extract_mt_pip_size(
             payload
         )
 
@@ -589,7 +589,7 @@ def recover_missing_destination(
     )
 
     max_distance_pips = (
-        _startup_market_max_distance_pips(
+        startup_market_max_distance_pips(
             recovery_config
         )
     )
