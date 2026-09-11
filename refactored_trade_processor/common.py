@@ -47,7 +47,7 @@ _MASTER_LOTS_LOCK = Lock()
 # Basic helpers
 # ---------------------------------------------------------------------------
 
-def _build_account_symbol_mapper(client, config) -> SymbolMapper:
+def build_account_symbol_mapper(client, config) -> SymbolMapper:
     return SymbolMapper(
         prefix=getattr(config, "symbol_prefix", ""),
         suffix=getattr(config, "symbol_suffix", ""),
@@ -57,33 +57,33 @@ def _build_account_symbol_mapper(client, config) -> SymbolMapper:
     )
 
 
-def _get_symbol_id_for_account(client, config, mt5_symbol: str):
+def get_symbol_id_for_account(client, config, mt5_symbol: str):
     try:
-        mapper = _build_account_symbol_mapper(client, config)
+        mapper = build_account_symbol_mapper(client, config)
         return mapper.get_symbol_id(mt5_symbol)
     except Exception:
         return None
 
 
-def _now_ms() -> int:
+def now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _to_int(value, default=0):
+def to_int(value, default=0):
     try:
         return int(float(value))
     except Exception:
         return default
 
 
-def _to_float(value, default=0.0):
+def to_float(value, default=0.0):
     try:
         return float(value)
     except Exception:
         return default
 
 
-def _to_float_or_none(value):
+def to_float_or_none(value):
     try:
         if value is None or value == "":
             return None
@@ -92,7 +92,7 @@ def _to_float_or_none(value):
         return None
 
 
-def _to_bool(value, default=False):
+def to_bool(value, default=False):
     if isinstance(value, bool):
         return value
     if value is None:
@@ -113,18 +113,18 @@ def _to_bool(value, default=False):
 # Pending SL/TP repair
 # ---------------------------------------------------------------------------
 
-def _pending_sltp_bucket(account_name: str) -> dict:
+def pending_sltp_bucket(account_name: str) -> dict:
     with _PENDING_SLTP_LOCK:
         return PENDING_SLTP.setdefault(str(account_name), {})
 
 
-def _next_pending_retry_delay_ms(attempts: int) -> int:
+def next_pending_retry_delay_ms(attempts: int) -> int:
     attempts = max(0, int(attempts))
     delay = _PENDING_SLTP_BASE_RETRY_MS * (2 ** attempts)
     return min(delay, _PENDING_SLTP_MAX_RETRY_MS)
 
 
-def _set_pending_sltp(
+def set_pending_sltp(
     account_name: str,
     ticket: int,
     symbol: str,
@@ -132,7 +132,7 @@ def _set_pending_sltp(
     tp: float,
 ):
     ticket = int(ticket)
-    now_ms = _now_ms()
+    now_ms_value = now_ms()
 
     with _PENDING_SLTP_LOCK:
         bucket = PENDING_SLTP.setdefault(str(account_name), {})
@@ -142,30 +142,30 @@ def _set_pending_sltp(
             "symbol": symbol,
             "sl": float(sl or 0.0),
             "tp": float(tp or 0.0),
-            "created_ms": existing.get("created_ms", now_ms),
-            "updated_ms": now_ms,
+            "created_ms": existing.get("created_ms", now_ms_value),
+            "updated_ms": now_ms_value,
             "attempts": 0,
-            "next_retry_ms": now_ms,
+            "next_retry_ms": now_ms_value,
             "last_error": None,
             "last_position_id": existing.get("last_position_id"),
         }
 
 
-def _get_pending_sltp(account_name: str, ticket: int):
+def get_pending_sltp(account_name: str, ticket: int):
     with _PENDING_SLTP_LOCK:
         return PENDING_SLTP.setdefault(
             str(account_name), {}
         ).get(int(ticket))
 
 
-def _clear_pending_sltp(account_name: str, ticket: int):
+def clear_pending_sltp(account_name: str, ticket: int):
     with _PENDING_SLTP_LOCK:
         PENDING_SLTP.setdefault(
             str(account_name), {}
         ).pop(int(ticket), None)
 
 
-def _touch_pending_sltp_retry(
+def touch_pending_sltp_retry(
     account_name: str,
     ticket: int,
     error: str = None,
@@ -180,19 +180,19 @@ def _touch_pending_sltp_retry(
             return
 
         attempts = int(pending.get("attempts", 0) or 0) + 1
-        delay_ms = _next_pending_retry_delay_ms(attempts - 1)
+        delay_ms = next_pending_retry_delay_ms(attempts - 1)
 
         pending["attempts"] = attempts
-        pending["next_retry_ms"] = _now_ms() + delay_ms
+        pending["next_retry_ms"] = now_ms() + delay_ms
         pending["last_error"] = error
-        pending["updated_ms"] = _now_ms()
+        pending["updated_ms"] = now_ms()
 
         if position_id:
             pending["last_position_id"] = int(position_id)
 
 
-def _pending_sltp_expired(pending: dict) -> bool:
-    created_ms = _to_int(
+def pending_sltp_expired(pending: dict) -> bool:
+    created_ms = to_int(
         pending.get("created_ms", 0),
         0,
     )
@@ -200,11 +200,11 @@ def _pending_sltp_expired(pending: dict) -> bool:
     if created_ms <= 0:
         return False
 
-    return (_now_ms() - created_ms) > _PENDING_SLTP_MAX_AGE_MS
+    return (now_ms() - created_ms) > _PENDING_SLTP_MAX_AGE_MS
 
 
-def _pending_sltp_due(pending: dict) -> bool:
-    return _now_ms() >= _to_int(
+def pending_sltp_due(pending: dict) -> bool:
+    return now_ms() >= to_int(
         pending.get("next_retry_ms", 0),
         0,
     )
@@ -214,7 +214,7 @@ def _pending_sltp_due(pending: dict) -> bool:
 # Event normalization
 # ---------------------------------------------------------------------------
 
-def _canonical_event_type(data: dict) -> str:
+def canonical_event_type(data: dict) -> str:
     raw = str(
         data.get("event_type")
         or data.get("action")
@@ -244,7 +244,7 @@ def _canonical_event_type(data: dict) -> str:
     return aliases.get(raw, raw)
 
 
-def _canonical_pending_type(data: dict) -> str:
+def canonical_pending_type(data: dict) -> str:
     raw = str(
         data.get("pending_type")
         or data.get("order_type")
@@ -285,7 +285,7 @@ def _canonical_pending_type(data: dict) -> str:
 # Volume / risk helpers
 # ---------------------------------------------------------------------------
 
-def _lots_to_ctrader_cents(
+def lots_to_ctrader_cents(
     lots: float,
     mt5_contract_size: float,
 ) -> int:
@@ -293,14 +293,14 @@ def _lots_to_ctrader_cents(
     return int(round(units * 100.0))
 
 
-def _has_valid_sl(sl_value) -> bool:
+def has_valid_sl(sl_value) -> bool:
     try:
         return float(sl_value or 0) > 0
     except Exception:
         return False
 
 
-def _risk_mode(config) -> str:
+def risk_mode(config) -> str:
     raw = str(
         getattr(config, "risk_mode", "SOURCE_VOLUME")
         or "SOURCE_VOLUME"
@@ -311,7 +311,7 @@ def _risk_mode(config) -> str:
     return raw.strip().upper()
 
 
-def _risk_reference(config) -> str:
+def risk_reference(config) -> str:
     raw = str(
         getattr(config, "risk_reference", "EQUITY")
         or "EQUITY"
@@ -326,7 +326,7 @@ def _risk_reference(config) -> str:
 # Recovery configuration
 # ---------------------------------------------------------------------------
 
-def _startup_market_recovery_mode(config) -> str:
+def startup_market_recovery_mode(config) -> str:
     raw = str(
         getattr(
             config,
@@ -348,7 +348,7 @@ def _startup_market_recovery_mode(config) -> str:
     return raw
 
 
-def _startup_sync_market_orders_enabled(config) -> bool:
+def startup_sync_market_orders_enabled(config) -> bool:
     return bool(
         getattr(
             config,
@@ -358,7 +358,7 @@ def _startup_sync_market_orders_enabled(config) -> bool:
     )
 
 
-def _startup_market_max_distance_pips(config) -> float:
+def startup_market_max_distance_pips(config) -> float:
     try:
         v = float(
             getattr(
@@ -375,7 +375,7 @@ def _startup_market_max_distance_pips(config) -> float:
         return 10.0
 
 
-def _startup_pending_expiration_ms(config) -> int:
+def startup_pending_expiration_ms(config) -> int:
     try:
         v = int(
             float(
@@ -398,12 +398,12 @@ def _startup_pending_expiration_ms(config) -> int:
 # Account / symbol helpers
 # ---------------------------------------------------------------------------
 
-def _get_account_equity_or_balance(
+def get_account_equity_or_balance(
     account_manager,
     account_name: str,
     config,
 ) -> float:
-    ref = _risk_reference(config)
+    ref = risk_reference(config)
 
     try:
         if (
@@ -427,7 +427,7 @@ def _get_account_equity_or_balance(
         return 0.0
 
 
-def _get_symbol_details(client, symbol_id: int):
+def get_symbol_details(client, symbol_id: int):
     try:
         return (
             client.symbol_details.get(int(symbol_id))
@@ -438,7 +438,7 @@ def _get_symbol_details(client, symbol_id: int):
         return None
 
 
-def _read_attr_or_key(obj, name, default=None):
+def read_attr_or_key(obj, name, default=None):
     if obj is None:
         return default
 
@@ -452,7 +452,7 @@ def _read_attr_or_key(obj, name, default=None):
         return default
 
 
-def _first_positive_float(*values):
+def first_positive_float(*values):
     for value in values:
         try:
             f = float(value)
@@ -466,16 +466,16 @@ def _first_positive_float(*values):
     return None
 
 
-def _symbol_pip_size(symbol) -> float:
+def symbol_pip_size(symbol) -> float:
     try:
-        pip_pos = _read_attr_or_key(
+        pip_pos = read_attr_or_key(
             symbol,
             "pipPosition",
             None,
         )
 
-        digits = _to_int(
-            _read_attr_or_key(
+        digits = to_int(
+            read_attr_or_key(
                 symbol,
                 "digits",
                 0,
@@ -502,4 +502,3 @@ def _symbol_pip_size(symbol) -> float:
 # ---------------------------------------------------------------------------
 # Risk calculation
 # ---------------------------------------------------------------------------
-
