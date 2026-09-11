@@ -21,9 +21,9 @@ from symbol_mapper import SymbolMapper
 
 from .common import *
 from .common import (
-    _to_int,
-    _to_float,
-    _to_float_or_none,
+    to_int,
+    to_float,
+    to_float_or_none,
     _MASTER_LOTS_LOCK,
 )
 
@@ -33,11 +33,11 @@ from .helpers import *
 
 from .routing import *
 from .routing import (
-    _get_target_account_contexts,
+    get_target_account_contexts,
 )
 
 from .sltp_repair import *
-from .sltp_repair import _safe_symbol_id_or_warn
+from .sltp_repair import safe_symbol_id_or_warn
 
 from .destination_recovery import (
     recover_missing_destination,
@@ -48,23 +48,23 @@ def handle_modify_event(
     data,
     account_manager,
 ):
-    ticket = _to_int(
+    ticket = to_int(
         data.get("ticket")
     )
 
     mt5_symbol = data.get("symbol")
 
-    new_sl = _to_float(
+    new_sl = to_float(
         data.get("sl", 0),
         0.0,
     )
 
-    new_tp = _to_float(
+    new_tp = to_float(
         data.get("tp", 0),
         0.0,
     )
 
-    magic = _to_int(
+    magic = to_int(
         data.get("magic", 0),
         0,
     )
@@ -77,7 +77,7 @@ def handle_modify_event(
         f"New TP: {new_tp}"
     )
 
-    contexts = _get_target_account_contexts(
+    contexts = get_target_account_contexts(
         data,
         account_manager,
     )
@@ -116,7 +116,7 @@ def handle_modify_event(
                 )
             )
 
-            symbol_id = _safe_symbol_id_or_warn(
+            symbol_id = safe_symbol_id_or_warn(
                 account_name,
                 client,
                 config,
@@ -153,7 +153,7 @@ def handle_modify_event(
                         f"for ticket {ticket}"
                     )
 
-                    _clear_pending_sltp(
+                    clear_pending_sltp(
                         account_name,
                         ticket,
                     )
@@ -185,7 +185,7 @@ def handle_modify_event(
                         tp=new_tp,
                     )
 
-                    _set_pending_sltp(
+                    set_pending_sltp(
                         account_name,
                         ticket,
                         mt5_symbol,
@@ -193,7 +193,7 @@ def handle_modify_event(
                         new_tp,
                     )
 
-                    _touch_pending_sltp_retry(
+                    touch_pending_sltp_retry(
                         account_name,
                         ticket,
                         error=str(
@@ -226,7 +226,7 @@ def handle_modify_event(
                     tp=new_tp,
                 )
 
-                _set_pending_sltp(
+                set_pending_sltp(
                     account_name,
                     ticket,
                     mt5_symbol,
@@ -255,22 +255,22 @@ def handle_close_event(
     data,
     account_manager,
 ):
-    ticket = _to_int(
+    ticket = to_int(
         data.get("ticket")
     )
 
     mt5_symbol = data.get("symbol")
 
-    close_lots = _to_float_or_none(
+    close_lots = to_float_or_none(
         data.get("volume", None)
     )
 
-    mt5_contract_size = _to_float(
+    mt5_contract_size = to_float(
         data.get("mt5_contract_size", 0),
         0.0,
     )
 
-    magic = _to_int(
+    magic = to_int(
         data.get("magic", 0),
         0,
     )
@@ -320,7 +320,7 @@ def handle_close_event(
             ),
         )
 
-    contexts = _get_target_account_contexts(
+    contexts = get_target_account_contexts(
         data,
         account_manager,
     )
@@ -366,14 +366,14 @@ def handle_close_event(
                     f"(no mapping)"
                 )
 
-                _clear_pending_sltp(
+                clear_pending_sltp(
                     account_name,
                     ticket,
                 )
 
                 continue
 
-            symbol_id = _safe_symbol_id_or_warn(
+            symbol_id = safe_symbol_id_or_warn(
                 account_name,
                 client,
                 config,
@@ -383,14 +383,14 @@ def handle_close_event(
             )
 
             if symbol_id is None:
-                _clear_pending_sltp(
+                clear_pending_sltp(
                     account_name,
                     ticket,
                 )
 
                 continue
 
-            rm = _risk_mode(config)
+            rm = risk_mode(config)
 
             follower_units = (
                 account_manager.get_position_volume(
@@ -435,7 +435,7 @@ def handle_close_event(
                 else:
                     if mt5_contract_size > 0:
                         close_units = (
-                            _lots_to_ctrader_cents(
+                            lots_to_ctrader_cents(
                                 float(close_lots),
                                 mt5_contract_size,
                             )
@@ -484,7 +484,7 @@ def handle_close_event(
                     close_lots=close_lots,
                 )
 
-                _clear_pending_sltp(
+                clear_pending_sltp(
                     account_name,
                     ticket,
                 )
@@ -552,7 +552,7 @@ def handle_close_event(
                         ticket,
                     )
 
-            _clear_pending_sltp(
+            clear_pending_sltp(
                 account_name,
                 ticket,
             )
