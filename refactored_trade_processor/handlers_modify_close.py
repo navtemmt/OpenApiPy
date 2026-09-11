@@ -37,6 +37,7 @@ from .routing import (
 )
 
 from .sltp_repair import *
+from .sltp_repair import _safe_symbol_id_or_warn
 
 from .destination_recovery import (
     recover_missing_destination,
