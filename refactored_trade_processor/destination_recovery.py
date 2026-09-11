@@ -12,11 +12,12 @@ from .common import *
 from .risk import *
 from .helpers import *
 
+
 # ---------------------------------------------------------------------------
 # NEW: destination-loss recovery
 # ---------------------------------------------------------------------------
 
-def _is_destination_recovery_state(state) -> bool:
+def is_destination_recovery_state(state) -> bool:
     """
     States that mean the cTrader destination is unresolved/missing.
 
@@ -39,7 +40,7 @@ def _is_destination_recovery_state(state) -> bool:
     )
 
 
-def _get_stored_mt5_payload(
+def get_stored_mt5_payload(
     account_manager,
     account_name: str,
     ticket: int,
@@ -245,7 +246,7 @@ def recover_missing_destination(
     # leave it alone.
     if existing_order_id and not (
         force
-        and _is_destination_recovery_state(
+        and is_destination_recovery_state(
             pending_state
         )
     ):
@@ -328,7 +329,7 @@ def recover_missing_destination(
     payload = (
         dict(data)
         if isinstance(data, dict)
-        else _get_stored_mt5_payload(
+        else get_stored_mt5_payload(
             account_manager,
             account_name,
             ticket,
@@ -498,6 +499,7 @@ def recover_missing_destination(
     #
     # Therefore we construct the plan directly using the same price/
     # distance logic below rather than honoring "skip".
+
     symbol_id = _get_symbol_id_for_account(
         client,
         config,
@@ -796,4 +798,3 @@ def recover_missing_destination(
 # ---------------------------------------------------------------------------
 # Routing
 # ---------------------------------------------------------------------------
-
