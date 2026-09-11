@@ -21,8 +21,8 @@ from symbol_mapper import SymbolMapper
 
 from .common import *
 from .common import (
-    _to_int,
-    _to_float,
+    to_int,
+    to_float,
     _MASTER_LOTS_LOCK,
 )
 
@@ -30,13 +30,13 @@ from .risk import *
 
 from .helpers import *
 from .helpers import (
-    _extract_open_entry_price,
-    _is_startup_market_recovery,
+    extract_open_entry_price,
+    is_startup_market_recovery,
 )
 
 from .routing import *
 from .routing import (
-    _get_target_account_contexts,
+    get_target_account_contexts,
 )
 
 from .sltp_repair import *
@@ -51,7 +51,7 @@ def handle_open_event(
     data,
     account_manager,
 ):
-    ticket = _to_int(
+    ticket = to_int(
         data.get("ticket")
     )
 
@@ -63,32 +63,32 @@ def handle_open_event(
         or ""
     ).strip().upper()
 
-    src_volume = _to_float(
+    src_volume = to_float(
         data.get("volume", 0),
         0.0,
     )
 
-    sl = _to_float(
+    sl = to_float(
         data.get("sl", 0),
         0.0,
     )
 
-    tp = _to_float(
+    tp = to_float(
         data.get("tp", 0),
         0.0,
     )
 
-    magic = _to_int(
+    magic = to_int(
         data.get("magic", 0),
         0,
     )
 
-    entry_price = _extract_open_entry_price(
+    entry_price = extract_open_entry_price(
         data
     )
 
     is_startup_recovery = (
-        _is_startup_market_recovery(data)
+        is_startup_market_recovery(data)
     )
 
     logger.info(
@@ -128,7 +128,7 @@ def handle_open_event(
                 int(ticket)
             ] = 0.0
 
-    contexts = _get_target_account_contexts(
+    contexts = get_target_account_contexts(
         data,
         account_manager,
     )
@@ -343,7 +343,7 @@ def handle_open_event(
             # ----------------------------------------------------------
 
             lots, decision = (
-                _resolve_open_volume_for_account(
+                resolve_open_volume_for_account(
                     data,
                     config,
                     account_name=account_name,
@@ -385,7 +385,7 @@ def handle_open_event(
             )
 
             if sl > 0 or tp > 0:
-                _set_pending_sltp(
+                set_pending_sltp(
                     account_name,
                     ticket,
                     mt5_symbol,
@@ -394,7 +394,7 @@ def handle_open_event(
                 )
 
             else:
-                _clear_pending_sltp(
+                clear_pending_sltp(
                     account_name,
                     ticket,
                 )
@@ -404,7 +404,7 @@ def handle_open_event(
             # ----------------------------------------------------------
 
             if is_startup_recovery:
-                if not _startup_sync_market_orders_enabled(
+                if not startup_sync_market_orders_enabled(
                     config
                 ):
                     logger.info(
@@ -418,7 +418,7 @@ def handle_open_event(
                     continue
 
                 recovery_plan = (
-                    _build_startup_recovery_plan(
+                    build_startup_recovery_plan(
                         client=client,
                         config=config,
                         mt5_symbol=mt5_symbol,
@@ -441,7 +441,7 @@ def handle_open_event(
                     recovery_plan.get("action")
                     == "skip"
                 ):
-                    _clear_pending_sltp(
+                    clear_pending_sltp(
                         account_name,
                         ticket,
                     )
@@ -484,7 +484,7 @@ def handle_open_event(
                             or 0.0
                         ),
                         expiration_ms=(
-                            _startup_pending_expiration_ms(
+                            startup_pending_expiration_ms(
                                 config
                             )
                         ),
