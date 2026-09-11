@@ -2,7 +2,7 @@
 
 from refactored_trade_processor.common import *
 from refactored_trade_processor.risk import *
-from refactored_trade_processor.risk import _enforce_max_risk_on_fill
+from refactored_trade_processor.risk import enforce_max_risk_on_fill
 from refactored_trade_processor.helpers import *
 from refactored_trade_processor.destination_recovery import *
 from refactored_trade_processor.routing import *
