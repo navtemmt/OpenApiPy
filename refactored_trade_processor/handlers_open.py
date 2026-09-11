@@ -27,17 +27,24 @@ from .common import (
 )
 
 from .risk import *
+
 from .helpers import *
 from .helpers import (
     _extract_open_entry_price,
     _is_startup_market_recovery,
 )
+
 from .routing import *
 from .routing import (
     _get_target_account_contexts,
 )
+
 from .sltp_repair import *
-from .destination_recovery import recover_missing_destination
+
+from .destination_recovery import (
+    recover_missing_destination,
+    is_destination_recovery_state,
+)
 
 
 def handle_open_event(
@@ -235,7 +242,7 @@ def handle_open_event(
             # Now destination-loss states use the safe recovery planner.
             # ----------------------------------------------------------
 
-            if _is_destination_recovery_state(
+            if is_destination_recovery_state(
                 pending_state
             ):
                 logger.warning(
