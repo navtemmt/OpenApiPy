@@ -5,14 +5,19 @@ from app_state import (
     logger, PENDING_SLTP, MASTER_OPEN_LOTS, MASTER_CLOSED_LOTS,
     alert_trade_failure, alert_trade_warning, alert_trade_info,
 )
-from trade_executor import (copy_open_to_account, copy_pending_to_account, transition_pending_to_market)
+from trade_executor import (
+    copy_open_to_account,
+    copy_pending_to_account,
+    transition_pending_to_market,
+)
 from symbol_mapper import SymbolMapper
 
 from .common import *
 from .risk import *
 from .helpers import *
 
-def _safe_symbol_id_or_warn(
+
+def safe_symbol_id_or_warn(
     account_name,
     client,
     config,
@@ -20,7 +25,7 @@ def _safe_symbol_id_or_warn(
     mt5_symbol,
     action_name,
 ):
-    symbol_id = _get_symbol_id_for_account(
+    symbol_id = get_symbol_id_for_account(
         client,
         config,
         mt5_symbol,
@@ -66,7 +71,7 @@ def try_apply_pending_sltp(
     account_manager,
     force=False,
 ):
-    pending = _get_pending_sltp(
+    pending = get_pending_sltp(
         account_name,
         int(ticket),
     )
@@ -74,7 +79,7 @@ def try_apply_pending_sltp(
     if not pending:
         return False
 
-    if _pending_sltp_expired(pending):
+    if pending_sltp_expired(pending):
         msg = (
             f"Pending SL/TP expired for ticket "
             f"{ticket}, dropping repair item"
@@ -94,14 +99,14 @@ def try_apply_pending_sltp(
             ),
         )
 
-        _clear_pending_sltp(
+        clear_pending_sltp(
             account_name,
             int(ticket),
         )
 
         return False
 
-    attempts = _to_int(
+    attempts = to_int(
         pending.get("attempts", 0),
         0,
     )
@@ -131,7 +136,7 @@ def try_apply_pending_sltp(
             ),
         )
 
-        _clear_pending_sltp(
+        clear_pending_sltp(
             account_name,
             int(ticket),
         )
@@ -140,7 +145,7 @@ def try_apply_pending_sltp(
 
     if (
         not force
-        and not _pending_sltp_due(pending)
+        and not pending_sltp_due(pending)
     ):
         return False
 
@@ -150,7 +155,7 @@ def try_apply_pending_sltp(
     )
 
     if not position_id:
-        _touch_pending_sltp_retry(
+        touch_pending_sltp_retry(
             account_name,
             int(ticket),
             error="position_mapping_not_ready",
@@ -170,7 +175,7 @@ def try_apply_pending_sltp(
         or 0
     )
 
-    symbol_id = _get_symbol_id_for_account(
+    symbol_id = get_symbol_id_for_account(
         client,
         config,
         mt5_symbol,
@@ -208,7 +213,7 @@ def try_apply_pending_sltp(
             f"ticket {ticket}"
         )
 
-        _clear_pending_sltp(
+        clear_pending_sltp(
             account_name,
             int(ticket),
         )
@@ -216,7 +221,7 @@ def try_apply_pending_sltp(
         return True
 
     except Exception as e:
-        _touch_pending_sltp_retry(
+        touch_pending_sltp_retry(
             account_name,
             int(ticket),
             error=str(e),
@@ -305,5 +310,3 @@ def drain_pending_sltp_repairs(
             )
 
     return repaired
-
-
