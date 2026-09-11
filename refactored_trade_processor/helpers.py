@@ -19,17 +19,18 @@ from trade_executor import (
 
 from symbol_mapper import SymbolMapper
 
+
 from .common import *
 from .common import (
-    _to_bool,
-    _to_float,
-    _first_positive_float,
-    _read_attr_or_key,
-    _symbol_pip_size,
-    _get_symbol_id_for_account,
-    _get_symbol_details,
-    _startup_market_recovery_mode,
-    _startup_market_max_distance_pips,
+    to_bool,
+    to_float,
+    first_positive_float,
+    read_attr_or_key,
+    symbol_pip_size,
+    get_symbol_id_for_account,
+    get_symbol_details,
+    startup_market_recovery_mode,
+    startup_market_max_distance_pips,
 )
 
 
@@ -37,7 +38,7 @@ from .common import (
 # Entry / price helpers
 # ---------------------------------------------------------------------------
 
-def _extract_open_entry_price(data: dict) -> float:
+def extract_open_entry_price(data: dict) -> float:
     for key in (
         "entry_price",
         "open_price",
@@ -45,7 +46,7 @@ def _extract_open_entry_price(data: dict) -> float:
         "entry",
         "openPrice",
     ):
-        v = _to_float(
+        v = to_float(
             data.get(key, 0),
             0.0,
         )
@@ -56,26 +57,26 @@ def _extract_open_entry_price(data: dict) -> float:
     return 0.0
 
 
-def _is_startup_market_recovery(data: dict) -> bool:
-    if _to_bool(
+def is_startup_market_recovery(data: dict) -> bool:
+    if to_bool(
         data.get("startup_sync", False),
         False,
     ):
         return True
 
-    if _to_bool(
+    if to_bool(
         data.get("startup_recovery", False),
         False,
     ):
         return True
 
-    if _to_bool(
+    if to_bool(
         data.get("is_startup_sync", False),
         False,
     ):
         return True
 
-    if _to_bool(
+    if to_bool(
         data.get("recovery", False),
         False,
     ):
@@ -97,23 +98,23 @@ def _is_startup_market_recovery(data: dict) -> bool:
     )
 
 
-def _quote_value_from_obj(obj, names):
+def quote_value_from_obj(obj, names):
     if obj is None:
         return None
 
     for name in names:
-        v = _read_attr_or_key(
+        v = read_attr_or_key(
             obj,
             name,
             None,
         )
 
-        pv = _first_positive_float(v)
+        pv = first_positive_float(v)
 
         if pv is not None:
             return pv
 
-    nested = _read_attr_or_key(
+    nested = read_attr_or_key(
         obj,
         "quote",
         None,
@@ -121,13 +122,13 @@ def _quote_value_from_obj(obj, names):
 
     if nested is not None:
         for name in names:
-            v = _read_attr_or_key(
+            v = read_attr_or_key(
                 nested,
                 name,
                 None,
             )
 
-            pv = _first_positive_float(v)
+            pv = first_positive_float(v)
 
             if pv is not None:
                 return pv
@@ -135,7 +136,7 @@ def _quote_value_from_obj(obj, names):
     return None
 
 
-def _get_current_market_price(
+def get_current_market_price(
     client,
     symbol_id: int,
     side: str,
@@ -144,7 +145,7 @@ def _get_current_market_price(
         side or ""
     ).strip().upper()
 
-    symbol = _get_symbol_details(
+    symbol = get_symbol_details(
         client,
         symbol_id,
     )
@@ -168,8 +169,8 @@ def _get_current_market_price(
         except Exception:
             quote_obj = None
 
-    ask = _first_positive_float(
-        _quote_value_from_obj(
+    ask = first_positive_float(
+        quote_value_from_obj(
             quote_obj,
             (
                 "ask",
@@ -177,7 +178,7 @@ def _get_current_market_price(
                 "bestAsk",
             ),
         ),
-        _quote_value_from_obj(
+        quote_value_from_obj(
             symbol,
             (
                 "ask",
@@ -187,8 +188,8 @@ def _get_current_market_price(
         ),
     )
 
-    bid = _first_positive_float(
-        _quote_value_from_obj(
+    bid = first_positive_float(
+        quote_value_from_obj(
             quote_obj,
             (
                 "bid",
@@ -196,7 +197,7 @@ def _get_current_market_price(
                 "bestBid",
             ),
         ),
-        _quote_value_from_obj(
+        quote_value_from_obj(
             symbol,
             (
                 "bid",
@@ -227,7 +228,7 @@ def _get_current_market_price(
     )
 
 
-def _extract_mt_current_market_price(
+def extract_mt_current_market_price(
     data: dict,
     side: str,
 ):
@@ -235,7 +236,7 @@ def _extract_mt_current_market_price(
         side or ""
     ).strip().upper()
 
-    ask = _first_positive_float(
+    ask = first_positive_float(
         data.get("current_ask"),
         data.get("ask"),
         data.get("ask_price"),
@@ -243,7 +244,7 @@ def _extract_mt_current_market_price(
         data.get("symbol_ask"),
     )
 
-    bid = _first_positive_float(
+    bid = first_positive_float(
         data.get("current_bid"),
         data.get("bid"),
         data.get("bid_price"),
@@ -251,7 +252,7 @@ def _extract_mt_current_market_price(
         data.get("symbol_bid"),
     )
 
-    last = _first_positive_float(
+    last = first_positive_float(
         data.get("current_price"),
         data.get("price_current"),
         data.get("market_price"),
@@ -292,8 +293,8 @@ def _extract_mt_current_market_price(
     )
 
 
-def _extract_mt_pip_size(data: dict) -> float:
-    direct = _first_positive_float(
+def extract_mt_pip_size(data: dict) -> float:
+    direct = first_positive_float(
         data.get("pip_size"),
         data.get("pipSize"),
         data.get("point"),
@@ -358,7 +359,7 @@ def _extract_mt_pip_size(data: dict) -> float:
 # Recovery planner
 # ---------------------------------------------------------------------------
 
-def _build_startup_recovery_plan(
+def build_startup_recovery_plan(
     client,
     config,
     mt5_symbol: str,
@@ -387,7 +388,7 @@ def _build_startup_recovery_plan(
 
     data = data or {}
 
-    mode = _startup_market_recovery_mode(config)
+    mode = startup_market_recovery_mode(config)
 
     if mode == "skip":
         return {
@@ -413,7 +414,7 @@ def _build_startup_recovery_plan(
             ),
         }
 
-    symbol_id = _get_symbol_id_for_account(
+    symbol_id = get_symbol_id_for_account(
         client,
         config,
         mt5_symbol,
@@ -427,13 +428,13 @@ def _build_startup_recovery_plan(
             ),
         }
 
-    symbol = _get_symbol_details(
+    symbol = get_symbol_details(
         client,
         int(symbol_id),
     )
 
     current_price = (
-        _extract_mt_current_market_price(
+        extract_mt_current_market_price(
             data,
             side,
         )
@@ -445,7 +446,7 @@ def _build_startup_recovery_plan(
         current_price is None
         or float(current_price) <= 0
     ):
-        current_price = _get_current_market_price(
+        current_price = get_current_market_price(
             client,
             int(symbol_id),
             side,
@@ -466,13 +467,13 @@ def _build_startup_recovery_plan(
         }
 
     pip_size = (
-        _symbol_pip_size(symbol)
+        symbol_pip_size(symbol)
         if symbol is not None
         else 0.0
     )
 
     if pip_size <= 0:
-        pip_size = _extract_mt_pip_size(data)
+        pip_size = extract_mt_pip_size(data)
 
     if pip_size <= 0:
         return {
@@ -491,7 +492,7 @@ def _build_startup_recovery_plan(
     )
 
     max_distance_pips = (
-        _startup_market_max_distance_pips(config)
+        startup_market_max_distance_pips(config)
     )
 
     if distance_pips <= max_distance_pips:
