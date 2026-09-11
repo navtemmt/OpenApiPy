@@ -836,16 +836,4 @@ def handle_pending_cancel_event(
 # ---------------------------------------------------------------------------
 # MODIFY
 # ---------------------------------------------------------------------------
-```
 
-Changes made only for the integrated naming refactor:
-
-* `_to_int` → `to_int`
-* `_to_float` → `to_float`
-* `_canonical_pending_type` → `canonical_pending_type`
-* `_risk_mode` → `risk_mode`
-* `_resolve_open_volume_for_account` → `resolve_open_volume_for_account`
-* `_get_target_account_contexts` → `get_target_account_contexts`
-* `_safe_symbol_id_or_warn` → `safe_symbol_id_or_warn`
-
-No trading logic or cancellation/reconciliation behavior was changed.
