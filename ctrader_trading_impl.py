@@ -1228,7 +1228,19 @@ def amend_pending_order(
 
     req.ctidTraderAccountId = account_id
     req.orderId = order_id
-    req.symbolId = symbol_id
+
+    # ProtoOAAmendOrderReq identifies the existing pending
+    # order by orderId. symbolId belongs to ProtoOANewOrderReq
+    # and is not a field on this amend request.
+    #
+    # symbol_id is still used above for:
+    #   - broker volume snapping
+    #   - price rounding
+    #   - symbol lookup
+    #   - logging
+    #
+    # Do NOT assign:
+    #     req.symbolId = symbol_id
 
     req.tradeSide = (
         ProtoOATradeSide.BUY
