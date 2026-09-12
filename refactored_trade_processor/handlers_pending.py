@@ -578,7 +578,6 @@ def handle_pending_modify_event(
                 order_id=int(order_id),
                 symbol_id=int(symbol_id),
                 side=side,
-                volume=float(volume),
                 pending_type=pending_type,
                 stop_price=(
                     float(stop_price)
@@ -835,4 +834,3 @@ def handle_pending_cancel_event(
 # ---------------------------------------------------------------------------
 # MODIFY
 # ---------------------------------------------------------------------------
-
