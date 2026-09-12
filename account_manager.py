@@ -120,6 +120,13 @@ class AccountManager:
         self.reconcile_requested: Dict[str, bool] = {}
         self.auth_seen: Dict[str, bool] = {}
 
+        # True only after a valid ProtoOAReconcileRes has been received and
+        # successfully accepted as the current cTrader snapshot.
+        #
+        # False means cTrader state is UNKNOWN. In that state, absence of a
+        # position/order must never be treated as confirmed absence.
+        self.reconcile_confirmed: Dict[str, bool] = {}
+
         self.route_magic_map: Dict[int, str] = {}
         self.shared_token_files: Dict[str, str] = {}
 
@@ -417,6 +424,9 @@ class AccountManager:
 
         if account_name not in self.auth_seen:
             self.auth_seen[account_name] = False
+
+        if account_name not in self.reconcile_confirmed:
+            self.reconcile_confirmed[account_name] = False
 
     def _register_route_magic(self, account: AccountConfig):
         route_magic = self._config_route_magic(account)
@@ -1845,6 +1855,7 @@ class AccountManager:
 
         if isinstance(extracted, ProtoOAReconcileRes):
             self.reconcile_requested[account_name] = False
+            self.reconcile_confirmed[account_name] = True
 
             self._process_reconcile(
                 account_name,
@@ -1969,6 +1980,10 @@ class AccountManager:
                 account_name,
             )
 
+            # Until the new snapshot arrives, cTrader state is UNKNOWN.
+            # Do not interpret missing positions/orders as confirmed absence.
+            self.reconcile_confirmed[account_name] = False
+
             deferred = client.send(request)
 
             self.reconcile_requested[account_name] = True
@@ -1982,6 +1997,7 @@ class AccountManager:
                         ProtoOAReconcileRes,
                     ):
                         self.reconcile_requested[account_name] = False
+                        self.reconcile_confirmed[account_name] = True
 
                         self._process_reconcile(
                             account_name,
@@ -1994,6 +2010,8 @@ class AccountManager:
                         )
 
                     else:
+                        self.reconcile_confirmed[account_name] = False
+
                         logger.info(
                             "[%s] Reconcile callback received message type %s",
                             account_name,
@@ -2002,6 +2020,7 @@ class AccountManager:
 
                 except Exception as error:
                     self.reconcile_requested[account_name] = False
+                    self.reconcile_confirmed[account_name] = False
 
                     logger.warning(
                         "[%s] Failed to process reconcile response: %s",
@@ -2020,6 +2039,7 @@ class AccountManager:
 
             def _on_reconcile_error(failure):
                 self.reconcile_requested[account_name] = False
+                self.reconcile_confirmed[account_name] = False
 
                 notify_error(
                     event="reconcile_request_errback",
@@ -2044,6 +2064,7 @@ class AccountManager:
 
         except Exception as error:
             self.reconcile_requested[account_name] = False
+            self.reconcile_confirmed[account_name] = False
 
             notify_error(
                 event="send_reconcile_request",
@@ -2171,6 +2192,7 @@ class AccountManager:
 
             self.reconcile_requested[account.name] = False
             self.auth_seen[account.name] = False
+            self.reconcile_confirmed[account.name] = False
 
             logger.info(
                 "✓ Account %s socket connected; waiting for "
