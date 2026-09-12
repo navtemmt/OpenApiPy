@@ -25,6 +25,18 @@ Allowed values:
 * "min_volume"        -> current behavior; snap via broker rules
 * "floor"             -> never increase requested close volume
 * "full_if_below_min" -> allow snapped min-volume close when request is too small
+
+Pending amend behavior:
+
+* Pending-order amendments do NOT change cTrader destination volume.
+* The existing cTrader pending-order volume is preserved.
+* ProtoOAAmendOrderReq only sends fields that are actually amendable:
+    accountId
+    orderId
+    limitPrice / stopPrice
+    stopLoss
+    takeProfit
+    expirationTimestamp
 """
 
 from typing import Optional, Any, Dict
@@ -1108,7 +1120,6 @@ def amend_pending_order(
     order_id: int,
     symbol_id: int,
     side: str,
-    volume: int,
     pending_type: str,
     stop_price: Optional[float] = None,
     limit_price: Optional[float] = None,
@@ -1116,6 +1127,28 @@ def amend_pending_order(
     take_profit: Optional[float] = None,
     expiration_ms: Optional[int] = None,
 ):
+    """
+    Amend an existing cTrader pending order.
+
+    IMPORTANT:
+    This function intentionally does NOT accept a volume parameter.
+
+    Pending-order volume is determined when the destination order is
+    created. A normal MT5 PENDING_MODIFY event should modify the pending
+    price / SL / TP / expiration, but must not replace the destination
+    risk-sized cTrader volume with the MT5 source lot size.
+
+    ProtoOAAmendOrderReq does not require or contain:
+        - symbolId
+        - tradeSide
+        - orderType
+        - timeInForce
+
+    The existing cTrader order already contains its symbol, side and
+    order type. The amend request therefore only sends fields supported
+    by ProtoOAAmendOrderReq.
+    """
+
     symbol_name = (
         _resolve_symbol_name_from_id(
             self,
@@ -1134,7 +1167,6 @@ def amend_pending_order(
                 symbol_id=symbol_id,
                 symbol_name=symbol_name,
                 side=side,
-                volume=volume,
                 pending_type=pending_type,
             ),
         },
@@ -1150,17 +1182,6 @@ def amend_pending_order(
         account_id = int(account_id)
         order_id = int(order_id)
         symbol_id = int(symbol_id)
-
-        volume = self.snap_volume_for_symbol(
-            symbol_id,
-            int(volume),
-        )
-
-        if int(volume) <= 0:
-            raise ValueError(
-                "Pending amend volume must be "
-                f"greater than zero: {volume}"
-            )
 
         stop_price = float(
             stop_price or 0.0
@@ -1213,7 +1234,6 @@ def amend_pending_order(
                 symbol_id=symbol_id,
                 symbol_name=symbol_name,
                 side=side,
-                volume=volume,
                 pending_type=pending_type,
                 stop_price=stop_price,
                 limit_price=limit_price,
@@ -1237,11 +1257,15 @@ def amend_pending_order(
     #   - timeInForce
     #
     # The existing order already contains its symbol, side,
-    # and order type. Only amendable fields are sent here.
+    # order type AND VOLUME.
+    #
+    # Therefore volume is intentionally NOT assigned here.
+    #
+    # This preserves the destination cTrader volume that was
+    # calculated when the pending order was originally created.
 
     req.ctidTraderAccountId = account_id
     req.orderId = order_id
-    req.volume = int(volume)
 
     if ptype == "limit":
         if limit_price is None:
@@ -1292,7 +1316,7 @@ def amend_pending_order(
     logger.info(
         "Amending pending order accountId=%s "
         "orderId=%s symbol=%s symbolId=%s "
-        "type=%s side=%s vol=%s stop=%s "
+        "type=%s side=%s volume=UNCHANGED stop=%s "
         "limit=%s SL=%s TP=%s exp=%s",
         account_id,
         order_id,
@@ -1300,7 +1324,6 @@ def amend_pending_order(
         symbol_id,
         ptype,
         side_norm,
-        volume,
         stop_price,
         limit_price,
         stop_loss,
@@ -1326,7 +1349,6 @@ def amend_pending_order(
                 symbol_id=symbol_id,
                 symbol_name=symbol_name,
                 side=side_norm,
-                volume=volume,
                 pending_type=ptype,
                 stop_price=stop_price,
                 limit_price=limit_price,
@@ -1375,7 +1397,6 @@ def amend_pending_order(
                         symbol_id=symbol_id,
                         symbol_name=symbol_name,
                         side=side_norm,
-                        volume=volume,
                         pending_type=ptype,
                         stop_price=stop_price,
                         limit_price=limit_price,
@@ -1412,7 +1433,6 @@ def amend_pending_order(
                 symbol_id=symbol_id,
                 symbol_name=symbol_name,
                 side=side_norm,
-                volume=volume,
                 pending_type=ptype,
                 stop_price=stop_price,
                 limit_price=limit_price,
