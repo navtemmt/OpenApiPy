@@ -1226,28 +1226,21 @@ def amend_pending_order(
 
     req = ProtoOAAmendOrderReq()
 
+    # ProtoOAAmendOrderReq identifies the existing pending
+    # order using accountId + orderId.
+    #
+    # IMPORTANT:
+    # ProtoOAAmendOrderReq does NOT contain:
+    #   - symbolId
+    #   - tradeSide
+    #   - orderType
+    #   - timeInForce
+    #
+    # The existing order already contains its symbol, side,
+    # and order type. Only amendable fields are sent here.
+
     req.ctidTraderAccountId = account_id
     req.orderId = order_id
-
-    # ProtoOAAmendOrderReq identifies the existing pending
-    # order by orderId. symbolId belongs to ProtoOANewOrderReq
-    # and is not a field on this amend request.
-    #
-    # symbol_id is still used above for:
-    #   - broker volume snapping
-    #   - price rounding
-    #   - symbol lookup
-    #   - logging
-    #
-    # Do NOT assign:
-    #     req.symbolId = symbol_id
-
-    req.tradeSide = (
-        ProtoOATradeSide.BUY
-        if side_norm == "buy"
-        else ProtoOATradeSide.SELL
-    )
-
     req.volume = int(volume)
 
     if ptype == "limit":
@@ -1256,7 +1249,6 @@ def amend_pending_order(
                 "LIMIT amend requires limit_price > 0"
             )
 
-        req.orderType = ProtoOAOrderType.LIMIT
         req.limitPrice = float(limit_price)
 
     elif ptype == "stop":
@@ -1265,7 +1257,6 @@ def amend_pending_order(
                 "STOP amend requires stop_price > 0"
             )
 
-        req.orderType = ProtoOAOrderType.STOP
         req.stopPrice = float(stop_price)
 
     else:
@@ -1281,7 +1272,6 @@ def amend_pending_order(
                 "limit_price > 0"
             )
 
-        req.orderType = ProtoOAOrderType.STOPLIMIT
         req.stopPrice = float(stop_price)
         req.limitPrice = float(limit_price)
 
@@ -1295,9 +1285,6 @@ def amend_pending_order(
         expiration_ms is not None
         and int(expiration_ms) > 0
     ):
-        req.timeInForce = (
-            ProtoOATimeInForce.GOOD_TILL_DATE
-        )
         req.expirationTimestamp = int(
             expiration_ms
         )
