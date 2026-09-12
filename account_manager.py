@@ -54,6 +54,25 @@ IMPORTANT:
     A failed/unknown reconciliation is NEVER sufficient to trigger recovery.
 
     Only a successful ProtoOAReconcileRes is considered a confirmed snapshot.
+
+SOURCE ORIGIN:
+
+    Every source ticket is explicitly tracked as either:
+
+        pending
+        market
+
+    This is deliberately independent of the current cTrader mapping.
+
+    Therefore, if the cTrader order/position disappears during a confirmed
+    reconciliation, recovery can still determine the correct recovery path
+    even when the latest MT5 payload does not contain an explicit order type.
+
+IMPORTANT:
+
+    Destination recovery is only REQUESTED here.
+
+    The actual recreation is performed by the trade-processing/execution layer.
 """
 
 import inspect
@@ -127,6 +146,20 @@ class AccountManager:
         self.market_order_maps: Dict[str, Dict[int, int]] = {}
         self.market_fallback_submitted: Dict[str, Dict[int, bool]] = {}
 
+        # ------------------------------------------------------------------
+        # SOURCE ORIGIN
+        # ------------------------------------------------------------------
+        #
+        # MT5 ticket -> "pending" or "market".
+        #
+        # This is intentionally separate from destination mappings.
+        #
+        # A destination order/position can disappear while the MT5 source
+        # remains alive. In that situation we must still know whether to
+        # recreate a pending order or perform market-or-pending recovery.
+        #
+        self.source_origins: Dict[str, Dict[int, str]] = {}
+
         self.account_equity: Dict[str, float] = {}
         self.account_balance: Dict[str, float] = {}
 
@@ -174,11 +207,13 @@ class AccountManager:
     def _extract_position_label(pos) -> str:
         try:
             trade_data = getattr(pos, "tradeData", None)
+
             if trade_data is None:
                 return ""
 
             label = getattr(trade_data, "label", "")
             return label if isinstance(label, str) else ""
+
         except Exception:
             return ""
 
@@ -186,11 +221,13 @@ class AccountManager:
     def _extract_order_label(order) -> str:
         try:
             trade_data = getattr(order, "tradeData", None)
+
             if trade_data is None:
                 return ""
 
             label = getattr(trade_data, "label", "")
             return label if isinstance(label, str) else ""
+
         except Exception:
             return ""
 
@@ -203,10 +240,13 @@ class AccountManager:
 
         if value.startswith("MT5_PENDING_"):
             suffix = value[len("MT5_PENDING_"):]
+
         elif value.startswith("MT5_"):
             suffix = value[len("MT5_"):]
+
         elif value.startswith("MT5"):
             suffix = value[len("MT5"):]
+
         else:
             return None
 
@@ -232,12 +272,14 @@ class AccountManager:
 
                 if int(volume or 0) > 0:
                     return int(volume)
+
         except Exception:
             pass
 
         try:
             volume = getattr(pos, "volume", 0)
             return int(volume) if int(volume or 0) > 0 else 0
+
         except Exception:
             return 0
 
@@ -246,7 +288,11 @@ class AccountManager:
         reconcile_res,
     ) -> Tuple[Optional[float], Optional[float]]:
         try:
-            account_obj = getattr(reconcile_res, "account", None)
+            account_obj = getattr(
+                reconcile_res,
+                "account",
+                None,
+            )
 
             if account_obj is None:
                 return None, None
@@ -266,11 +312,29 @@ class AccountManager:
             if account_obj is None:
                 return None, None
 
-            equity = getattr(account_obj, "equity", None)
-            balance = getattr(account_obj, "balance", None)
+            equity = getattr(
+                account_obj,
+                "equity",
+                None,
+            )
 
-            equity_float = float(equity) if equity is not None else None
-            balance_float = float(balance) if balance is not None else None
+            balance = getattr(
+                account_obj,
+                "balance",
+                None,
+            )
+
+            equity_float = (
+                float(equity)
+                if equity is not None
+                else None
+            )
+
+            balance_float = (
+                float(balance)
+                if balance is not None
+                else None
+            )
 
             return equity_float, balance_float
 
@@ -278,40 +342,64 @@ class AccountManager:
             return None, None
 
     @staticmethod
-    def _config_account_id(config: AccountConfig) -> Optional[int]:
+    def _config_account_id(
+        config: AccountConfig,
+    ) -> Optional[int]:
         try:
-            value = getattr(config, "account_id", None)
+            value = getattr(
+                config,
+                "account_id",
+                None,
+            )
 
             if value is not None and str(value).strip() != "":
                 return int(value)
+
         except Exception:
             pass
 
         try:
-            value = getattr(config, "accountid", None)
+            value = getattr(
+                config,
+                "accountid",
+                None,
+            )
 
             if value is not None and str(value).strip() != "":
                 return int(value)
+
         except Exception:
             pass
 
         return None
 
     @staticmethod
-    def _config_route_magic(config: AccountConfig) -> Optional[int]:
+    def _config_route_magic(
+        config: AccountConfig,
+    ) -> Optional[int]:
         try:
-            value = getattr(config, "route_magic_number", None)
+            value = getattr(
+                config,
+                "route_magic_number",
+                None,
+            )
 
             if value is not None and str(value).strip() != "":
                 return int(value)
+
         except Exception:
             pass
 
         try:
-            value = getattr(config, "magic_number", None)
+            value = getattr(
+                config,
+                "magic_number",
+                None,
+            )
 
             if value is not None and str(value).strip() != "":
                 return int(value)
+
         except Exception:
             pass
 
@@ -333,16 +421,39 @@ class AccountManager:
 
         return f"{token[:6]}...{token[-4:]}"
 
-    def _notify_ctx(self, account_name: Optional[str] = None, **extra):
-        context = {"account_name": account_name}
+    def _notify_ctx(
+        self,
+        account_name: Optional[str] = None,
+        **extra,
+    ):
+        context = {
+            "account_name": account_name,
+        }
+
         context.update(extra)
+
         return context
 
-    def _build_token_group_key(self, account: AccountConfig) -> str:
+    def _build_token_group_key(
+        self,
+        account: AccountConfig,
+    ) -> str:
         explicit_candidates = (
-            getattr(account, "token_group", None),
-            getattr(account, "shared_token_group", None),
-            getattr(account, "ctid_key", None),
+            getattr(
+                account,
+                "token_group",
+                None,
+            ),
+            getattr(
+                account,
+                "shared_token_group",
+                None,
+            ),
+            getattr(
+                account,
+                "ctid_key",
+                None,
+            ),
         )
 
         for value in explicit_candidates:
@@ -352,18 +463,30 @@ class AccountManager:
                 return f"explicit:{value}"
 
         access_token = self._safe_str(
-            getattr(account, "access_token", ""),
+            getattr(
+                account,
+                "access_token",
+                "",
+            ),
         )
 
         refresh_token = self._safe_str(
-            getattr(account, "refresh_token", ""),
+            getattr(
+                account,
+                "refresh_token",
+                "",
+            ),
         )
 
         if access_token or refresh_token:
             return f"pair:{access_token}|{refresh_token}"
 
         state_file = self._safe_str(
-            getattr(account, "token_state_file", ""),
+            getattr(
+                account,
+                "token_state_file",
+                "",
+            ),
         )
 
         if state_file:
@@ -377,16 +500,27 @@ class AccountManager:
         self,
         account: AccountConfig,
     ) -> Optional[str]:
-        token_key = self._build_token_group_key(account)
-
-        configured_state_file = self._safe_str(
-            getattr(account, "token_state_file", ""),
+        token_key = self._build_token_group_key(
+            account,
         )
 
-        existing = self.shared_token_files.get(token_key)
+        configured_state_file = self._safe_str(
+            getattr(
+                account,
+                "token_state_file",
+                "",
+            ),
+        )
+
+        existing = self.shared_token_files.get(
+            token_key,
+        )
 
         if existing is not None:
-            if configured_state_file and configured_state_file != existing:
+            if (
+                configured_state_file
+                and configured_state_file != existing
+            ):
                 message = (
                     "Shared token group detected; overriding token_state_file "
                     f"{configured_state_file} -> {existing}"
@@ -412,7 +546,9 @@ class AccountManager:
             return existing or None
 
         if configured_state_file:
-            self.shared_token_files[token_key] = configured_state_file
+            self.shared_token_files[token_key] = (
+                configured_state_file
+            )
 
             logger.info(
                 "[%s] Registered shared token group %s with state file %s",
@@ -433,7 +569,10 @@ class AccountManager:
 
         return None
 
-    def _ensure_account_maps(self, account_name: str):
+    def _ensure_account_maps(
+        self,
+        account_name: str,
+    ):
         if account_name not in self.position_maps:
             self.position_maps[account_name] = {}
 
@@ -461,6 +600,9 @@ class AccountManager:
         if account_name not in self.market_fallback_submitted:
             self.market_fallback_submitted[account_name] = {}
 
+        if account_name not in self.source_origins:
+            self.source_origins[account_name] = {}
+
         if account_name not in self.mt5_payloads:
             self.mt5_payloads[account_name] = {}
 
@@ -479,8 +621,13 @@ class AccountManager:
         if account_name not in self.reconcile_confirmed:
             self.reconcile_confirmed[account_name] = False
 
-    def _register_route_magic(self, account: AccountConfig):
-        route_magic = self._config_route_magic(account)
+    def _register_route_magic(
+        self,
+        account: AccountConfig,
+    ):
+        route_magic = self._config_route_magic(
+            account,
+        )
 
         if route_magic is None:
             logger.info(
@@ -490,9 +637,14 @@ class AccountManager:
             )
             return
 
-        existing_account = self.route_magic_map.get(int(route_magic))
+        existing_account = self.route_magic_map.get(
+            int(route_magic),
+        )
 
-        if existing_account and existing_account != account.name:
+        if (
+            existing_account
+            and existing_account != account.name
+        ):
             raise ValueError(
                 f"Duplicate route_magic_number={int(route_magic)} for accounts "
                 f"{existing_account!r} and {account.name!r}"
@@ -506,7 +658,10 @@ class AccountManager:
             int(route_magic),
         )
 
-    def _unregister_route_magic(self, account_name: str):
+    def _unregister_route_magic(
+        self,
+        account_name: str,
+    ):
         stale_magics = [
             magic
             for magic, mapped_name in self.route_magic_map.items()
@@ -514,7 +669,10 @@ class AccountManager:
         ]
 
         for magic in stale_magics:
-            self.route_magic_map.pop(magic, None)
+            self.route_magic_map.pop(
+                magic,
+                None,
+            )
 
             logger.info(
                 "[%s] Unregistered route magic %s",
@@ -532,10 +690,14 @@ class AccountManager:
         )
 
         if equity is not None:
-            self.account_equity[account_name] = float(equity)
+            self.account_equity[account_name] = float(
+                equity
+            )
 
         if balance is not None:
-            self.account_balance[account_name] = float(balance)
+            self.account_balance[account_name] = float(
+                balance
+            )
 
         if equity is not None or balance is not None:
             logger.info(
@@ -546,7 +708,9 @@ class AccountManager:
             )
 
     @staticmethod
-    def _normalize_pending_type_value(pending_type):
+    def _normalize_pending_type_value(
+        pending_type,
+    ):
         value = (
             str(pending_type or "")
             .strip()
@@ -571,10 +735,16 @@ class AccountManager:
             "stoplimit": "stop_limit",
         }
 
-        return aliases.get(value, value)
+        return aliases.get(
+            value,
+            value,
+        )
 
     @classmethod
-    def _extract_order_pending_type(cls, order):
+    def _extract_order_pending_type(
+        cls,
+        order,
+    ):
         field_names = (
             "orderType",
             "order_type",
@@ -585,14 +755,22 @@ class AccountManager:
 
         for obj in (
             order,
-            getattr(order, "tradeData", None),
+            getattr(
+                order,
+                "tradeData",
+                None,
+            ),
         ):
             if obj is None:
                 continue
 
             for name in field_names:
                 try:
-                    value = getattr(obj, name, None)
+                    value = getattr(
+                        obj,
+                        name,
+                        None,
+                    )
                 except Exception:
                     value = None
 
@@ -602,7 +780,11 @@ class AccountManager:
                 enum_name = None
 
                 try:
-                    descriptor = getattr(obj, "DESCRIPTOR", None)
+                    descriptor = getattr(
+                        obj,
+                        "DESCRIPTOR",
+                        None,
+                    )
 
                     field = (
                         descriptor.fields_by_name.get(name)
@@ -629,7 +811,11 @@ class AccountManager:
                 except Exception:
                     enum_name = None
 
-                text = enum_name if enum_name else str(value)
+                text = (
+                    enum_name
+                    if enum_name
+                    else str(value)
+                )
 
                 text = (
                     text.strip()
@@ -641,7 +827,10 @@ class AccountManager:
                 if text.isdigit():
                     continue
 
-                if "stop_limit" in text or "stoplimit" in text:
+                if (
+                    "stop_limit" in text
+                    or "stoplimit" in text
+                ):
                     return "stop_limit"
 
                 if "limit" in text:
@@ -653,14 +842,162 @@ class AccountManager:
         return None
 
     @staticmethod
-    def _position_origin_from_label(label):
-        value = str(label or "").strip()
+    def _position_origin_from_label(
+        label,
+    ):
+        value = str(
+            label or ""
+        ).strip()
 
         if value.startswith("MT5_PENDING_"):
             return "pending"
 
-        if value.startswith("MT5_") or value.startswith("MT5"):
+        if (
+            value.startswith("MT5_")
+            or value.startswith("MT5")
+        ):
             return "market"
+
+        return None
+
+    # ------------------------------------------------------------------
+    # SOURCE ORIGIN
+    # ------------------------------------------------------------------
+
+    def _set_source_origin(
+        self,
+        account_name: str,
+        ticket: int,
+        origin: Optional[str],
+    ):
+        """
+        Record the MT5 source origin for a ticket.
+
+        Valid origins are only:
+            pending
+            market
+
+        Unknown origins are deliberately ignored. We never guess a source
+        type from an incomplete destination event.
+        """
+        origin = str(
+            origin or ""
+        ).strip().lower()
+
+        if origin not in (
+            "pending",
+            "market",
+        ):
+            return
+
+        self._ensure_account_maps(
+            account_name,
+        )
+
+        ticket = int(ticket)
+
+        previous = self.source_origins[account_name].get(
+            ticket,
+        )
+
+        self.source_origins[account_name][ticket] = origin
+
+        if previous != origin:
+            logger.info(
+                "[%s] Source origin ticket=%s -> %s",
+                account_name,
+                ticket,
+                origin,
+            )
+
+    def get_source_origin(
+        self,
+        account_name: str,
+        ticket: int,
+    ) -> Optional[str]:
+        """
+        Return the known MT5 source origin.
+
+        Returns:
+            "pending"
+            "market"
+            None
+        """
+        return (
+            self.source_origins.get(
+                account_name,
+            )
+            or {}
+        ).get(
+            int(ticket),
+        )
+
+    def _clear_source_origin(
+        self,
+        account_name: str,
+        ticket: int,
+    ):
+        self._ensure_account_maps(
+            account_name,
+        )
+
+        self.source_origins[account_name].pop(
+            int(ticket),
+            None,
+        )
+
+    def _resolve_source_origin(
+        self,
+        account_name: str,
+        ticket: int,
+    ) -> Optional[str]:
+        """
+        Resolve source origin.
+
+        Explicitly stored source origin always has priority.
+
+        If no origin has been recorded yet, an unambiguous MT5 payload may
+        establish it.
+
+        Unknown payload formats are never guessed.
+        """
+        ticket = int(ticket)
+
+        origin = self.get_source_origin(
+            account_name,
+            ticket,
+        )
+
+        if origin in (
+            "pending",
+            "market",
+        ):
+            return origin
+
+        payload = (
+            self.mt5_payloads.get(
+                account_name,
+            )
+            or {}
+        ).get(
+            ticket,
+        )
+
+        origin = self._source_payload_origin(
+            payload,
+        )
+
+        if origin in (
+            "pending",
+            "market",
+        ):
+            self._set_source_origin(
+                account_name,
+                ticket,
+                origin,
+            )
+
+            return origin
 
         return None
 
@@ -670,18 +1007,30 @@ class AccountManager:
         mt5_ticket: int,
         notify=True,
     ):
-        self._ensure_account_maps(account_name)
+        self._ensure_account_maps(
+            account_name,
+        )
 
         ticket = int(mt5_ticket)
 
-        pending_id = self.pending_position_maps[account_name].get(ticket)
-        market_id = self.market_position_maps[account_name].get(ticket)
-        previous = self.position_maps[account_name].get(ticket)
+        pending_id = self.pending_position_maps[
+            account_name
+        ].get(ticket)
+
+        market_id = self.market_position_maps[
+            account_name
+        ].get(ticket)
+
+        previous = self.position_maps[
+            account_name
+        ].get(ticket)
 
         canonical = pending_id or market_id
 
         if canonical:
-            self.position_maps[account_name][ticket] = int(canonical)
+            self.position_maps[
+                account_name
+            ][ticket] = int(canonical)
 
             if previous != int(canonical):
                 logger.info(
@@ -693,7 +1042,9 @@ class AccountManager:
                     "pending" if pending_id else "market",
                     pending_id,
                     market_id,
-                    self.pending_states[account_name].get(ticket),
+                    self.pending_states[
+                        account_name
+                    ].get(ticket),
                 )
 
             if notify:
@@ -705,7 +1056,9 @@ class AccountManager:
 
             return int(canonical)
 
-        self.position_maps[account_name].pop(
+        self.position_maps[
+            account_name
+        ].pop(
             ticket,
             None,
         )
@@ -730,22 +1083,32 @@ class AccountManager:
         if int(order_id or 0) <= 0:
             return
 
-        self._ensure_account_maps(account_name)
+        self._ensure_account_maps(
+            account_name,
+        )
 
         ticket = int(mt5_ticket)
         oid = int(order_id)
 
-        previous_order_id = self.order_maps[account_name].get(ticket)
+        previous_order_id = self.order_maps[
+            account_name
+        ].get(ticket)
 
-        self.order_maps[account_name][ticket] = oid
+        self.order_maps[
+            account_name
+        ][ticket] = oid
 
         if pending_type:
-            self.pending_types[account_name][ticket] = (
-                self._normalize_pending_type_value(pending_type)
+            self.pending_types[
+                account_name
+            ][ticket] = self._normalize_pending_type_value(
+                pending_type,
             )
 
         if state:
-            self.pending_states[account_name][ticket] = str(state).upper()
+            self.pending_states[
+                account_name
+            ][ticket] = str(state).upper()
 
         if previous_order_id != oid:
             logger.info(
@@ -754,8 +1117,12 @@ class AccountManager:
                 account_name,
                 ticket,
                 oid,
-                self.pending_types[account_name].get(ticket),
-                self.pending_states[account_name].get(ticket),
+                self.pending_types[
+                    account_name
+                ].get(ticket),
+                self.pending_states[
+                    account_name
+                ].get(ticket),
             )
 
     def _remove_order_mapping(
@@ -764,11 +1131,15 @@ class AccountManager:
         mt5_ticket: int,
         clear_state=False,
     ):
-        self._ensure_account_maps(account_name)
+        self._ensure_account_maps(
+            account_name,
+        )
 
         ticket = int(mt5_ticket)
 
-        removed = self.order_maps[account_name].pop(
+        removed = self.order_maps[
+            account_name
+        ].pop(
             ticket,
             None,
         )
@@ -782,12 +1153,16 @@ class AccountManager:
             )
 
         if clear_state:
-            self.pending_types[account_name].pop(
+            self.pending_types[
+                account_name
+            ].pop(
                 ticket,
                 None,
             )
 
-            self.pending_states[account_name].pop(
+            self.pending_states[
+                account_name
+            ].pop(
                 ticket,
                 None,
             )
@@ -802,27 +1177,40 @@ class AccountManager:
         ticket: int,
         action: str,
     ):
-        self._ensure_account_maps(account_name)
+        self._ensure_account_maps(
+            account_name,
+        )
 
         ticket = int(ticket)
 
         if action == RECOVERY_NONE:
-            self.recovery_actions[account_name].pop(
+            self.recovery_actions[
+                account_name
+            ].pop(
                 ticket,
                 None,
             )
 
-            self.recovery_requested[account_name].pop(
+            self.recovery_requested[
+                account_name
+            ].pop(
                 ticket,
                 None,
             )
 
             return
 
-        previous = self.recovery_actions[account_name].get(ticket)
+        previous = self.recovery_actions[
+            account_name
+        ].get(ticket)
 
-        self.recovery_actions[account_name][ticket] = action
-        self.recovery_requested[account_name][ticket] = True
+        self.recovery_actions[
+            account_name
+        ][ticket] = action
+
+        self.recovery_requested[
+            account_name
+        ][ticket] = True
 
         if previous != action:
             logger.warning(
@@ -838,7 +1226,10 @@ class AccountManager:
         ticket: int,
     ) -> str:
         return (
-            self.recovery_actions.get(account_name) or {}
+            self.recovery_actions.get(
+                account_name,
+            )
+            or {}
         ).get(
             int(ticket),
             RECOVERY_NONE,
@@ -862,16 +1253,22 @@ class AccountManager:
         account_name: str,
         ticket: int,
     ):
-        self._ensure_account_maps(account_name)
+        self._ensure_account_maps(
+            account_name,
+        )
 
         ticket = int(ticket)
 
-        previous = self.recovery_actions[account_name].pop(
+        previous = self.recovery_actions[
+            account_name
+        ].pop(
             ticket,
             None,
         )
 
-        self.recovery_requested[account_name].pop(
+        self.recovery_requested[
+            account_name
+        ].pop(
             ticket,
             None,
         )
@@ -900,7 +1297,10 @@ class AccountManager:
             payload when the MT5 source trade closes/cancels.
         """
         payload = (
-            self.mt5_payloads.get(account_name) or {}
+            self.mt5_payloads.get(
+                account_name,
+            )
+            or {}
         ).get(
             int(ticket),
         )
@@ -1020,9 +1420,12 @@ class AccountManager:
         pending_type,
         order_id=0,
     ):
-        self._ensure_account_maps(account_name)
+        self._ensure_account_maps(
+            account_name,
+        )
 
         ticket = int(ticket)
+
         ptype = self._normalize_pending_type_value(
             pending_type,
         )
@@ -1036,8 +1439,20 @@ class AccountManager:
                 f"Unsupported pending type: {pending_type}"
             )
 
-        self.pending_types[account_name][ticket] = ptype
-        self.pending_states[account_name][ticket] = "PENDING"
+        # Explicitly remember source origin.
+        self._set_source_origin(
+            account_name,
+            ticket,
+            "pending",
+        )
+
+        self.pending_types[
+            account_name
+        ][ticket] = ptype
+
+        self.pending_states[
+            account_name
+        ][ticket] = "PENDING"
 
         # A fresh source registration means any old recovery request has been
         # superseded.
@@ -1061,7 +1476,10 @@ class AccountManager:
         ticket,
     ):
         return (
-            self.pending_types.get(account_name) or {}
+            self.pending_types.get(
+                account_name,
+            )
+            or {}
         ).get(
             int(ticket),
         )
@@ -1072,15 +1490,17 @@ class AccountManager:
         ticket,
         state,
     ):
-        self._ensure_account_maps(account_name)
+        self._ensure_account_maps(
+            account_name,
+        )
 
         value = str(
             state or "UNKNOWN"
         ).upper()
 
-        self.pending_states[account_name][
-            int(ticket)
-        ] = value
+        self.pending_states[
+            account_name
+        ][int(ticket)] = value
 
         logger.info(
             "[%s] Pending state ticket=%s -> %s",
@@ -1095,7 +1515,10 @@ class AccountManager:
         ticket,
     ):
         return (
-            self.pending_states.get(account_name) or {}
+            self.pending_states.get(
+                account_name,
+            )
+            or {}
         ).get(
             int(ticket),
         )
@@ -1106,7 +1529,10 @@ class AccountManager:
         ticket,
     ):
         return (
-            self.pending_position_maps.get(account_name) or {}
+            self.pending_position_maps.get(
+                account_name,
+            )
+            or {}
         ).get(
             int(ticket),
         )
@@ -1117,7 +1543,10 @@ class AccountManager:
         ticket,
     ):
         return (
-            self.market_position_maps.get(account_name) or {}
+            self.market_position_maps.get(
+                account_name,
+            )
+            or {}
         ).get(
             int(ticket),
         )
@@ -1162,23 +1591,36 @@ class AccountManager:
         order_id=0,
         fallback=False,
     ):
-        self._ensure_account_maps(account_name)
+        self._ensure_account_maps(
+            account_name,
+        )
 
         ticket = int(ticket)
 
+        # Explicitly remember source origin.
+        self._set_source_origin(
+            account_name,
+            ticket,
+            "market",
+        )
+
         if int(order_id or 0) > 0:
-            self.market_order_maps[account_name][ticket] = int(
-                order_id
-            )
+            self.market_order_maps[
+                account_name
+            ][ticket] = int(order_id)
 
         if fallback:
-            self.market_fallback_submitted[account_name][ticket] = True
+            self.market_fallback_submitted[
+                account_name
+            ][ticket] = True
 
         logger.info(
             "[%s] Market order registered ticket=%s orderId=%s fallback=%s",
             account_name,
             ticket,
-            int(order_id) if int(order_id or 0) > 0 else None,
+            int(order_id)
+            if int(order_id or 0) > 0
+            else None,
             fallback,
         )
 
@@ -1188,7 +1630,10 @@ class AccountManager:
         ticket,
     ):
         return (
-            self.market_order_maps.get(account_name) or {}
+            self.market_order_maps.get(
+                account_name,
+            )
+            or {}
         ).get(
             int(ticket),
         )
@@ -1200,7 +1645,9 @@ class AccountManager:
     ):
         return bool(
             (
-                self.market_fallback_submitted.get(account_name)
+                self.market_fallback_submitted.get(
+                    account_name,
+                )
                 or {}
             ).get(
                 int(ticket),
@@ -1212,9 +1659,13 @@ class AccountManager:
         account_name,
         ticket,
     ):
-        self._ensure_account_maps(account_name)
+        self._ensure_account_maps(
+            account_name,
+        )
 
-        self.market_order_maps[account_name].pop(
+        self.market_order_maps[
+            account_name
+        ].pop(
             int(ticket),
             None,
         )
@@ -1229,52 +1680,76 @@ class AccountManager:
         if int(position_id or 0) <= 0:
             return
 
-        self._ensure_account_maps(account_name)
+        self._ensure_account_maps(
+            account_name,
+        )
 
         ticket = int(mt5_ticket)
         pid = int(position_id)
 
-        # A successfully recreated/live destination position means any pending
-        # recovery request for this ticket has been satisfied.
+        # Resolve explicit source origin before modifying destination state.
+        resolved_origin = origin
+
+        if resolved_origin not in (
+            "pending",
+            "market",
+        ):
+            resolved_origin = self.get_source_origin(
+                account_name,
+                ticket,
+            )
+
+        if resolved_origin not in (
+            "pending",
+            "market",
+        ):
+            if self.pending_types[
+                account_name
+            ].get(ticket):
+                resolved_origin = "pending"
+            else:
+                resolved_origin = "market"
+
+        # Remember the origin permanently for the lifetime of this source
+        # ticket.
+        self._set_source_origin(
+            account_name,
+            ticket,
+            resolved_origin,
+        )
+
+        # A successfully recreated/live destination position means any
+        # pending recovery request for this ticket has been satisfied.
         self.clear_recovery_action(
             account_name,
             ticket,
         )
 
-        if origin == "pending":
-            self.pending_position_maps[account_name][ticket] = pid
-            self.pending_states[account_name][ticket] = "ACTIVATED"
+        if resolved_origin == "pending":
+            self.pending_position_maps[
+                account_name
+            ][ticket] = pid
+
+            self.pending_states[
+                account_name
+            ][ticket] = "ACTIVATED"
 
             self._remove_order_mapping(
                 account_name,
                 ticket,
             )
 
-        elif origin == "market":
-            self.market_position_maps[account_name][ticket] = pid
+        elif resolved_origin == "market":
+            self.market_position_maps[
+                account_name
+            ][ticket] = pid
 
-            self.market_order_maps[account_name].pop(
+            self.market_order_maps[
+                account_name
+            ].pop(
                 ticket,
                 None,
             )
-
-        else:
-            if self.pending_types[account_name].get(ticket):
-                self.pending_position_maps[account_name][ticket] = pid
-                self.pending_states[account_name][ticket] = "ACTIVATED"
-
-                self._remove_order_mapping(
-                    account_name,
-                    ticket,
-                )
-
-            else:
-                self.market_position_maps[account_name][ticket] = pid
-
-                self.market_order_maps[account_name].pop(
-                    ticket,
-                    None,
-                )
 
         self._select_canonical_position(
             account_name,
@@ -1287,38 +1762,52 @@ class AccountManager:
         mt5_ticket: int,
         origin=None,
     ):
-        self._ensure_account_maps(account_name)
+        self._ensure_account_maps(
+            account_name,
+        )
 
         ticket = int(mt5_ticket)
 
         if origin == "pending":
-            pid = self.pending_position_maps[account_name].pop(
+            pid = self.pending_position_maps[
+                account_name
+            ].pop(
                 ticket,
                 None,
             )
 
             if pid:
-                self.position_volumes[account_name].pop(
+                self.position_volumes[
+                    account_name
+                ].pop(
                     int(pid),
                     None,
                 )
 
         elif origin == "market":
-            pid = self.market_position_maps[account_name].pop(
+            pid = self.market_position_maps[
+                account_name
+            ].pop(
                 ticket,
                 None,
             )
 
             if pid:
-                self.position_volumes[account_name].pop(
+                self.position_volumes[
+                    account_name
+                ].pop(
                     int(pid),
                     None,
                 )
 
         else:
             for mapping in (
-                self.pending_position_maps[account_name],
-                self.market_position_maps[account_name],
+                self.pending_position_maps[
+                    account_name
+                ],
+                self.market_position_maps[
+                    account_name
+                ],
             ):
                 pid = mapping.pop(
                     ticket,
@@ -1326,7 +1815,9 @@ class AccountManager:
                 )
 
                 if pid:
-                    self.position_volumes[account_name].pop(
+                    self.position_volumes[
+                        account_name
+                    ].pop(
                         int(pid),
                         None,
                     )
@@ -1345,14 +1836,20 @@ class AccountManager:
         if int(position_id or 0) <= 0:
             return
 
-        self._ensure_account_maps(account_name)
+        self._ensure_account_maps(
+            account_name,
+        )
 
         pid = int(position_id)
 
         if int(volume or 0) > 0:
-            previous_volume = self.position_volumes[account_name].get(pid)
+            previous_volume = self.position_volumes[
+                account_name
+            ].get(pid)
 
-            self.position_volumes[account_name][pid] = int(volume)
+            self.position_volumes[
+                account_name
+            ][pid] = int(volume)
 
             if previous_volume != int(volume):
                 logger.info(
@@ -1363,7 +1860,9 @@ class AccountManager:
                 )
 
         else:
-            self.position_volumes[account_name].pop(
+            self.position_volumes[
+                account_name
+            ].pop(
                 pid,
                 None,
             )
@@ -1373,23 +1872,50 @@ class AccountManager:
         account_name: str,
         extracted,
     ):
-        order = getattr(extracted, "order", None)
+        order = getattr(
+            extracted,
+            "order",
+            None,
+        )
 
         if order is None:
             return
 
         order_id = self._to_int(
-            getattr(order, "orderId", 0),
+            getattr(
+                order,
+                "orderId",
+                0,
+            ),
             default=0,
         )
 
-        label = self._extract_order_label(order)
-        ticket = self._label_to_ticket(label)
+        label = self._extract_order_label(
+            order,
+        )
+
+        ticket = self._label_to_ticket(
+            label,
+        )
 
         if order_id <= 0 or ticket is None:
             return
 
-        origin = self._position_origin_from_label(label)
+        origin = self._position_origin_from_label(
+            label,
+        )
+
+        # Destination event labels are also authoritative for establishing
+        # source origin when this is the first event seen for the ticket.
+        if origin in (
+            "pending",
+            "market",
+        ):
+            self._set_source_origin(
+                account_name,
+                int(ticket),
+                origin,
+            )
 
         if origin == "pending":
             if self.get_pending_position_id(
@@ -1437,7 +1963,8 @@ class AccountManager:
                 self.get_pending_state(
                     account_name,
                     int(ticket),
-                ) or "PENDING",
+                )
+                or "PENDING",
             )
 
             # Destination exists again, so an outstanding recovery request
@@ -1463,36 +1990,68 @@ class AccountManager:
         account_name: str,
         extracted,
     ):
-        position = getattr(extracted, "position", None)
+        position = getattr(
+            extracted,
+            "position",
+            None,
+        )
 
         if position is None:
             return
 
         execution_type = self._to_int(
-            getattr(extracted, "executionType", 0),
+            getattr(
+                extracted,
+                "executionType",
+                0,
+            ),
             default=0,
         )
 
         position_status = self._to_int(
-            getattr(position, "positionStatus", 0),
+            getattr(
+                position,
+                "positionStatus",
+                0,
+            ),
             default=0,
         )
 
         position_id = self._to_int(
-            getattr(position, "positionId", 0),
+            getattr(
+                position,
+                "positionId",
+                0,
+            ),
             default=0,
         )
 
-        label = self._extract_position_label(position)
-        ticket = self._label_to_ticket(label)
-        volume = self._extract_position_volume(position)
+        label = self._extract_position_label(
+            position,
+        )
+
+        ticket = self._label_to_ticket(
+            label,
+        )
+
+        volume = self._extract_position_volume(
+            position,
+        )
 
         if ticket is None:
             return
 
-        is_order_accepted = execution_type == ORDER_ACCEPTED
-        is_order_filled = execution_type == ORDER_FILLED
-        is_order_cancelled = execution_type == ORDER_CANCELLED
+        is_order_accepted = (
+            execution_type == ORDER_ACCEPTED
+        )
+
+        is_order_filled = (
+            execution_type == ORDER_FILLED
+        )
+
+        is_order_cancelled = (
+            execution_type == ORDER_CANCELLED
+        )
 
         is_live_position = (
             position_id > 0
@@ -1504,7 +2063,25 @@ class AccountManager:
             and volume <= 0
         )
 
-        origin = self._position_origin_from_label(label)
+        origin = self._position_origin_from_label(
+            label,
+        )
+
+        if origin in (
+            "pending",
+            "market",
+        ):
+            self._set_source_origin(
+                account_name,
+                int(ticket),
+                origin,
+            )
+
+        else:
+            origin = self.get_source_origin(
+                account_name,
+                int(ticket),
+            )
 
         logger.info(
             "[%s] Execution position | ticket=%s positionId=%s volume=%s "
@@ -1525,7 +2102,10 @@ class AccountManager:
         )
 
         # ACCEPTED ZERO-VOLUME SHELL
-        if is_order_accepted and is_zero_volume_shell:
+        if (
+            is_order_accepted
+            and is_zero_volume_shell
+        ):
             logger.info(
                 "[%s] Accepted order shell retained as order mapping only | "
                 "ticket=%s positionId=%s positionStatus=%s",
@@ -1563,9 +2143,12 @@ class AccountManager:
 
         # ORDER CANCELLED
         if is_order_cancelled:
-            if origin == "pending" or self.get_order_id(
-                account_name,
-                int(ticket),
+            if (
+                origin == "pending"
+                or self.get_order_id(
+                    account_name,
+                    int(ticket),
+                )
             ):
                 pending_position_id = self.get_pending_position_id(
                     account_name,
@@ -1739,32 +2322,57 @@ class AccountManager:
         ticket: Optional[int],
     ):
         try:
-            if int(position_id or 0) <= 0 or ticket is None:
+            if (
+                int(position_id or 0) <= 0
+                or ticket is None
+            ):
                 return
 
-            volume = self._extract_position_volume(position)
+            volume = self._extract_position_volume(
+                position,
+            )
 
             if volume <= 0:
                 return
 
             execution_type = self._to_int(
-                getattr(extracted, "executionType", 0),
+                getattr(
+                    extracted,
+                    "executionType",
+                    0,
+                ),
                 default=0,
             )
 
             if execution_type != ORDER_FILLED:
                 return
 
-            config = self.get_config(account_name)
-            client = self.get_client(account_name)
+            config = self.get_config(
+                account_name,
+            )
+
+            client = self.get_client(
+                account_name,
+            )
 
             if not config or not client:
                 return
 
-            trade_data = getattr(position, "tradeData", None) or position
+            trade_data = (
+                getattr(
+                    position,
+                    "tradeData",
+                    None,
+                )
+                or position
+            )
 
             symbol_id = self._to_int(
-                getattr(trade_data, "symbolId", 0),
+                getattr(
+                    trade_data,
+                    "symbolId",
+                    0,
+                ),
                 default=0,
             )
 
@@ -1772,8 +2380,13 @@ class AccountManager:
                 return
 
             symbol = (
-                client.symbol_details.get(int(symbol_id))
-                if hasattr(client, "symbol_details")
+                client.symbol_details.get(
+                    int(symbol_id),
+                )
+                if hasattr(
+                    client,
+                    "symbol_details",
+                )
                 else None
             )
 
@@ -1836,10 +2449,17 @@ class AccountManager:
 
             It does NOT mean MT5 source cancellation.
         """
-        self._ensure_account_maps(account_name)
+        self._ensure_account_maps(
+            account_name,
+        )
 
         positions = list(
-            getattr(extracted, "position", []) or []
+            getattr(
+                extracted,
+                "position",
+                [],
+            )
+            or []
         )
 
         active_position_ids = set()
@@ -1850,11 +2470,17 @@ class AccountManager:
 
         for position in positions:
             position_id = self._to_int(
-                getattr(position, "positionId", 0),
+                getattr(
+                    position,
+                    "positionId",
+                    0,
+                ),
                 default=0,
             )
 
-            volume = self._extract_position_volume(position)
+            volume = self._extract_position_volume(
+                position,
+            )
 
             if position_id <= 0 or volume <= 0:
                 continue
@@ -1869,25 +2495,42 @@ class AccountManager:
                 int(volume),
             )
 
-            label = self._extract_position_label(position)
-            ticket = self._label_to_ticket(label)
-            origin = self._position_origin_from_label(label)
+            label = self._extract_position_label(
+                position,
+            )
+
+            ticket = self._label_to_ticket(
+                label,
+            )
+
+            origin = self._position_origin_from_label(
+                label,
+            )
 
             if ticket is None or origin is None:
                 continue
 
             ticket = int(ticket)
 
+            # Reconciliation is also a reliable way to rebuild source origin.
+            self._set_source_origin(
+                account_name,
+                ticket,
+                origin,
+            )
+
             if origin == "pending":
-                self.pending_position_maps[account_name][
-                    ticket
-                ] = int(position_id)
+                self.pending_position_maps[
+                    account_name
+                ][ticket] = int(position_id)
 
-                self.pending_states[account_name][
-                    ticket
-                ] = "ACTIVATED"
+                self.pending_states[
+                    account_name
+                ][ticket] = "ACTIVATED"
 
-                active_pending_tickets.add(ticket)
+                active_pending_tickets.add(
+                    ticket,
+                )
 
                 self.clear_recovery_action(
                     account_name,
@@ -1895,16 +2538,20 @@ class AccountManager:
                 )
 
             else:
-                self.market_position_maps[account_name][
-                    ticket
-                ] = int(position_id)
+                self.market_position_maps[
+                    account_name
+                ][ticket] = int(position_id)
 
-                self.market_order_maps[account_name].pop(
+                self.market_order_maps[
+                    account_name
+                ].pop(
                     ticket,
                     None,
                 )
 
-                active_market_tickets.add(ticket)
+                active_market_tickets.add(
+                    ticket,
+                )
 
                 self.clear_recovery_action(
                     account_name,
@@ -1926,29 +2573,41 @@ class AccountManager:
         # Confirmed snapshot means positions absent from the snapshot are
         # genuinely absent on cTrader.
         for ticket, position_id in list(
-            self.pending_position_maps[account_name].items()
+            self.pending_position_maps[
+                account_name
+            ].items()
         ):
             if ticket not in active_pending_tickets:
-                self.pending_position_maps[account_name].pop(
+                self.pending_position_maps[
+                    account_name
+                ].pop(
                     ticket,
                     None,
                 )
 
-                self.position_volumes[account_name].pop(
+                self.position_volumes[
+                    account_name
+                ].pop(
                     int(position_id),
                     None,
                 )
 
         for ticket, position_id in list(
-            self.market_position_maps[account_name].items()
+            self.market_position_maps[
+                account_name
+            ].items()
         ):
             if ticket not in active_market_tickets:
-                self.market_position_maps[account_name].pop(
+                self.market_position_maps[
+                    account_name
+                ].pop(
                     ticket,
                     None,
                 )
 
-                self.position_volumes[account_name].pop(
+                self.position_volumes[
+                    account_name
+                ].pop(
                     int(position_id),
                     None,
                 )
@@ -1980,7 +2639,9 @@ class AccountManager:
         ]
 
         for position_id in stale_position_ids:
-            self.position_volumes[account_name].pop(
+            self.position_volumes[
+                account_name
+            ].pop(
                 position_id,
                 None,
             )
@@ -2006,10 +2667,17 @@ class AccountManager:
         If the MT5 source still exists, the missing destination order becomes a
         recovery condition.
         """
-        self._ensure_account_maps(account_name)
+        self._ensure_account_maps(
+            account_name,
+        )
 
         orders = list(
-            getattr(extracted, "order", []) or []
+            getattr(
+                extracted,
+                "order",
+                [],
+            )
+            or []
         )
 
         active_pending_tickets = set()
@@ -2019,19 +2687,40 @@ class AccountManager:
 
         for order in orders:
             order_id = self._to_int(
-                getattr(order, "orderId", 0),
+                getattr(
+                    order,
+                    "orderId",
+                    0,
+                ),
                 default=0,
             )
 
-            label = self._extract_order_label(order)
-            ticket = self._label_to_ticket(label)
+            label = self._extract_order_label(
+                order,
+            )
+
+            ticket = self._label_to_ticket(
+                label,
+            )
 
             if order_id <= 0 or ticket is None:
                 continue
 
             ticket = int(ticket)
 
-            origin = self._position_origin_from_label(label)
+            origin = self._position_origin_from_label(
+                label,
+            )
+
+            if origin in (
+                "pending",
+                "market",
+            ):
+                self._set_source_origin(
+                    account_name,
+                    ticket,
+                    origin,
+                )
 
             if origin == "pending":
                 # A pending-origin position is already canonical.
@@ -2041,14 +2730,18 @@ class AccountManager:
                 ):
                     continue
 
-                active_pending_tickets.add(ticket)
+                active_pending_tickets.add(
+                    ticket,
+                )
 
                 pending_type = (
                     self.get_pending_type(
                         account_name,
                         ticket,
                     )
-                    or self._extract_order_pending_type(order)
+                    or self._extract_order_pending_type(
+                        order,
+                    )
                 )
 
                 self._store_order_mapping(
@@ -2079,7 +2772,9 @@ class AccountManager:
                 )
 
             elif origin == "market":
-                active_market_tickets.add(ticket)
+                active_market_tickets.add(
+                    ticket,
+                )
 
                 self.register_market_order(
                     account_name,
@@ -2109,7 +2804,10 @@ class AccountManager:
         # cancellation merely from destination absence.
         #
         for ticket in list(
-            self.order_maps.get(account_name, {})
+            self.order_maps.get(
+                account_name,
+                {},
+            )
         ):
             if (
                 ticket not in active_pending_tickets
@@ -2171,7 +2869,10 @@ class AccountManager:
         # is required.
         #
         for ticket in list(
-            self.market_order_maps.get(account_name, {})
+            self.market_order_maps.get(
+                account_name,
+                {},
+            )
         ):
             if (
                 ticket not in active_market_tickets
@@ -2180,7 +2881,9 @@ class AccountManager:
                     int(ticket),
                 )
             ):
-                self.market_order_maps[account_name].pop(
+                self.market_order_maps[
+                    account_name
+                ].pop(
                     int(ticket),
                     None,
                 )
@@ -2190,51 +2893,12 @@ class AccountManager:
                     int(ticket),
                 )
 
-        # ------------------------------------------------------------
-        # MARKET SOURCE WITH NO CURRENT cTRADER ORDER MAPPING
-        # ------------------------------------------------------------
-        #
-        # A filled market order normally has a position mapping. If that
-        # mapping disappeared during reconciliation, but the MT5 source still
-        # exists, the market position also needs recovery.
-        #
-        for ticket in list(
-            self.mt5_payloads.get(account_name, {})
-        ):
-            ticket = int(ticket)
-
-            if self.get_pending_position_id(
-                account_name,
-                ticket,
-            ):
-                continue
-
-            if self.get_market_position_id(
-                account_name,
-                ticket,
-            ):
-                continue
-
-            if self.get_order_id(
-                account_name,
-                ticket,
-            ):
-                continue
-
-            payload = self.mt5_payloads[account_name].get(ticket) or {}
-
-            source_origin = self._source_payload_origin(payload)
-
-            if source_origin == "market":
-                self._request_market_recovery_if_source_exists(
-                    account_name,
-                    ticket,
-                )
-
         return order_count
 
     @staticmethod
-    def _source_payload_origin(payload) -> Optional[str]:
+    def _source_payload_origin(
+        payload,
+    ) -> Optional[str]:
         """
         Determine whether a stored MT5 payload represents a pending or market
         source trade.
@@ -2243,7 +2907,10 @@ class AccountManager:
         fields are interpreted as pending. Unknown payload formats return None
         instead of guessing.
         """
-        if not isinstance(payload, dict):
+        if not isinstance(
+            payload,
+            dict,
+        ):
             return None
 
         candidates = (
@@ -2256,7 +2923,9 @@ class AccountManager:
         )
 
         for value in candidates:
-            text = str(value or "").strip().lower()
+            text = str(
+                value or ""
+            ).strip().lower()
 
             if not text:
                 continue
@@ -2283,7 +2952,9 @@ class AccountManager:
 
         # Explicit market indicators.
         for value in candidates:
-            text = str(value or "").strip().lower()
+            text = str(
+                value or ""
+            ).strip().lower()
 
             if text in (
                 "market",
@@ -2294,6 +2965,235 @@ class AccountManager:
                 return "market"
 
         return None
+
+    def _destination_exists_for_ticket(
+        self,
+        account_name: str,
+        ticket: int,
+    ) -> bool:
+        """
+        Return whether any currently mapped cTrader destination exists for
+        this source ticket.
+
+        This is only used after a confirmed reconcile snapshot has rebuilt
+        all mappings.
+        """
+        ticket = int(ticket)
+
+        if self.get_pending_position_id(
+            account_name,
+            ticket,
+        ):
+            return True
+
+        if self.get_market_position_id(
+            account_name,
+            ticket,
+        ):
+            return True
+
+        if self.get_order_id(
+            account_name,
+            ticket,
+        ):
+            return True
+
+        if self.get_market_order_id(
+            account_name,
+            ticket,
+        ):
+            return True
+
+        return False
+
+    def _detect_confirmed_destination_losses(
+        self,
+        account_name: str,
+    ):
+        """
+        Final recovery detector.
+
+        This runs ONLY after both the complete position snapshot and complete
+        order snapshot have been processed.
+
+        That ordering is important. It prevents a position that is present in
+        the reconcile response from being incorrectly marked as lost while
+        orders are still being processed.
+
+        The source origin is taken from source_origins first, then from an
+        unambiguous MT5 payload if necessary.
+
+        Recovery is requested only when:
+
+            1. reconciliation is confirmed
+            2. MT5 source payload still exists
+            3. source is not explicitly cancelled
+            4. no cTrader position exists
+            5. no cTrader pending/market order exists
+
+        No actual order is submitted here.
+        """
+        self._ensure_account_maps(
+            account_name,
+        )
+
+        if not self.reconcile_confirmed.get(
+            account_name,
+            False,
+        ):
+            logger.info(
+                "[%s] Confirmed destination-loss detection skipped: "
+                "reconciliation is not confirmed",
+                account_name,
+            )
+            return
+
+        source_tickets = set(
+            self.source_origins.get(
+                account_name,
+                {},
+            ).keys()
+        )
+
+        # Include payload tickets as a fallback for tickets whose origin was
+        # not explicitly established before this reconciliation.
+        source_tickets.update(
+            self.mt5_payloads.get(
+                account_name,
+                {},
+            ).keys()
+        )
+
+        # Also include any destination mappings that may still carry source
+        # origin information.
+        source_tickets.update(
+            self.order_maps.get(
+                account_name,
+                {},
+            ).keys()
+        )
+
+        source_tickets.update(
+            self.market_order_maps.get(
+                account_name,
+                {},
+            ).keys()
+        )
+
+        source_tickets.update(
+            self.pending_position_maps.get(
+                account_name,
+                {},
+            ).keys()
+        )
+
+        source_tickets.update(
+            self.market_position_maps.get(
+                account_name,
+                {},
+            ).keys()
+        )
+
+        for ticket in source_tickets:
+            ticket = int(ticket)
+
+            origin = self._resolve_source_origin(
+                account_name,
+                ticket,
+            )
+
+            if origin not in (
+                "pending",
+                "market",
+            ):
+                logger.debug(
+                    "[%s] Confirmed reconcile: unable to determine source "
+                    "origin for ticket=%s; no recovery requested",
+                    account_name,
+                    ticket,
+                )
+                continue
+
+            # The source payload is our current indication that MT5 still has
+            # this source trade. The MT5/source event handler is responsible
+            # for removing it when the source is closed/cancelled.
+            if not self._source_still_exists(
+                account_name,
+                ticket,
+            ):
+                continue
+
+            # Explicit source cancellation always wins over recovery.
+            pending_state = self.get_pending_state(
+                account_name,
+                ticket,
+            )
+
+            if pending_state in (
+                "CANCELLED",
+                "CANCEL_REQUESTED",
+            ):
+                self.clear_recovery_action(
+                    account_name,
+                    ticket,
+                )
+
+                continue
+
+            if self._destination_exists_for_ticket(
+                account_name,
+                ticket,
+            ):
+                # Destination is present. Any previous recovery request is
+                # stale and must be cleared.
+                self.clear_recovery_action(
+                    account_name,
+                    ticket,
+                )
+
+                continue
+
+            # ----------------------------------------------------------
+            # CONFIRMED DESTINATION LOSS
+            # ----------------------------------------------------------
+
+            if origin == "pending":
+                logger.warning(
+                    "[%s] CONFIRMED destination loss | "
+                    "ticket=%s origin=pending | "
+                    "MT5 source still exists | "
+                    "requesting pending recreation",
+                    account_name,
+                    ticket,
+                )
+
+                self.set_pending_state(
+                    account_name,
+                    ticket,
+                    "UNKNOWN",
+                )
+
+                self._set_recovery_action(
+                    account_name,
+                    ticket,
+                    RECOVERY_RECREATE_PENDING,
+                )
+
+            elif origin == "market":
+                logger.warning(
+                    "[%s] CONFIRMED destination loss | "
+                    "ticket=%s origin=market | "
+                    "MT5 source still exists | "
+                    "requesting market-or-pending recovery",
+                    account_name,
+                    ticket,
+                )
+
+                self._set_recovery_action(
+                    account_name,
+                    ticket,
+                    RECOVERY_RECREATE_MARKET_OR_PENDING,
+                )
 
     def _process_reconcile(
         self,
@@ -2327,10 +3227,40 @@ class AccountManager:
                 event="reconcile_parse_orders",
                 message="Failed parsing reconcile orders",
                 exc=error,
-                **self._notify_ctx(account_name),
+                **self._notify_ctx(
+                    account_name,
+                ),
             )
 
             order_count = 0
+
+        # IMPORTANT:
+        #
+        # Run the final destination-loss detector only AFTER both the complete
+        # position and order snapshots have been processed.
+        #
+        # This prevents ordering between the two protobuf lists from causing
+        # a false recovery request.
+        try:
+            self._detect_confirmed_destination_losses(
+                account_name,
+            )
+
+        except Exception as error:
+            logger.debug(
+                "[%s] Failed detecting confirmed destination losses",
+                account_name,
+                exc_info=True,
+            )
+
+            notify_error(
+                event="reconcile_destination_loss_detection",
+                message="Failed detecting confirmed destination losses",
+                exc=error,
+                **self._notify_ctx(
+                    account_name,
+                ),
+            )
 
         logger.info(
             "[%s] Reconcile complete: %s MT5 positions "
@@ -2339,7 +3269,9 @@ class AccountManager:
             account_name,
             position_count,
             len(
-                self.position_volumes[account_name]
+                self.position_volumes[
+                    account_name
+                ]
             ),
             order_count,
             len(
@@ -2355,16 +3287,25 @@ class AccountManager:
         account_name: str,
         message,
     ):
-        self._ensure_account_maps(account_name)
+        self._ensure_account_maps(
+            account_name,
+        )
 
-        extracted = Protobuf.extract(message)
+        extracted = Protobuf.extract(
+            message,
+        )
 
-        if isinstance(extracted, ProtoOAAccountAuthRes):
+        if isinstance(
+            extracted,
+            ProtoOAAccountAuthRes,
+        ):
             if not self.auth_seen.get(
                 account_name,
                 False,
             ):
-                self.auth_seen[account_name] = True
+                self.auth_seen[
+                    account_name
+                ] = True
 
                 logger.info(
                     "✓ Account %s connected and authenticated",
@@ -2374,7 +3315,9 @@ class AccountManager:
                 notify_info(
                     event="account_authenticated",
                     message="cTrader account authenticated",
-                    **self._notify_ctx(account_name),
+                    **self._notify_ctx(
+                        account_name,
+                    ),
                 )
 
             self._send_reconcile_request(
@@ -2383,7 +3326,10 @@ class AccountManager:
 
             return
 
-        if isinstance(extracted, ProtoOAExecutionEvent):
+        if isinstance(
+            extracted,
+            ProtoOAExecutionEvent,
+        ):
             logger.info(
                 "[%s] RAW EXECUTION: %s",
                 account_name,
@@ -2402,14 +3348,21 @@ class AccountManager:
 
             return
 
-        if isinstance(extracted, ProtoOAReconcileRes):
-            self.reconcile_requested[account_name] = False
+        if isinstance(
+            extracted,
+            ProtoOAReconcileRes,
+        ):
+            self.reconcile_requested[
+                account_name
+            ] = False
 
             # This is the critical distinction:
             #
             # ProtoOAReconcileRes means the snapshot is complete. An empty
             # position/order list therefore means confirmed absence.
-            self.reconcile_confirmed[account_name] = True
+            self.reconcile_confirmed[
+                account_name
+            ] = True
 
             self._process_reconcile(
                 account_name,
@@ -2418,26 +3371,40 @@ class AccountManager:
 
             return
 
-        if not hasattr(extracted, "position"):
+        if not hasattr(
+            extracted,
+            "position",
+        ):
             return
 
         position = extracted.position
 
         position_id = self._to_int(
-            getattr(position, "positionId", 0),
+            getattr(
+                position,
+                "positionId",
+                0,
+            ),
             default=0,
         )
 
         if position_id <= 0:
             return
 
-        label = self._extract_position_label(position)
-        ticket = self._label_to_ticket(label)
+        label = self._extract_position_label(
+            position,
+        )
+
+        ticket = self._label_to_ticket(
+            label,
+        )
 
         if ticket is None:
             return
 
-        volume = self._extract_position_volume(position)
+        volume = self._extract_position_volume(
+            position,
+        )
 
         if volume <= 0:
             logger.info(
@@ -2449,7 +3416,15 @@ class AccountManager:
             )
             return
 
-        origin = self._position_origin_from_label(label)
+        origin = self._position_origin_from_label(
+            label,
+        )
+
+        if origin is None:
+            origin = self.get_source_origin(
+                account_name,
+                int(ticket),
+            )
 
         if origin is None:
             return
@@ -2479,11 +3454,18 @@ class AccountManager:
         self,
         account_name: str,
     ):
-        client = self.get_client(account_name)
-        config = self.get_config(account_name)
+        client = self.get_client(
+            account_name,
+        )
+
+        config = self.get_config(
+            account_name,
+        )
 
         if not client or not config:
-            message = "Cannot send reconcile: missing client/config"
+            message = (
+                "Cannot send reconcile: missing client/config"
+            )
 
             logger.warning(
                 "[%s] %s",
@@ -2494,15 +3476,21 @@ class AccountManager:
             notify_warning(
                 event="reconcile_missing_context",
                 message=message,
-                **self._notify_ctx(account_name),
+                **self._notify_ctx(
+                    account_name,
+                ),
             )
 
             return
 
-        account_id = self._config_account_id(config)
+        account_id = self._config_account_id(
+            config,
+        )
 
         if not account_id:
-            message = "Cannot send reconcile: missing account_id"
+            message = (
+                "Cannot send reconcile: missing account_id"
+            )
 
             logger.warning(
                 "[%s] %s",
@@ -2513,7 +3501,9 @@ class AccountManager:
             notify_warning(
                 event="reconcile_missing_account_id",
                 message=message,
-                **self._notify_ctx(account_name),
+                **self._notify_ctx(
+                    account_name,
+                ),
             )
 
             return
@@ -2530,7 +3520,10 @@ class AccountManager:
 
         try:
             request = ProtoOAReconcileReq()
-            request.ctidTraderAccountId = int(account_id)
+
+            request.ctidTraderAccountId = int(
+                account_id,
+            )
 
             logger.info(
                 "[%s] Sending reconcile request...",
@@ -2538,24 +3531,36 @@ class AccountManager:
             )
 
             # Until the new snapshot arrives, cTrader state is UNKNOWN.
-            self.reconcile_confirmed[account_name] = False
+            self.reconcile_confirmed[
+                account_name
+            ] = False
 
-            deferred = client.send(request)
+            deferred = client.send(
+                request,
+            )
 
-            self.reconcile_requested[account_name] = True
+            self.reconcile_requested[
+                account_name
+            ] = True
 
             def _on_reconcile(result):
                 try:
-                    response = Protobuf.extract(result)
+                    response = Protobuf.extract(
+                        result,
+                    )
 
                     if isinstance(
                         response,
                         ProtoOAReconcileRes,
                     ):
-                        self.reconcile_requested[account_name] = False
+                        self.reconcile_requested[
+                            account_name
+                        ] = False
 
                         # Only now is absence considered confirmed.
-                        self.reconcile_confirmed[account_name] = True
+                        self.reconcile_confirmed[
+                            account_name
+                        ] = True
 
                         self._process_reconcile(
                             account_name,
@@ -2569,7 +3574,9 @@ class AccountManager:
                         )
 
                     else:
-                        self.reconcile_confirmed[account_name] = False
+                        self.reconcile_confirmed[
+                            account_name
+                        ] = False
 
                         logger.info(
                             "[%s] Reconcile callback received message type %s; "
@@ -2579,8 +3586,13 @@ class AccountManager:
                         )
 
                 except Exception as error:
-                    self.reconcile_requested[account_name] = False
-                    self.reconcile_confirmed[account_name] = False
+                    self.reconcile_requested[
+                        account_name
+                    ] = False
+
+                    self.reconcile_confirmed[
+                        account_name
+                    ] = False
 
                     logger.warning(
                         "[%s] Failed to process reconcile response: %s",
@@ -2592,24 +3604,39 @@ class AccountManager:
                         event="reconcile_callback_parse",
                         message="Failed to process reconcile response",
                         exc=error,
-                        **self._notify_ctx(account_name),
+                        **self._notify_ctx(
+                            account_name,
+                        ),
                     )
 
                 return result
 
-            def _on_reconcile_error(failure):
-                self.reconcile_requested[account_name] = False
-                self.reconcile_confirmed[account_name] = False
+            def _on_reconcile_error(
+                failure,
+            ):
+                self.reconcile_requested[
+                    account_name
+                ] = False
+
+                self.reconcile_confirmed[
+                    account_name
+                ] = False
 
                 notify_error(
                     event="reconcile_request_errback",
                     message="Reconcile request errback triggered",
-                    exc=Exception(str(failure)),
-                    **self._notify_ctx(account_name),
+                    exc=Exception(
+                        str(failure),
+                    ),
+                    **self._notify_ctx(
+                        account_name,
+                    ),
                 )
 
                 try:
-                    client._on_error(failure)
+                    client._on_error(
+                        failure,
+                    )
                 except Exception:
                     logger.debug(
                         "[%s] Failed forwarding reconcile error to client",
@@ -2628,14 +3655,21 @@ class AccountManager:
             )
 
         except Exception as error:
-            self.reconcile_requested[account_name] = False
-            self.reconcile_confirmed[account_name] = False
+            self.reconcile_requested[
+                account_name
+            ] = False
+
+            self.reconcile_confirmed[
+                account_name
+            ] = False
 
             notify_error(
                 event="send_reconcile_request",
                 message="Failed to send reconcile request",
                 exc=error,
-                **self._notify_ctx(account_name),
+                **self._notify_ctx(
+                    account_name,
+                ),
             )
 
     def add_account(
@@ -2664,7 +3698,9 @@ class AccountManager:
             notify_warning(
                 event="account_reinitialized",
                 message=message,
-                **self._notify_ctx(account.name),
+                **self._notify_ctx(
+                    account.name,
+                ),
             )
 
             self._unregister_route_magic(
@@ -2689,11 +3725,19 @@ class AccountManager:
             "state_file=%s env=%s account_id=%s",
             account.name,
             self._token_preview(
-                getattr(account, "access_token", ""),
+                getattr(
+                    account,
+                    "access_token",
+                    "",
+                ),
             ),
             bool(
                 self._safe_str(
-                    getattr(account, "refresh_token", ""),
+                    getattr(
+                        account,
+                        "refresh_token",
+                        "",
+                    ),
                 )
             ),
             shared_state_file
@@ -2724,8 +3768,13 @@ class AccountManager:
             account_name=account.name,
         )
 
-        self.clients[account.name] = client
-        self.configs[account.name] = account
+        self.clients[
+            account.name
+        ] = client
+
+        self.configs[
+            account.name
+        ] = account
 
         self._ensure_account_maps(
             account.name,
@@ -2750,7 +3799,9 @@ class AccountManager:
                     event="account_message_callback",
                     message="Failed to parse/process account message",
                     exc=error,
-                    **self._notify_ctx(account_name),
+                    **self._notify_ctx(
+                        account_name,
+                    ),
                 )
 
         client.set_message_callback(
@@ -2762,9 +3813,17 @@ class AccountManager:
                 account.name,
             )
 
-            self.reconcile_requested[account.name] = False
-            self.auth_seen[account.name] = False
-            self.reconcile_confirmed[account.name] = False
+            self.reconcile_requested[
+                account.name
+            ] = False
+
+            self.auth_seen[
+                account.name
+            ] = False
+
+            self.reconcile_confirmed[
+                account.name
+            ] = False
 
             logger.info(
                 "✓ Account %s socket connected; waiting for "
@@ -2834,7 +3893,9 @@ class AccountManager:
         mt5_ticket: int,
     ) -> Optional[int]:
         position_map = (
-            self.position_maps.get(account_name)
+            self.position_maps.get(
+                account_name,
+            )
             or {}
         )
 
@@ -2848,7 +3909,9 @@ class AccountManager:
         mt5_ticket: int,
     ) -> Optional[int]:
         order_map = (
-            self.order_maps.get(account_name)
+            self.order_maps.get(
+                account_name,
+            )
             or {}
         )
 
@@ -2862,7 +3925,9 @@ class AccountManager:
         position_id: int,
     ) -> Optional[int]:
         volume_map = (
-            self.position_volumes.get(account_name)
+            self.position_volumes.get(
+                account_name,
+            )
             or {}
         )
 
@@ -2896,6 +3961,7 @@ class AccountManager:
             return self.route_magic_map.get(
                 int(magic),
             )
+
         except Exception:
             return None
 
@@ -2916,8 +3982,12 @@ class AccountManager:
 
         return (
             account_name,
-            self.get_client(account_name),
-            self.get_config(account_name),
+            self.get_client(
+                account_name,
+            ),
+            self.get_config(
+                account_name,
+            ),
         )
 
     def store_mt5_payload(
@@ -2931,11 +4001,40 @@ class AccountManager:
                 account_name,
             )
 
-            self.mt5_payloads[account_name][
-                int(mt5_ticket)
-            ] = dict(
+            ticket = int(
+                mt5_ticket,
+            )
+
+            stored_payload = dict(
                 payload or {},
             )
+
+            self.mt5_payloads[
+                account_name
+            ][ticket] = stored_payload
+
+            # Establish source origin from the MT5 payload only when the
+            # payload contains an unambiguous explicit type.
+            #
+            # Never overwrite an already-established origin with an
+            # ambiguous payload.
+            if self.get_source_origin(
+                account_name,
+                ticket,
+            ) is None:
+                origin = self._source_payload_origin(
+                    stored_payload,
+                )
+
+                if origin in (
+                    "pending",
+                    "market",
+                ):
+                    self._set_source_origin(
+                        account_name,
+                        ticket,
+                        origin,
+                    )
 
         except Exception:
             logger.debug(
@@ -2971,9 +4070,16 @@ class AccountManager:
         account_name: str,
         mt5_ticket: int,
     ):
-        """Remove all bridge state for a fully closed/cancelled MT5 ticket."""
+        """
+        Remove all bridge state for a fully closed/cancelled MT5 ticket.
+
+        Source origin is also removed here because the MT5 source lifecycle
+        has ended. A later ticket reuse must establish its own origin.
+        """
         try:
-            ticket = int(mt5_ticket)
+            ticket = int(
+                mt5_ticket,
+            )
 
             self._remove_order_mapping(
                 account_name,
@@ -3011,6 +4117,14 @@ class AccountManager:
             )
 
             self.pending_states.get(
+                account_name,
+                {},
+            ).pop(
+                ticket,
+                None,
+            )
+
+            self.source_origins.get(
                 account_name,
                 {},
             ).pop(
